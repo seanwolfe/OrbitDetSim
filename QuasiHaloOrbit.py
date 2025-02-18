@@ -150,10 +150,12 @@ def eclip_to_sun_earth_corotating_batch(positions_eclip, et_times):
 
 # lph_orbit_txt_csv()
 
-# lpf_orbit = pd.read_csv('LPF_orbit.csv', sep=',', header=0,
-#                        names=["Time", "GEO_EME_X_(km)", "GEO_EME_Y_(km)", "GEO_EME_Z_(km)", "GEO_EME_Vx_(km/s)",
-#                               "GEO_EME_Vy_(km/s)",
-#                               "GEO_EME_Vz_(km/s)"])
+lpf_orbit = pd.read_csv('LPF_orbit_2.csv', sep=',', header=0,
+                        names=["Time", "GEO_EME_X_(km)", "GEO_EME_Y_(km)", "GEO_EME_Z_(km)", "GEO_EME_Vx_(km/s)",
+                               "GEO_EME_Vy_(km/s)", "GEO_EME_Vz_(km/s)", "GEO_ECLIP_X_(km)", "GEO_ECLIP_Y_(km)",
+                               "GEO_ECLIP_Z_(km)", "SUN_EARTH_CO_X_(km)", "SUN_EARTH_CO_Y_(km)", "SUN_EARTH_CO_Z_(km)",
+                               "MOON_SUN_EARTH_CO_X_(km)", "MOON_SUN_EARTH_CO_Y_(km)", "MOON_SUN_EARTH_CO_Z_(km)"
+                               ])
 
 # eme_pos = lpf_orbit[["GEO_EME_X_(km)", "GEO_EME_Y_(km)", "GEO_EME_Z_(km)"]]
 # eclip_pos = eme_to_ecliptic_batch(eme_pos)
@@ -164,45 +166,68 @@ def eclip_to_sun_earth_corotating_batch(positions_eclip, et_times):
 # Get Earth's position for each time in ECLIPJ2000
 # moon_pos = np.array([sp.spkpos("MOON", et, "ECLIPJ2000", "NONE", "EARTH")[0] for et in et_times])
 
-# obj_sun_earth_co = eclip_to_sun_earth_corotating_batch(eclip_pos, et_times)
+# moon_sun_earth_co = eclip_to_sun_earth_corotating_batch(moon_pos[:, :3], et_times)
 
+# lpf_orbit[['GEO_ECLIP_X_(km)', 'GEO_ECLIP_Y_(km)', 'GEO_ECLIP_Z_(km)']] = moon_pos
+# lpf_orbit[["MOON_SUN_EARTH_CO_X_(km)", "MOON_SUN_EARTH_CO_Y_(km)", "MOON_SUN_EARTH_CO_Z_(km)"]] = moon_sun_earth_co
+# lpf_orbit.to_csv("LPF_orbit_2.csv", sep=',', header=True, index=False)
 
-# lpf_orbit[["GEO_ECLIP_X_(km)", "GEO_ECLIP_Y_(km)", "GEO_ECLIP_Z_(km)"]] = eclip_pos
-# lpf_orbit[['SUN_EARTH_CO_X_(km)', 'SUN_EARTH_CO_Y_(km)', 'SUN_EARTH_CO_Z_(km)']] = obj_sun_earth_co
-# lpf_orbit.to_csv("LPF_orbit_1.csv", sep=',', header=True, index=False)
+kmtoau = 6.68459e-9
+start = 140000
+end = 247500
+end_final = 350500
+
+fig = plt.figure()
+ax = fig.add_subplot(projection='3d')
+ax.plot(lpf_orbit["SUN_EARTH_CO_X_(km)"] * kmtoau, lpf_orbit["SUN_EARTH_CO_Y_(km)"] * kmtoau,
+        lpf_orbit["SUN_EARTH_CO_Z_(km)"] * kmtoau, label='LISA Pathfinder')
+ax.plot(lpf_orbit["MOON_SUN_EARTH_CO_X_(km)"] * kmtoau, lpf_orbit["MOON_SUN_EARTH_CO_Y_(km)"] * kmtoau,
+        lpf_orbit["MOON_SUN_EARTH_CO_Z_(km)"] * kmtoau, label='Moon')
+ax.scatter(0.009, 0, 0, label='L_1', s=20)
+ax.scatter(lpf_orbit["SUN_EARTH_CO_X_(km)"].iloc[start] * kmtoau, lpf_orbit["SUN_EARTH_CO_Y_(km)"].iloc[start] * kmtoau,
+           lpf_orbit["SUN_EARTH_CO_Z_(km)"].iloc[start] * kmtoau, s=20)
+ax.scatter(lpf_orbit["SUN_EARTH_CO_X_(km)"].iloc[end_final] * kmtoau, lpf_orbit["SUN_EARTH_CO_Y_(km)"].iloc[end_final] * kmtoau,
+           lpf_orbit["SUN_EARTH_CO_Z_(km)"].iloc[end_final] * kmtoau, s=20)
+# ax.plot(lpf_orbit["SUN_EARTH_CO_X_(km)"].iloc[start:end] * kmtoau, lpf_orbit["SUN_EARTH_CO_Y_(km)"].iloc[start:end] * kmtoau,
+#            lpf_orbit["SUN_EARTH_CO_Z_(km)"].iloc[start:end] * kmtoau)
+
+# Create a sphere (Earth model)
+theta = np.linspace(0, np.pi, 30)  # Latitude
+phi = np.linspace(0, 2 * np.pi, 60)  # Longitude
+theta, phi = np.meshgrid(theta, phi)
+
+# Earth radius (approx. in arbitrary units)
+R = 6378  # Normalize radius
+
+# Convert spherical to Cartesian coordinates
+x = R * np.sin(theta) * np.cos(phi)
+y = R * np.sin(theta) * np.sin(phi)
+z = R * np.cos(theta)
+
+# Plot wireframe Earth
+ax.plot_wireframe(x * kmtoau, y * kmtoau, z * kmtoau, color="blue", linewidth=0.5, alpha=0.7)
+
+ax.set_xlabel('X (au)')
+ax.set_ylabel('Y (au)')
+ax.set_zlabel('Z (au)')
+ax.xaxis.set_major_locator(MaxNLocator(nbins=4))  # Adjust nbins for number of ticks
+ax.yaxis.set_major_locator(MaxNLocator(nbins=4))  # Adjust nbins for number of ticks
+ax.zaxis.set_major_locator(MaxNLocator(nbins=4))  # Adjust nbins for number of ticks
+ax.legend()
 
 # fig = plt.figure()
 # ax = fig.add_subplot(projection='3d')
 # ax.plot(lpf_orbit['GEO_EME_X_(km)'], lpf_orbit['GEO_EME_Y_(km)'], lpf_orbit['GEO_EME_Z_(km)'])
-
+#
 # fig = plt.figure()
 # ax = fig.add_subplot(projection='3d')
 # ax.plot(eclip_pos[:, 0], eclip_pos[:, 1], eclip_pos[:, 2])
 # ax.plot(moon_pos[:, 0], moon_pos[:, 1], moon_pos[:, 2])
-
+#
 # fig = plt.figure()
 # ax = fig.add_subplot(projection='3d')
 # ax.plot(obj_sun_earth_co[:, 0], obj_sun_earth_co[:, 1], obj_sun_earth_co[:, 2])
 
-# plt.show()
+# ax.plot(lpf_orbit_1["SUN_EARTH_CO_X_(km)"] * kmtoau, lpf_orbit_1["SUN_EARTH_CO_Y_(km)"] * kmtoau, lpf_orbit_1["SUN_EARTH_CO_Z_(km)"] * kmtoau)
 
-lpf_orbit_1 = pd.read_csv('LPF_orbit_1.csv', sep=',', header=0,
-                          names=["Time", "GEO_EME_X_(km)", "GEO_EME_Y_(km)", "GEO_EME_Z_(km)", "GEO_EME_Vx_(km/s)",
-                                 "GEO_EME_Vy_(km/s)", "GEO_EME_Vz_(km/s)", "GEO_ECLIP_X_(km)", "GEO_ECLIP_Y_(km)",
-                                 "GEO_ECLIP_Z_(km)", "SUN_EARTH_CO_X_(km)", "SUN_EARTH_CO_Y_(km)", "SUN_EARTH_CO_Z_(km)"
-                                 ])
-kmtoau = 6.68459e-9
-
-print(lpf_orbit_1['Time'].iloc[0])
-print(lpf_orbit_1['Time'].iloc[-1])
-
-fig = plt.figure()
-ax = fig.add_subplot(projection='3d')
-ax.plot(lpf_orbit_1["SUN_EARTH_CO_X_(km)"] * kmtoau, lpf_orbit_1["SUN_EARTH_CO_Y_(km)"] * kmtoau, lpf_orbit_1["SUN_EARTH_CO_Z_(km)"] * kmtoau)
-ax.set_xlabel('X (au)')
-ax.set_ylabel('Y (au)')
-ax.set_zlabel('Z (au)')
-ax.xaxis.set_major_locator(MaxNLocator(nbins=3))  # Adjust nbins for number of ticks
-ax.yaxis.set_major_locator(MaxNLocator(nbins=3))  # Adjust nbins for number of ticks
-ax.zaxis.set_major_locator(MaxNLocator(nbins=3))  # Adjust nbins for number of ticks
 plt.show()
