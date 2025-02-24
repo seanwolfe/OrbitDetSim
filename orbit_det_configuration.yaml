@@ -1,7 +1,3 @@
-
-
-
-
 ####################################################
 # Spacecraft Specifications
 ###################################################
@@ -17,12 +13,6 @@ telescope_diameter: 0.28  # m
 sigma_ra: 981  # right ascension measurement uncertainty - mas
 sigma_dec: 939  # declination measurement uncertainty - mas
 sigma_pointing: 7200  # pointing uncertainty - mas
-
-
-
-
-
-
 
 
 ##################################################
@@ -41,3 +31,25 @@ orbit_column_names: [
 quasi_halo_start: 140000  # index number where the quasi-halo orbit for Lisa pathfinder starts in the dataframe
 quasi_halo_one_period_end: 247500  # index number where one 'period' of the orbit has been reached
 quasi_halo_end: 350500 # 355000  # practically  # esthetically 350500  # index number where lisa pathfinder exits quasi-halo orbit
+
+
+
+#####################################################
+# Asteroid parameters
+#####################################################
+minimoon_files_folder: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb/'
+minimoon_column_names: [
+    "Object id", "Julian Date", "Distance", "Helio q", "Helio e", "Helio i",
+    "Helio Omega", "Helio omega", "Helio M", "Helio x", "Helio y", "Helio z",
+    "Helio vx", "Helio vy", "Helio vz", "Geo x", "Geo y", "Geo z", "Geo vx",
+    "Geo vy", "Geo vz", "Geo q", "Geo e", "Geo i", "Geo Omega", "Geo omega",
+    "Geo M", "Earth x (Helio)", "Earth y (Helio)", "Earth z (Helio)",
+    "Earth vx (Helio)", "Earth vy (Helio)", "Earth vz (Helio)", "Moon x (Helio)",
+    "Moon y (Helio)", "Moon z (Helio)", "Moon vx (Helio)", "Moon vy (Helio)",
+    "Moon vz (Helio)", "Synodic x", "Synodic y", "Synodic z", "Eclip Long"
+]
+
+
+#######################################################
+# Main simulation parameters
+######################################################

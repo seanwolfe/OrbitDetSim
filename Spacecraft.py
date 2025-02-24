@@ -31,6 +31,11 @@ class Spacecraft:
         self.velocity = velocity
         return
 
+
+    def get_attitude(self):
+        raise NotImplementedError
+
+
     def field_of_view(self, asteroid_distance):
         raise NotImplementedError
 

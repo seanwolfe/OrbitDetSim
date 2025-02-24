@@ -44,6 +44,9 @@ class Formation:
 
         return
 
+    def update_formation(self):
+        raise NotImplementedError
+
 
 #################
 # test to see if formation is in good spots
