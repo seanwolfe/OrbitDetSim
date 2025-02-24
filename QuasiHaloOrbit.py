@@ -188,8 +188,11 @@ ax.scatter(lpf_orbit["SUN_EARTH_CO_X_(km)"].iloc[start] * kmtoau, lpf_orbit["SUN
            lpf_orbit["SUN_EARTH_CO_Z_(km)"].iloc[start] * kmtoau, s=20)
 ax.scatter(lpf_orbit["SUN_EARTH_CO_X_(km)"].iloc[end_final] * kmtoau, lpf_orbit["SUN_EARTH_CO_Y_(km)"].iloc[end_final] * kmtoau,
            lpf_orbit["SUN_EARTH_CO_Z_(km)"].iloc[end_final] * kmtoau, s=20)
-# ax.plot(lpf_orbit["SUN_EARTH_CO_X_(km)"].iloc[start:end] * kmtoau, lpf_orbit["SUN_EARTH_CO_Y_(km)"].iloc[start:end] * kmtoau,
-#            lpf_orbit["SUN_EARTH_CO_Z_(km)"].iloc[start:end] * kmtoau)
+ax.plot(lpf_orbit["SUN_EARTH_CO_X_(km)"].iloc[start:end] * kmtoau, lpf_orbit["SUN_EARTH_CO_Y_(km)"].iloc[start:end] * kmtoau,
+           lpf_orbit["SUN_EARTH_CO_Z_(km)"].iloc[start:end] * kmtoau)
+ax.plot(lpf_orbit["SUN_EARTH_CO_X_(km)"].iloc[start:end_final] * kmtoau, lpf_orbit["SUN_EARTH_CO_Y_(km)"].iloc[start:end_final] * kmtoau,
+           lpf_orbit["SUN_EARTH_CO_Z_(km)"].iloc[start:end_final] * kmtoau)
+
 
 # Create a sphere (Earth model)
 theta = np.linspace(0, np.pi, 30)  # Latitude

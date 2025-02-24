@@ -1,0 +1,43 @@
+
+
+
+
+####################################################
+# Spacecraft Specifications
+###################################################
+
+pixel_scale: 1.27  # arcsec/pixel
+fov: 17.80  # degrees squared
+number_of_pixels: [11960, 11960]  # height x length
+reaction_wheel_torque: 0.0004  # Nm
+reaction_wheel_momentum: 0.015  # Nms
+mass: 50  # kg
+length: 0.5  # m
+telescope_diameter: 0.28  # m
+sigma_ra: 981  # right ascension measurement uncertainty - mas
+sigma_dec: 939  # declination measurement uncertainty - mas
+sigma_pointing: 7200  # pointing uncertainty - mas
+
+
+
+
+
+
+
+
+##################################################
+# Formation parameters
+#################################################
+
+num_spacecraft: 10
+orbit_file_path: 'LPF_orbit_2.csv'
+orbit_column_names: [
+    "Time", "GEO_EME_X_(km)", "GEO_EME_Y_(km)", "GEO_EME_Z_(km)",
+    "GEO_EME_Vx_(km/s)", "GEO_EME_Vy_(km/s)", "GEO_EME_Vz_(km/s)",
+    "GEO_ECLIP_X_(km)", "GEO_ECLIP_Y_(km)", "GEO_ECLIP_Z_(km)",
+    "SUN_EARTH_CO_X_(km)", "SUN_EARTH_CO_Y_(km)", "SUN_EARTH_CO_Z_(km)",
+    "MOON_SUN_EARTH_CO_X_(km)", "MOON_SUN_EARTH_CO_Y_(km)", "MOON_SUN_EARTH_CO_Z_(km)"
+]
+quasi_halo_start: 140000  # index number where the quasi-halo orbit for Lisa pathfinder starts in the dataframe
+quasi_halo_one_period_end: 247500  # index number where one 'period' of the orbit has been reached
+quasi_halo_end: 350500 # 355000  # practically  # esthetically 350500  # index number where lisa pathfinder exits quasi-halo orbit
