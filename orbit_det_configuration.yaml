@@ -4,7 +4,7 @@
 
 pixel_scale: 1.27  # arcsec/pixel
 fov: 17.80  # degrees squared
-number_of_pixels: [11960, 11960]  # height x length
+number_of_pixels: [ 11960, 11960 ]  # height x length
 reaction_wheel_torque: 0.0004  # Nm
 reaction_wheel_momentum: 0.015  # Nms
 mass: 50  # kg
@@ -19,14 +19,14 @@ sigma_pointing: 7200  # pointing uncertainty - mas
 # Formation parameters
 #################################################
 
-num_spacecraft: 10
+num_spacecraft: 4
 orbit_file_path: 'LPF_orbit_2.csv'
 orbit_column_names: [
-    "Time", "GEO_EME_X_(km)", "GEO_EME_Y_(km)", "GEO_EME_Z_(km)",
-    "GEO_EME_Vx_(km/s)", "GEO_EME_Vy_(km/s)", "GEO_EME_Vz_(km/s)",
-    "GEO_ECLIP_X_(km)", "GEO_ECLIP_Y_(km)", "GEO_ECLIP_Z_(km)",
-    "SUN_EARTH_CO_X_(km)", "SUN_EARTH_CO_Y_(km)", "SUN_EARTH_CO_Z_(km)",
-    "MOON_SUN_EARTH_CO_X_(km)", "MOON_SUN_EARTH_CO_Y_(km)", "MOON_SUN_EARTH_CO_Z_(km)"
+  "Time", "GEO_EME_X_(km)", "GEO_EME_Y_(km)", "GEO_EME_Z_(km)",
+  "GEO_EME_Vx_(km/s)", "GEO_EME_Vy_(km/s)", "GEO_EME_Vz_(km/s)",
+  "GEO_ECLIP_X_(km)", "GEO_ECLIP_Y_(km)", "GEO_ECLIP_Z_(km)",
+  "SUN_EARTH_CO_X_(km)", "SUN_EARTH_CO_Y_(km)", "SUN_EARTH_CO_Z_(km)",
+  "MOON_SUN_EARTH_CO_X_(km)", "MOON_SUN_EARTH_CO_Y_(km)", "MOON_SUN_EARTH_CO_Z_(km)"
 ]
 quasi_halo_start: 140000  # index number where the quasi-halo orbit for Lisa pathfinder starts in the dataframe
 quasi_halo_one_period_end: 247500  # index number where one 'period' of the orbit has been reached
@@ -38,18 +38,31 @@ quasi_halo_end: 350500 # 355000  # practically  # esthetically 350500  # index n
 # Asteroid parameters
 #####################################################
 minimoon_files_folder: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb/'
-minimoon_column_names: [
-    "Object id", "Julian Date", "Distance", "Helio q", "Helio e", "Helio i",
-    "Helio Omega", "Helio omega", "Helio M", "Helio x", "Helio y", "Helio z",
-    "Helio vx", "Helio vy", "Helio vz", "Geo x", "Geo y", "Geo z", "Geo vx",
-    "Geo vy", "Geo vz", "Geo q", "Geo e", "Geo i", "Geo Omega", "Geo omega",
-    "Geo M", "Earth x (Helio)", "Earth y (Helio)", "Earth z (Helio)",
-    "Earth vx (Helio)", "Earth vy (Helio)", "Earth vz (Helio)", "Moon x (Helio)",
-    "Moon y (Helio)", "Moon z (Helio)", "Moon vx (Helio)", "Moon vy (Helio)",
-    "Moon vz (Helio)", "Synodic x", "Synodic y", "Synodic z", "Eclip Long"
-]
+minimoon_column_names: [ "Object id", "Julian Date", "Distance", "Helio q", "Helio e", "Helio i", "Helio Omega",
+                         "Helio omega", "Helio M", "Helio x", "Helio y", "Helio z", "Helio vx", "Helio vy", "Helio vz",
+                         "Geo x", "Geo y", "Geo z", "Geo vx", "Geo vy", "Geo vz", "Geo q", "Geo e", "Geo i",
+                         "Geo Omega", "Geo omega", "Geo M", "Earth x (Helio)", "Earth y (Helio)", "Earth z (Helio)",
+                         "Earth vx (Helio)", "Earth vy (Helio)", "Earth vz (Helio)", "Moon x (Helio)",
+                         "Moon y (Helio)", "Moon z (Helio)", "Moon vx (Helio)", "Moon vy (Helio)", "Moon vz (Helio)",
+                         "Synodic x", "Synodic y", "Synodic z", "Eclip Long", "sun-ast-dist", "sunearthl1-ast-dist",
+                         "phase_angle", "apparent_magnitude" ]
 
 
 #######################################################
 # Main simulation parameters
 ######################################################
+minimoon_master_file_path: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb/minimoon_master_new.csv'
+
+
+
+
+
+
+
+
+####################################################
+# constants
+####################################################
+AU_TO_M: 149597870691  # 1 AU in meters
+EARTH_RADIUS_AU: 6371000
+MOON_RADIUS_AU: 1737000

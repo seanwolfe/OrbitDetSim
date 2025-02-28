@@ -7,10 +7,12 @@ from matplotlib.ticker import MaxNLocator
 
 class Formation:
     def __init__(self, configs):
-        self.orbit = pd.read_csv(configs['orbit_file_path'], sep=',', header=0, names=configs['orbit_column_names'])
+        prelim_orbit = pd.read_csv(configs['orbit_file_path'], sep=',', header=0, names=configs['orbit_column_names'])
+        self.orbit = prelim_orbit.iloc[configs['quasi_halo_start']:configs['quasi_halo_end']]
         self.num_spacecraft = configs['num_spacecraft']
         self.sim_steps = None  # this comes from the asteroid trajectory
         self.spacecraft = None
+        self.initial_formation(configs)
 
     def initial_formation(self, configs):
         ######
@@ -32,9 +34,9 @@ class Formation:
         ########
         # set the initial positions of the spacecraft
         ########
-        scs_ini_pos = [np.array([self.orbit['SUN_EARTH_CO_X_(km)'].iloc[configs['quasi_halo_start'] + sc_start],
-                                 self.orbit['SUN_EARTH_CO_Y_(km)'].iloc[configs['quasi_halo_start'] + sc_start],
-                                 self.orbit['SUN_EARTH_CO_Z_(km)'].iloc[configs['quasi_halo_start'] + sc_start]]) for
+        scs_ini_pos = [np.array([self.orbit['SUN_EARTH_CO_X_(km)'].iloc[sc_start],
+                                 self.orbit['SUN_EARTH_CO_Y_(km)'].iloc[sc_start],
+                                 self.orbit['SUN_EARTH_CO_Z_(km)'].iloc[sc_start]]) for
                        i, sc_start in enumerate(scs_start)]
 
         #######
@@ -43,6 +45,63 @@ class Formation:
         self.spacecraft = [Spacecraft(ini_pos, scs_start[i], configs) for i, ini_pos in enumerate(scs_ini_pos)]
 
         return
+
+    def match_spacecraft_trajectory(self, asteroid_length, configs):
+        """
+        Resamples and aligns each spacecraft trajectory to match the asteroid trajectory's
+        one-hour intervals and start time.
+
+        Parameters:
+            asteroid_times (pd.Series): Timestamps of the asteroid trajectory.
+            configs (dict): Configuration dictionary with conversion factors.
+
+        Returns:
+            None (modifies each spacecraft's matched_trajectory in place).
+        """
+
+        for i, spacecraft in enumerate(self.spacecraft):
+            # Convert spacecraft timestamps to pandas datetime format
+
+            self.orbit['Time'] = pd.to_datetime(self.orbit['Time'])
+            self.orbit = self.orbit.drop_duplicates(subset=['Time'])  # there are duplicates in the lisa pathfinder orbit file apparently
+
+            # Resample spacecraft data at hourly intervals (matching asteroid)
+            spacecraft_resampled = self.orbit.set_index('Time').resample('1H').nearest().reset_index()
+
+            # Keep only relevant position columns
+            spacecraft_pos = spacecraft_resampled.loc[:, ['SUN_EARTH_CO_X_(km)',
+                                                          'SUN_EARTH_CO_Y_(km)',
+                                                          'SUN_EARTH_CO_Z_(km)']].to_numpy()
+
+            sc_length = len(spacecraft_pos)
+            start_index = spacecraft.pos_index  # Initial position index
+
+            # Create the trajectory starting at the correct index
+            ordered_traj = np.vstack([spacecraft_pos[start_index:], spacecraft_pos[:start_index]])
+
+            print(len(self.orbit['Time']))
+            print(sc_length)
+            print(asteroid_length)
+
+            if sc_length >= asteroid_length:
+                # Trim if spacecraft trajectory is longer
+                adjusted_traj = ordered_traj[:asteroid_length]
+            else:
+                # Wrap around if spacecraft trajectory is shorter
+                repeats = asteroid_length // sc_length
+                remainder = asteroid_length % sc_length
+
+                adjusted_traj = np.vstack([
+                    np.tile(ordered_traj, (repeats, 1)),  # Full cycles
+                    ordered_traj[:remainder]  # Remaining part
+                ])
+
+            # Convert to AU
+
+            self.spacecraft[i].matched_trajectory = adjusted_traj / (configs['AU_TO_M'] / 1000)
+
+        return
+
 
     def update_formation(self):
         raise NotImplementedError
