@@ -45,7 +45,7 @@ minimoon_column_names: [ "Object id", "Julian Date", "Distance", "Helio q", "Hel
                          "Earth vx (Helio)", "Earth vy (Helio)", "Earth vz (Helio)", "Moon x (Helio)",
                          "Moon y (Helio)", "Moon z (Helio)", "Moon vx (Helio)", "Moon vy (Helio)", "Moon vz (Helio)",
                          "Synodic x", "Synodic y", "Synodic z", "Eclip Long", "sun-ast-dist", "sunearthl1-ast-dist",
-                         "phase_angle", "apparent_magnitude" ]
+                         "phase_angle", "apparent_magnitude", "Moon Synodic x", "Moon Synodic y", "Moon Synodic z" ]
 
 
 #######################################################

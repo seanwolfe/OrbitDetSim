@@ -15,54 +15,55 @@ from matplotlib.ticker import MaxNLocator
 def calc_start_index(minimoon, sc_formation, configs):
 
     # asteroid position
-    # asteroid_pos = minimoon.orbit.loc[:, ['Synodic x', 'Synodic y', 'Synodic z']].values
-    # earth_pos = np.zeros_like(asteroid_pos)
+    asteroid_pos = minimoon.orbit.loc[:, ['Synodic x', 'Synodic y', 'Synodic z']].values
+    earth_pos = np.zeros_like(asteroid_pos)
     print(minimoon.id)
-    moon_pos = eclip_to_sun_earth_corotating_batch(minimoon.orbit)
+    moon_pos = minimoon.orbit.loc[:, ['Moon Synodic x', 'Moon Synodic y', 'Moon Synodic z']].values
 
     # get spacecraft positions over trajectory
-    # sc_formation.match_spacecraft_trajectory(len(asteroid_pos[:, 0]), configs)
+    sc_formation.match_spacecraft_trajectory(len(asteroid_pos[:, 0]), configs)
 
     # start index is first instance asteroid is FOV of a sc, without occlusion from Earth or moon
     # it is the index in the minimoon trajectory corresponding to this
-    # for i, spacecraft in enumerate(sc_formation.spacecraft):
-    #
-    #     sc_pos = spacecraft.matched_trajectory
+    for i, spacecraft in enumerate(sc_formation.spacecraft):
+
+        sc_pos = spacecraft.matched_trajectory
 
         #####
         # test to see if all trajectories look fine - and they do
         ####
-        # fig = plt.figure()
-        # ax = fig.add_subplot(projection='3d')
-        # ax.plot(sc_pos[:, 0], sc_pos[:, 1], sc_pos[:, 2], label='SC')
-        # ax.scatter(sc_pos[0, 0], sc_pos[0, 1], sc_pos[0, 2], s=20)
-        # ax.plot(moon_pos[:, 0], moon_pos[:, 1], moon_pos[:, 2], label='Moon')
-        # ax.plot(asteroid_pos[:, 0], asteroid_pos[:, 1], asteroid_pos[:, 2], label='Asteroid')
-        # ax.scatter(0.009, 0, 0, label='L_1', s=20)
+        fig = plt.figure()
+        ax = fig.add_subplot(projection='3d')
+        ax.plot(sc_pos[:, 0], sc_pos[:, 1], sc_pos[:, 2], label='SC')
+        ax.scatter(sc_pos[0, 0], sc_pos[0, 1], sc_pos[0, 2], s=20)
+        ax.plot(moon_pos[:, 0], moon_pos[:, 1], moon_pos[:, 2], label='Moon')
+        ax.plot(asteroid_pos[:, 0], asteroid_pos[:, 1], asteroid_pos[:, 2], label='Asteroid')
+        ax.scatter(0.009, 0, 0, label='L_1', s=20)
         # Create a sphere (Earth model)
-        # theta = np.linspace(0, np.pi, 30)  # Latitude
-        # phi = np.linspace(0, 2 * np.pi, 60)  # Longitude
-        # theta, phi = np.meshgrid(theta, phi)
-
+        theta = np.linspace(0, np.pi, 30)  # Latitude
+        phi = np.linspace(0, 2 * np.pi, 60)  # Longitude
+        theta, phi = np.meshgrid(theta, phi)
+        #
         # Earth radius (approx. in arbitrary units)
-        # R = 6378  # Normalize radius
+        R = 6378  # Normalize radius
 
         # Convert spherical to Cartesian coordinates
-        # x = R * np.sin(theta) * np.cos(phi) / (configs['AU_TO_M'] / 1000)  # km
-        # y = R * np.sin(theta) * np.sin(phi) / (configs['AU_TO_M'] / 1000)
-        # z = R * np.cos(theta) / (configs['AU_TO_M'] / 1000)
+        x = R * np.sin(theta) * np.cos(phi) / (configs['AU_TO_M'] / 1000)  # km
+        y = R * np.sin(theta) * np.sin(phi) / (configs['AU_TO_M'] / 1000)
+        z = R * np.cos(theta) / (configs['AU_TO_M'] / 1000)
 
         # Plot wireframe Earth
-        # ax.plot_wireframe(x, y, z, color="blue", linewidth=0.5, alpha=0.7)
+        ax.plot_wireframe(x, y, z, color="blue", linewidth=0.5, alpha=0.7)
 
-        # ax.set_xlabel('X (au)')
-        # ax.set_ylabel('Y (au)')
-        # ax.set_zlabel('Z (au)')
-        # ax.xaxis.set_major_locator(MaxNLocator(nbins=4))  # Adjust nbins for number of ticks
-        # ax.yaxis.set_major_locator(MaxNLocator(nbins=4))  # Adjust nbins for number of ticks
-        # ax.zaxis.set_major_locator(MaxNLocator(nbins=4))  # Adjust nbins for number of ticks
-        # ax.legend()
-        # plt.show()
+        ax.set_xlabel('X (au)')
+        ax.set_ylabel('Y (au)')
+        ax.set_zlabel('Z (au)')
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=4))  # Adjust nbins for number of ticks
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=4))  # Adjust nbins for number of ticks
+        ax.zaxis.set_major_locator(MaxNLocator(nbins=4))  # Adjust nbins for number of ticks
+        ax.legend()
+        ax.set_aspect('equal')
+        plt.show()
 
 
         # find when the asteroid is in fov and not ocluded by earth or moon

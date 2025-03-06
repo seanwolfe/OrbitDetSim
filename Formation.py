@@ -79,10 +79,6 @@ class Formation:
             # Create the trajectory starting at the correct index
             ordered_traj = np.vstack([spacecraft_pos[start_index:], spacecraft_pos[:start_index]])
 
-            print(len(self.orbit['Time']))
-            print(sc_length)
-            print(asteroid_length)
-
             if sc_length >= asteroid_length:
                 # Trim if spacecraft trajectory is longer
                 adjusted_traj = ordered_traj[:asteroid_length]
