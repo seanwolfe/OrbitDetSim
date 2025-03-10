@@ -1,5 +1,7 @@
 import pandas as pd
 import numpy as np
+from mpi4py.futures.aplus import catch
+
 from Spacecraft import Spacecraft
 import matplotlib.pyplot as plt
 import yaml
@@ -31,18 +33,18 @@ class Formation:
         for i in range(1, self.num_spacecraft):
             scs_start.append(i * sc_start_range + scs_start[0])
 
-        ########
-        # set the initial positions of the spacecraft
-        ########
-        scs_ini_pos = [np.array([self.orbit['SUN_EARTH_CO_X_(km)'].iloc[sc_start],
-                                 self.orbit['SUN_EARTH_CO_Y_(km)'].iloc[sc_start],
-                                 self.orbit['SUN_EARTH_CO_Z_(km)'].iloc[sc_start]]) for
-                       i, sc_start in enumerate(scs_start)]
+            ########
+            # set the initial positions of the spacecraft
+            ########
+            scs_ini_pos = [np.array([self.orbit['SUN_EARTH_CO_X_(km)'].iloc[sc_start],
+                                     self.orbit['SUN_EARTH_CO_Y_(km)'].iloc[sc_start],
+                                     self.orbit['SUN_EARTH_CO_Z_(km)'].iloc[sc_start]]) for
+                           i, sc_start in enumerate(scs_start)]
 
-        #######
-        # declare the spacecraft and assign them to the formation
-        ########
-        self.spacecraft = [Spacecraft(ini_pos, scs_start[i], configs) for i, ini_pos in enumerate(scs_ini_pos)]
+            #######
+            # declare the spacecraft and assign them to the formation
+            ########
+            self.spacecraft = [Spacecraft(ini_pos, scs_start[i], configs) for i, ini_pos in enumerate(scs_ini_pos)]
 
         return
 
@@ -61,12 +63,28 @@ class Formation:
 
         for i, spacecraft in enumerate(self.spacecraft):
             # Convert spacecraft timestamps to pandas datetime format
+            start_index = spacecraft.pos_index  # Initial position index
 
             self.orbit['Time'] = pd.to_datetime(self.orbit['Time'])
             self.orbit = self.orbit.drop_duplicates(subset=['Time'])  # there are duplicates in the lisa pathfinder orbit file apparently
 
+            # Assuming self.orbit['Time'] is already in datetime format
+            original_timestamp = self.orbit.iloc[start_index]['Time']
+            print(original_timestamp)
+
             # Resample spacecraft data at hourly intervals (matching asteroid)
             spacecraft_resampled = self.orbit.set_index('Time').resample('1H').nearest().reset_index()
+
+            # Find the closest timestamp in the resampled data
+            try:
+                new_index = spacecraft_resampled[spacecraft_resampled['Time'] == original_timestamp].index[0]
+            except IndexError:
+                # If the exact timestamp is not found, use nearest method
+                # Get the nearest index based on the original timestamp
+                nearest_timestamp = spacecraft_resampled['Time'].iloc[
+                    (spacecraft_resampled['Time'] - original_timestamp).abs().argmin()]
+                new_index = spacecraft_resampled[spacecraft_resampled['Time'] == nearest_timestamp].index[0]
+
 
             # Keep only relevant position columns
             spacecraft_pos = spacecraft_resampled.loc[:, ['SUN_EARTH_CO_X_(km)',
@@ -74,10 +92,9 @@ class Formation:
                                                           'SUN_EARTH_CO_Z_(km)']].to_numpy()
 
             sc_length = len(spacecraft_pos)
-            start_index = spacecraft.pos_index  # Initial position index
 
             # Create the trajectory starting at the correct index
-            ordered_traj = np.vstack([spacecraft_pos[start_index:], spacecraft_pos[:start_index]])
+            ordered_traj = np.vstack([spacecraft_pos[new_index:], spacecraft_pos[:new_index]])
 
             if sc_length >= asteroid_length:
                 # Trim if spacecraft trajectory is longer
@@ -93,7 +110,6 @@ class Formation:
                 ])
 
             # Convert to AU
-
             self.spacecraft[i].matched_trajectory = adjusted_traj / (configs['AU_TO_M'] / 1000)
 
         return

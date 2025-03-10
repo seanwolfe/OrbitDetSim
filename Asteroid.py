@@ -22,3 +22,7 @@ class Asteroid:
         self.velocity = velocity
 
         return
+
+
+    def get_asteroid_pos(self, index):
+        return self.orbit.loc[index, ['Synodic x', 'Synodic y', 'Synodic z']].values

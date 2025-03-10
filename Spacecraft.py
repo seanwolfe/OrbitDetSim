@@ -8,7 +8,7 @@ class Spacecraft:
         self.position = ini_pos  # initial position of the spacecraft in the quasi-halo orbit
         self.pos_index = ini_pos_index  # initial position index in the quasi-halo orbit csv
         self.velocity = None
-        self.boresight = [-1, 0, 0]
+        self.boresight = np.array([-1, 0, 0])
         self.pixel_scale = configs['pixel_scale']
         self.fov = configs['fov']
         self.number_of_pixels = configs['number_of_pixels']
@@ -28,6 +28,10 @@ class Spacecraft:
         self.position = position
         self.velocity = velocity
         return
+
+
+    def get_spacecraft_pos(self, index):
+        return self.matched_trajectory[index, :]
 
 
     def get_attitude(self):
@@ -55,7 +59,7 @@ class Spacecraft:
         Determine when the asteroid is in the field of view, considering occlusion.
 
         Parameters:
-            asteroid_trajectory (dict): {'positions': Nx3 array in AU, 'epochs': Nx1 array}
+            asteroid_positions Nx3 array in AU
             spacecraft_position (Nx3 array in AU): Spacecraft position at each epoch.
             earth_position (Nx3 array in AU): Earth position at each epoch.
             moon_position (Nx3 array in AU): Moon position at each epoch.
@@ -64,7 +68,7 @@ class Spacecraft:
         Returns:
             in_fov (Nx1 array): Indices where the asteroid is visible, NaN if not visible.
         """
-        positions = asteroid_trajectory['positions']
+        positions = asteroid_trajectory
         fov_radians = np.radians(np.sqrt(self.fov))
 
         # Compute relative position vectors (N,3)

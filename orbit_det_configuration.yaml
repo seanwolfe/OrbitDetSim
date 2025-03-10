@@ -19,7 +19,7 @@ sigma_pointing: 7200  # pointing uncertainty - mas
 # Formation parameters
 #################################################
 
-num_spacecraft: 4
+num_spacecraft: 10
 orbit_file_path: 'LPF_orbit_2.csv'
 orbit_column_names: [
   "Time", "GEO_EME_X_(km)", "GEO_EME_Y_(km)", "GEO_EME_Z_(km)",
@@ -37,7 +37,8 @@ quasi_halo_end: 350500 # 355000  # practically  # esthetically 350500  # index n
 #####################################################
 # Asteroid parameters
 #####################################################
-minimoon_files_folder: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb/'
+# minimoon_files_folder: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb/'
+minimoon_files_folder: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb_testset/'
 minimoon_column_names: [ "Object id", "Julian Date", "Distance", "Helio q", "Helio e", "Helio i", "Helio Omega",
                          "Helio omega", "Helio M", "Helio x", "Helio y", "Helio z", "Helio vx", "Helio vy", "Helio vz",
                          "Geo x", "Geo y", "Geo z", "Geo vx", "Geo vy", "Geo vz", "Geo q", "Geo e", "Geo i",
@@ -51,10 +52,10 @@ minimoon_column_names: [ "Object id", "Julian Date", "Distance", "Helio q", "Hel
 #######################################################
 # Main simulation parameters
 ######################################################
-minimoon_master_file_path: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb/minimoon_master_new.csv'
-
-
-
+# minimoon_master_file_path: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb/minimoon_master_new.csv'
+minimoon_master_file_path: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb_testset/minimoon_master_new_testset.csv'
+number_of_runs: 2  # number of runs per minimoon (the formation is reinitiallized each time)
+number_of_process: 1  # number of processes to use when usen multiprocess for parallel implementation
 
 
 
