@@ -11,6 +11,9 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import ast
+import mpi4py.rc
+mpi4py.rc.threads = False
+from mpi4py import MPI
 
 
 # Define a converter function
@@ -267,10 +270,10 @@ def run_sim_runnumbers(run_number, minimoon_master, config):
             sc_pos = spacecraft.matched_trajectory
             # find when the asteroid is in fov and not ocluded by earth or moon
             visible = spacecraft.asteroid_in_fov_batch(asteroid_pos, sc_pos, earth_pos, moon_pos, config)
-            visibles.append([[run_number, current_minimoon.id, jdx], visible])
+            visibles.append([[run_number, current_minimoon.id, jdx + 1], visible])
 
 
-    return visibles
+    return visibles, formation.spacecraft
 
 @staticmethod
 def parse_master_new_new_new(file_path):
@@ -382,6 +385,36 @@ def parse_master_new_new_new(file_path):
         return master_data
 
 
+def run_sim_runnumbers_MPI(minimoon_master, config):
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    size = comm.Get_size()
+
+    # Determine chunk size
+    chunk_size = config['number_of_runs'] // size
+    remainder = config['number_of_runs'] % size
+
+    # Calculate start and end indices for this process
+    start = rank * chunk_size
+    end = start + chunk_size
+    if rank == size - 1:
+        end += remainder  # Last process takes any remaining elements
+
+    results = []
+    spacecraft = []
+    for idx in range(start, end):
+        result, scs = run_sim_runnumbers(idx + 1, minimoon_master, config)
+        results.append(result)
+        spacecraft.append(scs[0].ini_position)
+
+    # Gather all local centers_x and centers_y at root process (rank 0)
+    all_results = comm.gather(results, root=0)
+    all_scs = comm.gather(spacecraft, root=0)
+
+    if rank == 0:
+        return all_results, all_scs
+    else:
+        return
 
 
 ###########################
@@ -394,6 +427,36 @@ with open("orbit_det_configuration.yaml", "r") as file:
 
 # get the master file
 master = parse_master_new_new_new(config['minimoon_master_file_path'])
+
+
+###################################
+# Run parallel for number of runs using MPI
+####################################
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
+
+a_sc_res = run_sim_runnumbers_MPI(master, config)
+
+if rank == 0:
+    a_res = a_sc_res[0]
+    a_scs = a_sc_res[1]
+    flat_data = []
+    for idx, process in enumerate(a_res):
+        for jdx, run in enumerate(process):
+            for kdx, entry in enumerate(run):
+                index = tuple(entry[0])  # (run_number, object_id, spacecraft_number)
+                values = entry[1]  # List of values over time
+                flat_data.append((*index, values, a_scs[idx][jdx]))
+
+    # Convert to DataFrame
+    df = pd.DataFrame(flat_data, columns=["run_number", "object_id", "spacecraft_number", "values", "spacecraft_1_ini_pos"])
+
+    # Set MultiIndex
+    df.set_index(["run_number", "object_id", "spacecraft_number"], inplace=True)
+
+    df.to_csv(config['output_df_file_name'], sep=',', header=True, index=True)
+
 
 ##############################
 # Run parallel for number of runs using multiprocessor
@@ -418,13 +481,6 @@ master = parse_master_new_new_new(config['minimoon_master_file_path'])
 # df.set_index(["run_number", "object_id", "spacecraft_number"], inplace=True)
 
 
-# current = df.loc[(2, "NESC0000001a", 1)]
-# current2 = str_to_tuple(current['values'])
-# print(current2)
-# print(current2[~np.isnan(current2)])
-
-
-
 
 #######################################
 # iterate over minimoons in parallel for a single run using multiprocessor - partially implemented
@@ -433,9 +489,9 @@ master = parse_master_new_new_new(config['minimoon_master_file_path'])
 run_sim_minimoons_partial = partial(run_sim_minimoons, minimoon_master=master, config=config)
 
 # parallel implementation
-pool = multiprocessing.Pool(processes=1)
-results = pool.map(run_sim_minimoons_partial, master['Object id'])
-pool.close()
+# pool = multiprocessing.Pool(processes=1)
+# results = pool.map(run_sim_minimoons_partial, master['Object id'])
+# pool.close()
 
 
 

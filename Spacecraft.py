@@ -5,9 +5,10 @@ class Spacecraft:
 
 
     def __init__(self, ini_pos, ini_pos_index, configs):
-        self.position = ini_pos  # initial position of the spacecraft in the quasi-halo orbit
-        self.pos_index = ini_pos_index  # initial position index in the quasi-halo orbit csv
+        self.ini_position = ini_pos  # initial position of the spacecraft in the quasi-halo orbit
+        self.ini_pos_index = ini_pos_index  # initial position index in the quasi-halo orbit csv
         self.velocity = None
+        self.position = None
         self.boresight = np.array([-1, 0, 0])
         self.pixel_scale = configs['pixel_scale']
         self.fov = configs['fov']

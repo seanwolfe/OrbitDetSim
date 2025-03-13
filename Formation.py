@@ -33,18 +33,18 @@ class Formation:
         for i in range(1, self.num_spacecraft):
             scs_start.append(i * sc_start_range + scs_start[0])
 
-            ########
-            # set the initial positions of the spacecraft
-            ########
-            scs_ini_pos = [np.array([self.orbit['SUN_EARTH_CO_X_(km)'].iloc[sc_start],
-                                     self.orbit['SUN_EARTH_CO_Y_(km)'].iloc[sc_start],
-                                     self.orbit['SUN_EARTH_CO_Z_(km)'].iloc[sc_start]]) for
-                           i, sc_start in enumerate(scs_start)]
+        ########
+        # set the initial positions of the spacecraft
+        ########
+        scs_ini_pos = [np.array([self.orbit['SUN_EARTH_CO_X_(km)'].iloc[sc_start],
+                                 self.orbit['SUN_EARTH_CO_Y_(km)'].iloc[sc_start],
+                                 self.orbit['SUN_EARTH_CO_Z_(km)'].iloc[sc_start]]) for
+                       j, sc_start in enumerate(scs_start)]
 
-            #######
-            # declare the spacecraft and assign them to the formation
-            ########
-            self.spacecraft = [Spacecraft(ini_pos, scs_start[i], configs) for i, ini_pos in enumerate(scs_ini_pos)]
+        #######
+        # declare the spacecraft and assign them to the formation
+        ########
+        self.spacecraft = [Spacecraft(ini_pos, scs_start[k], configs) for k, ini_pos in enumerate(scs_ini_pos)]
 
         return
 
@@ -63,14 +63,13 @@ class Formation:
 
         for i, spacecraft in enumerate(self.spacecraft):
             # Convert spacecraft timestamps to pandas datetime format
-            start_index = spacecraft.pos_index  # Initial position index
+            start_index = spacecraft.ini_pos_index  # Initial position index
 
             self.orbit['Time'] = pd.to_datetime(self.orbit['Time'])
             self.orbit = self.orbit.drop_duplicates(subset=['Time'])  # there are duplicates in the lisa pathfinder orbit file apparently
 
             # Assuming self.orbit['Time'] is already in datetime format
             original_timestamp = self.orbit.iloc[start_index]['Time']
-            print(original_timestamp)
 
             # Resample spacecraft data at hourly intervals (matching asteroid)
             spacecraft_resampled = self.orbit.set_index('Time').resample('1H').nearest().reset_index()
