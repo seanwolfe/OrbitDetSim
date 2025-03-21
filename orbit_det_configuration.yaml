@@ -50,14 +50,21 @@ minimoon_column_names: [ "Object id", "Julian Date", "Distance", "Helio q", "Hel
 
 
 #######################################################
-# Main simulation parameters
+# Visible simulation parameters
 ######################################################
 # minimoon_master_file_path: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb/minimoon_master_new.csv'
 minimoon_master_file_path: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb_testset/minimoon_master_new_testset.csv'
 number_of_runs: 4  # number of runs per minimoon (the formation is reinitiallized each time)
 number_of_process: 1  # number of processes to use when usen multiprocess for parallel implementation
-output_df_file_name: 'spacecraft_one'
+output_df_file_name: 'results/spacecraft_2/spacecraft_2_runs_4'
 
+
+#####################################################
+# Getting IOD data parameters
+####################################################
+visible_files_folder: "results/spacecraft"
+visible_file_columns: ['values', 'spacecraft_1_ini_pos' ]
+index_columns: ["run_number", "object_id", "spacecraft_number"]
 
 
 

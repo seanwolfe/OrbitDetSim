@@ -90,7 +90,7 @@ class Spacecraft:
         visible_indices = np.where(in_fov & ~occluded)[0]
 
         # Create output array
-        result = np.full_like(asteroid_trajectory[:, 0], np.nan, dtype=float)  # Initialize with NaN
+        result = np.full_like(asteroid_trajectory[:, 0], -1, dtype=float)  # Initialize with NaN
         result[visible_indices] = visible_indices  # Assign index where visible
 
         return result

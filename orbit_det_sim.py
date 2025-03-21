@@ -18,10 +18,19 @@ from mpi4py import MPI
 
 # Define a converter function
 def str_to_tuple(x):
+    ast.literal_eval(x)
     try:
         return ast.literal_eval(x)
     except (ValueError, SyntaxError):
+        print('here')
+        print(x)
         return x
+
+
+def read_master(file_path, config):
+    columns_to_convert = config['visible_file_columns']
+    return pd.read_csv(file_path, sep=',', converters={col: str_to_tuple for col in columns_to_convert},
+                       index_col=config['index_columns'])
 
 
 def calc_start_index(minimoon, sc_formation, configs):
@@ -117,7 +126,6 @@ def calc_start_index(minimoon, sc_formation, configs):
     plt.show()
 
     return sc_visible
-
 
 
 def calc_end_index(minimoon, sc_formaiton, configs):
@@ -407,7 +415,8 @@ def run_sim_runnumbers_MPI(minimoon_master, config):
         for jdx, run in enumerate(result):
             index = tuple(run[0])  # (run_number, object_id, spacecraft_number)
             values = run[1]  # List of values over time
-            flat_data.append((*index, values, scs[0].ini_position))
+
+            flat_data.append((*index, tuple(values), tuple(scs[0].ini_position)))
 
         # Convert to DataFrame
         df = pd.DataFrame(flat_data, columns=["run_number", "object_id", "spacecraft_number", "values", "spacecraft_1_ini_pos"])
@@ -439,6 +448,61 @@ def run_sim_runnumbers_MPI(minimoon_master, config):
     #     return
 
 
+def run_sim_runnumbers_MPI_getIOD_data(minimoon_master, config):
+
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    size = comm.Get_size()
+
+    # Determine chunk size
+    chunk_size = config['number_of_runs'] // size
+    remainder = config['number_of_runs'] % size
+
+    # Calculate start and end indices for this process
+    start = rank * chunk_size
+    end = start + chunk_size
+    if rank == size - 1:
+        end += remainder  # Last process takes any remaining elements
+
+    for idx in range(start, end):
+        # read file of visible
+        folder = config['visible_files_folder'] + '_' + str(config['num_spacecraft'])
+        file_name = ('spacecraft_' + str(config['num_spacecraft']) + '_runs_' + str(config['number_of_runs']) +
+                     '_run_' + str(idx + 1) + '.csv')
+        full_path = folder + '/' + file_name
+        run_data = read_master(full_path, config)
+
+        # determine start index
+
+        nesc0000001a_sc1_vis_tot = list(run_data.loc[(idx + 1, 'NESC0000001a', 1), 'values'])
+        nesc0000001a_sc1_vis = [x for x in nesc0000001a_sc1_vis_tot if x>= 0]
+
+        nesc0000001a_sc2_vis_tot = list(run_data.loc[(idx + 1, 'NESC0000001a', 2), 'values'])
+        nesc0000001a_sc2_vis = [x for x in nesc0000001a_sc2_vis_tot if x>= 0]
+
+        print(nesc0000001a_sc1_vis)
+        print(nesc0000001a_sc2_vis)
+
+        # Create a mask to filter nonnegative values
+        run_data["min_nonnegative"] = run_data["values"].apply(lambda x: min([y for y in x if y >= 0]) if np.any(np.array(x) >= 0) else np.nan)
+
+        # Find the spacecraft with the minimum value for each object_id
+        start_index_df = run_data.groupby("object_id")["min_nonnegative"].idxmin()
+        print(start_index_df)
+        start_index_df.dropna()
+        print(start_index_df)
+        start_index = run_data.loc[start_index_df]
+
+        print(start_index)
+        # re integrate according to exposure time and slew time to get 16 samples
+
+        # calc ra and dec
+
+        # generate output file with time, ast xyz vxvyvz, detecting sc xyz vxvyvz RA Dec
+
+    return
+
+
 ###########################
 # run sim
 ##########################
@@ -450,7 +514,6 @@ with open("orbit_det_configuration.yaml", "r") as file:
 # get the master file
 master = parse_master_new_new_new(config['minimoon_master_file_path'])
 
-
 ###################################
 # Run parallel for number of runs using MPI
 ####################################
@@ -458,7 +521,13 @@ comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
 
-run_sim_runnumbers_MPI(master, config)
+# run_sim_runnumbers_MPI(master, config)
+
+####################################
+# Run parrallel sim to get IOD data using MPI
+###################################
+
+run_sim_runnumbers_MPI_getIOD_data(master, config)
 
 ###################################
 # Single results file implementation
@@ -512,7 +581,7 @@ run_sim_runnumbers_MPI(master, config)
 # iterate over minimoons in parallel for a single run using multiprocessor - partially implemented
 ########################################
 
-run_sim_minimoons_partial = partial(run_sim_minimoons, minimoon_master=master, config=config)
+# run_sim_minimoons_partial = partial(run_sim_minimoons, minimoon_master=master, config=config)
 
 # parallel implementation
 # pool = multiprocessing.Pool(processes=1)
