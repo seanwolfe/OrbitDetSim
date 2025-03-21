@@ -400,21 +400,43 @@ def run_sim_runnumbers_MPI(minimoon_master, config):
     if rank == size - 1:
         end += remainder  # Last process takes any remaining elements
 
-    results = []
-    spacecraft = []
     for idx in range(start, end):
         result, scs = run_sim_runnumbers(idx + 1, minimoon_master, config)
-        results.append(result)
-        spacecraft.append(scs[0].ini_position)
 
+        flat_data = []
+        for jdx, run in enumerate(result):
+            index = tuple(run[0])  # (run_number, object_id, spacecraft_number)
+            values = run[1]  # List of values over time
+            flat_data.append((*index, values, scs[0].ini_position))
+
+        # Convert to DataFrame
+        df = pd.DataFrame(flat_data, columns=["run_number", "object_id", "spacecraft_number", "values", "spacecraft_1_ini_pos"])
+
+        # Set MultiIndex
+        df.set_index(["run_number", "object_id", "spacecraft_number"], inplace=True)
+
+        df.to_csv(config['output_df_file_name'] + '_run_' + str(idx + 1) + '.csv', sep=',', header=True, index=True)
+
+    return
+
+    ################################################
+    # Single results file implementation
+    ###############################################
+    # results = []
+    # spacecraft = []
+    # for idx in range(start, end):
+    #     result, scs = run_sim_runnumbers(idx + 1, minimoon_master, config)
+    #     results.append(result)
+    #     spacecraft.append(scs[0].ini_position)
+    #
     # Gather all local centers_x and centers_y at root process (rank 0)
-    all_results = comm.gather(results, root=0)
-    all_scs = comm.gather(spacecraft, root=0)
-
-    if rank == 0:
-        return all_results, all_scs
-    else:
-        return
+    # all_results = comm.gather(results, root=0)
+    # all_scs = comm.gather(spacecraft, root=0)
+    #
+    # if rank == 0:
+    #     return all_results, all_scs
+    # else:
+    #     return
 
 
 ###########################
@@ -436,26 +458,30 @@ comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
 
-a_sc_res = run_sim_runnumbers_MPI(master, config)
+run_sim_runnumbers_MPI(master, config)
 
-if rank == 0:
-    a_res = a_sc_res[0]
-    a_scs = a_sc_res[1]
-    flat_data = []
-    for idx, process in enumerate(a_res):
-        for jdx, run in enumerate(process):
-            for kdx, entry in enumerate(run):
-                index = tuple(entry[0])  # (run_number, object_id, spacecraft_number)
-                values = entry[1]  # List of values over time
-                flat_data.append((*index, values, a_scs[idx][jdx]))
+###################################
+# Single results file implementation
+####################################
+# a_sc_res = run_sim_runnumbers_MPI(master, config)
+# if rank == 0:
+#     a_res = a_sc_res[0]
+#     a_scs = a_sc_res[1]
+#     flat_data = []
+#     for idx, process in enumerate(a_res):
+#         for jdx, run in enumerate(process):
+#             for kdx, entry in enumerate(run):
+#                 index = tuple(entry[0])  # (run_number, object_id, spacecraft_number)
+#                 values = entry[1]  # List of values over time
+#                 flat_data.append((*index, values, a_scs[idx][jdx]))
 
     # Convert to DataFrame
-    df = pd.DataFrame(flat_data, columns=["run_number", "object_id", "spacecraft_number", "values", "spacecraft_1_ini_pos"])
+    # df = pd.DataFrame(flat_data, columns=["run_number", "object_id", "spacecraft_number", "values", "spacecraft_1_ini_pos"])
 
     # Set MultiIndex
-    df.set_index(["run_number", "object_id", "spacecraft_number"], inplace=True)
+    # df.set_index(["run_number", "object_id", "spacecraft_number"], inplace=True)
 
-    df.to_csv(config['output_df_file_name'], sep=',', header=True, index=True)
+    # df.to_csv(config['output_df_file_name'], sep=',', header=True, index=True)
 
 
 ##############################
