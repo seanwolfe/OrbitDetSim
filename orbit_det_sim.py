@@ -18,12 +18,9 @@ from mpi4py import MPI
 
 # Define a converter function
 def str_to_tuple(x):
-    ast.literal_eval(x)
     try:
         return ast.literal_eval(x)
     except (ValueError, SyntaxError):
-        print('here')
-        print(x)
         return x
 
 
@@ -253,6 +250,7 @@ def run_sim_minimoons(object_id, minimoon_master, config):
 def run_sim_runnumbers(run_number, minimoon_master, config):
 
     # declare asteroid
+    memeory_offload = []
     for idx, master_i in minimoon_master.iterrows():
         flat_data = []
 
@@ -279,14 +277,36 @@ def run_sim_runnumbers(run_number, minimoon_master, config):
             visible = spacecraft.asteroid_in_fov_batch(asteroid_pos, sc_pos, earth_pos, moon_pos, config)
             flat_data.append((*[run_number, current_minimoon.id, jdx + 1], tuple(visible), tuple(formation.spacecraft[0].ini_position)))
 
-        # Convert to DataFrame
-        df = pd.DataFrame(flat_data, columns=["run_number", "object_id", "spacecraft_number", "values",
-                                              "spacecraft_1_ini_pos"])
+            if idx != 0:
+                memeory_offload.append((*[run_number, current_minimoon.id, jdx + 1], tuple(visible), tuple(formation.spacecraft[0].ini_position)))
 
-        # Set MultiIndex
-        df.set_index(["run_number", "object_id", "spacecraft_number"], inplace=True)
 
-        df.to_csv(config['output_df_file_name'] + '_run_' + str(run_number) + '_' + master_i['Object id'] + '.csv', sep=',', header=True, index=True)
+        # save file
+        if idx == 0:
+            # Convert to DataFrame
+            df = pd.DataFrame(flat_data, columns=["run_number", "object_id", "spacecraft_number", "values",
+                                                  "spacecraft_1_ini_pos"])
+
+            # Set MultiIndex
+            df.set_index(["run_number", "object_id", "spacecraft_number"], inplace=True)
+
+            df.to_csv(config['output_df_file_name'] + '_run_' + str(run_number) + '.csv', sep=',', header=True, index=True)
+
+        elif idx > 0 and (idx % 5 == 0 or idx % len(minimoon_master['Object id']) > 0):
+            # Convert to DataFrame
+            df = pd.DataFrame(memeory_offload, columns=["run_number", "object_id", "spacecraft_number", "values",
+                                                  "spacecraft_1_ini_pos"])
+
+            # Set MultiIndex
+            df.set_index(["run_number", "object_id", "spacecraft_number"], inplace=True)
+
+            df.to_csv(config['output_df_file_name'] + '_run_' + str(run_number) + '.csv', mode='a', index=True, header=False)
+
+            memeory_offload = []
+        else:
+            pass
+
+
 
     return
 
