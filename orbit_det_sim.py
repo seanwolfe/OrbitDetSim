@@ -252,10 +252,9 @@ def run_sim_minimoons(object_id, minimoon_master, config):
 
 def run_sim_runnumbers(run_number, minimoon_master, config):
 
-    visibles = []
-
     # declare asteroid
     for idx, master_i in minimoon_master.iterrows():
+        flat_data = []
 
         current_minimoon = Asteroid(master_i['Object id'], master_i['Min_SunEarthL1_V_index'], config)
 
@@ -278,10 +277,18 @@ def run_sim_runnumbers(run_number, minimoon_master, config):
             sc_pos = spacecraft.matched_trajectory
             # find when the asteroid is in fov and not ocluded by earth or moon
             visible = spacecraft.asteroid_in_fov_batch(asteroid_pos, sc_pos, earth_pos, moon_pos, config)
-            visibles.append([[run_number, current_minimoon.id, jdx + 1], visible])
+            flat_data.append((*[run_number, current_minimoon.id, jdx + 1], tuple(visible), tuple(formation.spacecraft[0].ini_position)))
 
+        # Convert to DataFrame
+        df = pd.DataFrame(flat_data, columns=["run_number", "object_id", "spacecraft_number", "values",
+                                              "spacecraft_1_ini_pos"])
 
-    return visibles, formation.spacecraft
+        # Set MultiIndex
+        df.set_index(["run_number", "object_id", "spacecraft_number"], inplace=True)
+
+        df.to_csv(config['output_df_file_name'] + '_run_' + str(run_number) + '_' + master_i['Object id'] + '.csv', sep=',', header=True, index=True)
+
+    return
 
 @staticmethod
 def parse_master_new_new_new(file_path):
@@ -409,22 +416,22 @@ def run_sim_runnumbers_MPI(minimoon_master, config):
         end += remainder  # Last process takes any remaining elements
 
     for idx in range(start, end):
-        result, scs = run_sim_runnumbers(idx + 1, minimoon_master, config)
+        run_sim_runnumbers(idx + 1, minimoon_master, config)
 
-        flat_data = []
-        for jdx, run in enumerate(result):
-            index = tuple(run[0])  # (run_number, object_id, spacecraft_number)
-            values = run[1]  # List of values over time
-
-            flat_data.append((*index, tuple(values), tuple(scs[0].ini_position)))
-
+        # flat_data = []
+        # for jdx, run in enumerate(result):
+        #     index = tuple(run[0])  # (run_number, object_id, spacecraft_number)
+        #     values = run[1]  # List of values over time
+        #
+        #     flat_data.append((*index, tuple(values), tuple(scs[0].ini_position)))
+        #
         # Convert to DataFrame
-        df = pd.DataFrame(flat_data, columns=["run_number", "object_id", "spacecraft_number", "values", "spacecraft_1_ini_pos"])
+        # df = pd.DataFrame(flat_data, columns=["run_number", "object_id", "spacecraft_number", "values", "spacecraft_1_ini_pos"])
 
         # Set MultiIndex
-        df.set_index(["run_number", "object_id", "spacecraft_number"], inplace=True)
-
-        df.to_csv(config['output_df_file_name'] + '_run_' + str(idx + 1) + '.csv', sep=',', header=True, index=True)
+        # df.set_index(["run_number", "object_id", "spacecraft_number"], inplace=True)
+        #
+        # df.to_csv(config['output_df_file_name'] + '_run_' + str(idx + 1) + '.csv', sep=',', header=True, index=True)
 
     return
 
@@ -521,13 +528,13 @@ comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
 
-# run_sim_runnumbers_MPI(master, config)
+run_sim_runnumbers_MPI(master, config)
 
 ####################################
 # Run parrallel sim to get IOD data using MPI
 ###################################
 
-run_sim_runnumbers_MPI_getIOD_data(master, config)
+# run_sim_runnumbers_MPI_getIOD_data(master, config)
 
 ###################################
 # Single results file implementation
