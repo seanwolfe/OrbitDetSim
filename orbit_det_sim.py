@@ -14,6 +14,7 @@ import ast
 import mpi4py.rc
 mpi4py.rc.threads = False
 from mpi4py import MPI
+import spiceypy as sp
 
 
 # Define a converter function
@@ -499,33 +500,27 @@ def run_sim_runnumbers_MPI_getIOD_data(minimoon_master, config):
         full_path = folder + '/' + file_name
         run_data = read_master(full_path, config)
 
-        # determine start index
-
-        nesc0000001a_sc1_vis_tot = list(run_data.loc[(idx + 1, 'NESC0000001a', 1), 'values'])
-        nesc0000001a_sc1_vis = [x for x in nesc0000001a_sc1_vis_tot if x>= 0]
-
-        nesc0000001a_sc2_vis_tot = list(run_data.loc[(idx + 1, 'NESC0000001a', 2), 'values'])
-        nesc0000001a_sc2_vis = [x for x in nesc0000001a_sc2_vis_tot if x>= 0]
-
-        print(nesc0000001a_sc1_vis)
-        print(nesc0000001a_sc2_vis)
-
         # Create a mask to filter nonnegative values
         run_data["min_nonnegative"] = run_data["values"].apply(lambda x: min([y for y in x if y >= 0]) if np.any(np.array(x) >= 0) else np.nan)
 
         # Find the spacecraft with the minimum value for each object_id
-        start_index_df = run_data.groupby("object_id")["min_nonnegative"].idxmin()
-        print(start_index_df)
-        start_index_df.dropna()
-        print(start_index_df)
-        start_index = run_data.loc[start_index_df]
+        detected_pop = run_data[~np.isnan(run_data["min_nonnegative"])]
+        missed_pop = run_data[np.isnan(run_data["min_nonnegative"])]
 
-        print(start_index)
+        # get spacecraft initial state (heliocentric)
+
         # re integrate according to exposure time and slew time to get 16 samples
+        # also to include collocation points
+        # Load the necessary SPICE kernels (make sure you specify the correct path)
+        # sp.furnsh('de430.bsp')  # Load ephemeris data (e.g., DE431)
+        # sp.furnsh('naif0012.tls')
+        # for jdx, detected_minimoon in detected_pop.iterrows():
+
 
         # calc ra and dec
 
-        # generate output file with time, ast xyz vxvyvz, detecting sc xyz vxvyvz RA Dec
+        # generate output file with epoch , ast xyz vxvyvz, detecting sc id xyz vxvyvz RA Dec
+        # file name: run-x_minimoon-id-y_sc-id-z_index_k.csv
 
     return
 
@@ -548,13 +543,13 @@ comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
 
-run_sim_runnumbers_MPI(master, config)
+# run_sim_runnumbers_MPI(master, config)
 
 ####################################
 # Run parrallel sim to get IOD data using MPI
 ###################################
 
-# run_sim_runnumbers_MPI_getIOD_data(master, config)
+run_sim_runnumbers_MPI_getIOD_data(master, config)
 
 ###################################
 # Single results file implementation

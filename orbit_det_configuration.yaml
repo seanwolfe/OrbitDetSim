@@ -72,5 +72,18 @@ index_columns: ["run_number", "object_id", "spacecraft_number"]
 # constants
 ####################################################
 AU_TO_M: 149597870691  # 1 AU in meters
+KM_TO_M: 1000
+SECONDS_PER_DAY: 86400
 EARTH_RADIUS_AU: 6371000
 MOON_RADIUS_AU: 1737000
+SUN_MASS: 1.989E+30
+MERCURY_MASS: 0.33e+24  # KG
+VENUS_MASS: 4.87e+24
+EARTH_MASS: 5.97e+24
+MOON_MASS: 0.073e+24
+MARS_MASS: 0.642e+24
+JUPITER_MASS: 1898.0e+24
+SATURN_MASS: 568.0e+24
+URANUS_MASS: 86.8e+24
+NEPTUNE_MASS: 102.0e+24
+GRAVITATIONAL_CONSTANT: 6.67430e-11  # m^3 kg^-1 s^-2
