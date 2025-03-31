@@ -114,8 +114,45 @@ class Formation:
         return
 
 
-    def update_formation(self):
-        raise NotImplementedError
+    def get_index_from_pos(self, position):
+        possible_positions = self.orbit.loc[:, ['SUN_EARTH_CO_X_(km)', 'SUN_EARTH_CO_Y_(km)', 'SUN_EARTH_CO_Z_(km)']]
+        distances = np.linalg.norm(possible_positions - position, axis=1)
+        closest_position_idx = np.argmin(distances)
+        return closest_position_idx
+
+
+    def recall_formation(self, sc1_ini_index, config):
+
+        # find the total number of steps in the quasi-halo
+        quasi_steps = config['quasi_halo_one_period_end'] - config['quasi_halo_start']
+
+        # divide by number of s/c
+        sc_start_range = int(quasi_steps / self.num_spacecraft)
+
+        scs_start = [sc1_ini_index]
+
+        # assign remaining s/c indices by adding random number times zone length times ith spacecraft in formation
+        for i in range(1, self.num_spacecraft):
+            scs_start.append(i * sc_start_range + scs_start[0])
+
+        ########
+        # set the initial positions of the spacecraft
+        ########
+        scs_ini_pos = [np.array([self.orbit['SUN_EARTH_CO_X_(km)'].iloc[sc_start],
+                                 self.orbit['SUN_EARTH_CO_Y_(km)'].iloc[sc_start],
+                                 self.orbit['SUN_EARTH_CO_Z_(km)'].iloc[sc_start]]) for
+                       j, sc_start in enumerate(scs_start)]
+
+        #######
+        # declare the spacecraft and assign them to the formation
+        ########
+        self.spacecraft = [Spacecraft(ini_pos, scs_start[k], config) for k, ini_pos in enumerate(scs_ini_pos)]
+
+        return
+
+
+
+
 
 
 #################
