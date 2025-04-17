@@ -13,21 +13,21 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import ast
 import spiceypy as spice
 
+# Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
+spice.furnsh("de430.bsp")
+spice.furnsh('naif0012.tls')
 
-def viz(minimoon, sc_formation, configs):
+def viz(objects_pos, minimoon, sc_formation, configs):
     # asteroid position
     asteroid_pos = minimoon.orbit.loc[:, ['Synodic x', 'Synodic y', 'Synodic z']].values
     earth_pos = np.zeros_like(asteroid_pos)
     print(minimoon.id)
     moon_pos = minimoon.orbit.loc[:, ['Moon Synodic x', 'Moon Synodic y', 'Moon Synodic z']].values
 
-    # get spacecraft positions over trajectory
-    sc_formation.match_spacecraft_trajectory(len(asteroid_pos[:, 0]), configs)
-
     fig = plt.figure()
     ax = fig.add_subplot(projection='3d')
     ax.plot(moon_pos[:, 0], moon_pos[:, 1], moon_pos[:, 2], label='Moon')
-    ax.plot(asteroid_pos[:, 0], asteroid_pos[:, 1], asteroid_pos[:, 2], label='Asteroid')
+    ax.plot(asteroid_pos[:, 0], asteroid_pos[:, 1], asteroid_pos[:, 2], label='Asteroid', color='green')
     ax.scatter(0.009, 0, 0, label='L_1', s=20)
     # Create a sphere (Earth model)
     theta = np.linspace(0, np.pi, 30)  # Latitude
@@ -60,28 +60,16 @@ def viz(minimoon, sc_formation, configs):
         ######################
         # For generation of spacecrafr fov with asteroid figure
         ###########################################
-        is_visible = visible[~np.isnan(visible)]
+        is_visible = visible[visible!=-1]
 
         if len(is_visible) == 0:
             pass
         else:
             # for indi in is_visible:
             test_i = int(is_visible[0])
-            print(test_i)
-
-            spacecraft_pos = spacecraft.get_spacecraft_pos(test_i)
-            #####
-            # test to see if all trajectories look fine - and they do
-            ####
-
-            ax.plot(sc_pos[:test_i, 0], sc_pos[:test_i, 1], sc_pos[:test_i, 2], color=colors[i], zorder=15)
-            ax.scatter(*spacecraft.get_spacecraft_pos(0), s=20, color=colors[i], label='Initial pos sc' + str(i),
-                       zorder=20, marker='^')
-            ax.scatter(*spacecraft_pos, s=20, color=colors[i], label='Detection instant sc ' + str(i), zorder=20)
             ax.scatter(*minimoon.get_asteroid_pos(test_i), s=20, color='green')
-
             fov_corners = plot_fov_projection(spacecraft, minimoon, test_i)
-
+            spacecraft_pos = spacecraft.get_spacecraft_pos(test_i)
             # Plot dotted lines from spacecraft to FOV corners
             for corner in fov_corners:
                 ax.plot([spacecraft_pos[0], corner[0]],
@@ -91,6 +79,22 @@ def viz(minimoon, sc_formation, configs):
             # Draw FOV projection as a polygon
             fov_poly = Poly3DCollection([fov_corners], color='cyan', alpha=0.3, edgecolor='k')
             ax.add_collection3d(fov_poly)
+
+            for j, spacecraft_j in enumerate(sc_formation.spacecraft):
+                spacecraft_pos_j = spacecraft_j.get_spacecraft_pos(test_i)
+                sc_pos_j = spacecraft_j.matched_trajectory
+
+                ax.plot(sc_pos_j[:test_i, 0], sc_pos_j[:test_i, 1], sc_pos_j[:test_i, 2], color=colors[j], zorder=15)
+                ax.scatter(*spacecraft_j.get_spacecraft_pos(0), s=20, color=colors[j], label='Initial pos sc' + str(j),
+                           zorder=20, marker='^')
+                ax.scatter(*spacecraft_pos_j, s=20, color=colors[j], label='Detection instant sc ' + str(j), zorder=20)
+
+                if j == 0:
+                    object_pos = objects_pos[j]
+                    ax.scatter(object_pos[0, 0], object_pos[1, 0], object_pos[2, 0], color=colors[j + 2], s=30, label='Integration start sc ' + str(j), zorder=19)
+                    ax.plot(object_pos[0, :], object_pos[1, :], object_pos[2, :], color=colors[j + 2], linewidth=3, label='Integrated traj sc ' + str(j), zorder=14)
+
+
 
     ax.plot(sc_pos[:, 0], sc_pos[:, 1], sc_pos[:, 2], color='pink', label='Halo Orbit', zorder=5)
     ax.set_xlabel('X (au)')
@@ -161,6 +165,54 @@ def eclip_to_sun_earth_corotating_batch(minimoon_df):
     file_path = '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb/' + str(
         minimoon_df['Object id'].iloc[0]) + '.csv'
     minimoon_df.to_csv(file_path, sep=' ', header=True, index=False)
+
+    return positions_corotating
+
+
+def eclip_to_sun_earth_corotating_batch_n_body_integrator_output(states, earth_states):
+    """
+    Converts a batch of positions and velocities from the heliocentric ECLIPJ2000 frame
+    to the Sun-Earth co-rotating frame.
+
+    Parameters:
+    - positions_eclip (numpy array): Nx3 array of positions in ECLIPJ2000 (AU).
+    - et_times (numpy array): N-element array of ephemeris times.
+
+    Returns:
+    - positions_corotating (numpy array): Nx3 array of positions in Sun-Earth co-rotating frame (AU).
+    """
+
+    earth_positions = earth_states[:3, :].T
+
+    # Compute Earth's orbital angle (angle in the ecliptic plane)
+    angles = np.arctan2(earth_positions[:, 1], earth_positions[:, 0])  # Shape: (N,)
+
+    # Compute cosines and sines of rotation angles
+    cos_angles = np.cos(-angles)
+    sin_angles = np.sin(-angles)
+
+    # Construct rotation matrices (shape: Nx3x3)
+    rotation_matrices = np.zeros((len(angles), 3, 3))
+    rotation_matrices[:, 0, 0] = cos_angles
+    rotation_matrices[:, 0, 1] = -sin_angles
+    rotation_matrices[:, 1, 0] = sin_angles
+    rotation_matrices[:, 1, 1] = cos_angles
+    rotation_matrices[:, 2, 2] = 1  # No rotation in the Z direction
+
+    num_objects = len(states)
+
+    positions_corotating = []
+    for i in range(0, num_objects):
+
+        object_i_pos = states[i, :3, :].T  + earth_positions
+
+        rotation_matrices = np.asarray(rotation_matrices, dtype=np.float64)
+        relative_positions = np.asarray(object_i_pos, dtype=np.float64)
+
+        # Apply the rotation to transform positions
+        position_corotating = np.einsum("nij,nj->ni", rotation_matrices, relative_positions)
+        positions_corotating.append(position_corotating.T)
+
 
     return positions_corotating
 
@@ -321,6 +373,7 @@ def parse_master_new_new_new(file_path):
 def get_sc_state_from_sc1_position(detected_pop, config):
     closest_indices = []
     scs_helio = []
+    sc_epochs = []
     for kdx, detection in detected_pop.iterrows():
         # create a formation object, it has s/c s randomly placed
         formation = Formation(config)
@@ -336,10 +389,14 @@ def get_sc_state_from_sc1_position(detected_pop, config):
 
         # the spacecraft that detected the asteroid
         detecting_spacecraft = formation.spacecraft[detection.name[2] - 1]  # spacecraft id start from 1
+        # detecting_spacecraft = formation.spacecraft[0]  # spacecraft id start from 1
 
         # the position of the detecting spacecraft at the detection instant
         desired_sc_pos = detecting_spacecraft.matched_trajectory[int(detection['min_nonnegative']), :] * (
                 config['AU_TO_M'] / 1000)  # now in km sun-earth-syn
+
+        # desired_sc_pos = detecting_spacecraft.matched_trajectory[0, :] * (
+        #         config['AU_TO_M'] / 1000)
 
         # match this position to the overall orbit file
         possible_positions = formation.orbit.loc[:, ['SUN_EARTH_CO_X_(km)',
@@ -354,24 +411,20 @@ def get_sc_state_from_sc1_position(detected_pop, config):
                                                             "GEO_EME_Vx_(km/s)", "GEO_EME_Vy_(km/s)",
                                                             "GEO_EME_Vz_(km/s)"]].to_numpy()
 
-        # get asteroid in question and the earth's state vector at detection instant
-        file_path = config['minimoon_files_folder'] + detection.name[1] + '.csv'
-        orbit = pd.read_csv(file_path, sep=' ', header=0, names=config['minimoon_column_names'])
-        earth_helio_state = orbit.loc[orbit.index[int(detection['min_nonnegative'])], ["Earth x (Helio)",
-                                                                                                  "Earth y (Helio)",
-                                                                                                  "Earth z (Helio)",
-                                                                                                  "Earth vx (Helio)",
-                                                                                                  "Earth vy (Helio)",
-                                                                                                  "Earth vz (Helio)"]]
 
-        # get the detecting spacecraft state in heliocentric frame
-        helio_eclip_state = helio_eclip_from_geo_eme(geo_eme_state, earth_helio_state)
-        scs_helio.append(helio_eclip_state)
+        # get the earth's state vector at detection instant
+        sc_time = formation.orbit.loc[formation.orbit.index[closest_position_index], "Time"]
+
+        # get the detecting spacecraft state in geo eclip frame
+        geo_eclip_state = eme_to_ecliptic_batch(geo_eme_state)
+        scs_helio.append(geo_eclip_state)
         closest_indices.append(closest_position_index)
+        sc_epochs.append(sc_time.strftime("%Y-%m-%d %H:%M:%S"))
 
     detected_pop.loc[:, 'detecting_sc_lpf_orbit_index'] = closest_indices
-    detected_pop.loc[:, ['HELIO_X_(km)', 'HELIO_Y_(km)', 'HELIO_Z_(km)', 'HELIO_Vx_(km/s)', 'HELIO_Vy_(km/s)',
-                  'HELIO_Vz_(km/s)']] = np.array(scs_helio)
+    detected_pop.loc[:, 'sc_epoch'] = sc_epochs
+    detected_pop.loc[:, ['GEO_ECLIP_X_(km)', 'GEO_ECLIP_Y_(km)', 'GEO_ECLIP_Z_(km)', 'GEO_ECLIP_Vx_(km/s)', 'GEO_ECLIP_Vy_(km/s)',
+                  'GEO_ECLIP_Vz_(km/s)']] = np.array(scs_helio)
 
     return  detected_pop
 
@@ -405,3 +458,39 @@ def helio_eclip_from_geo_eme(eme_vectors, earth_helio_state):
     helio_eclip_velocities = ecliptic_velocities + earth_helio_state[3:]
 
     return np.hstack((helio_eclip_position, helio_eclip_velocities))
+
+
+def eme_to_ecliptic_batch(state_vectors_eme):
+    """
+    Transforms a batch of full state vectors from EME J2000 to Ecliptic J2000.
+
+    Parameters:
+    - state_vectors_eme (numpy array): Nx6 array representing N state vectors
+      in EME J2000 (each row: [x, y, z, vx, vy, vz]).
+
+    Returns:
+    - numpy array: Nx6 array representing N state vectors in Ecliptic J2000.
+    """
+    # Obliquity of the ecliptic at J2000 (in degrees)
+    epsilon = 23.439281  # Mean obliquity of the ecliptic at J2000 epoch
+    epsilon_rad = np.radians(epsilon)
+
+    # Rotation matrix about the x-axis
+    rotation_matrix = np.array([
+        [1, 0, 0],
+        [0, np.cos(epsilon_rad), np.sin(epsilon_rad)],
+        [0, -np.sin(epsilon_rad), np.cos(epsilon_rad)]
+    ])
+
+    # Split into position and velocity
+    positions = state_vectors_eme[0:3]
+    velocities = state_vectors_eme[3:6]
+
+    # Rotate both
+    pos_ecliptic = rotation_matrix @ positions
+    vel_ecliptic = velocities @ rotation_matrix.T
+
+    # Concatenate position and velocity back
+    state_vectors_ecliptic = np.hstack((pos_ecliptic, vel_ecliptic))
+
+    return state_vectors_ecliptic

@@ -18,6 +18,9 @@ import spiceypy as sp
 import utilities as util
 import n_body_integrator as nbody
 
+# Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
+sp.furnsh("de430.bsp")
+sp.furnsh('naif0012.tls')
 
 def run_sim_viz_minimoons(object_id, minimoon_master, config):
 
@@ -199,19 +202,56 @@ def run_sim_runnumbers_MPI_getIOD_data(minimoon_master, config):
             asteroid_state[:3] *= config['AU_TO_M'] / config['KM_TO_M']  # to match spice
             asteroid_state[3:] *= (config['AU_TO_M'] / config['KM_TO_M'] / config['SECONDS_PER_DAY'])
 
-            spacecraft_state = detected_minimoon[['HELIO_X_(km)', 'HELIO_Y_(km)', 'HELIO_Z_(km)', 'HELIO_Vx_(km/s)', 'HELIO_Vy_(km/s)',
-                  'HELIO_Vz_(km/s)']].to_numpy()
+            spacecraft_state_geo = detected_minimoon[['GEO_ECLIP_X_(km)', 'GEO_ECLIP_Y_(km)', 'GEO_ECLIP_Z_(km)', 'GEO_ECLIP_Vx_(km/s)', 'GEO_ECLIP_Vy_(km/s)',
+                  'GEO_ECLIP_Vz_(km/s)']].to_numpy()
+            spacecraft_epoch = detected_minimoon['sc_epoch']
 
-            epoch = orbit.loc[detected_minimoon['min_nonnegative'], 'Julian Date']
+            # convert to heliocentric for integration
+            sun_geo_state = sp.spkgeo(10, sp.str2et(spacecraft_epoch), "ECLIPJ2000", 399)[0]
+            spacecraft_state_helio = spacecraft_state_geo - sun_geo_state
 
-            object_states =  [asteroid_state, spacecraft_state]
+            # epoch = orbit.loc[detected_minimoon['min_nonnegative'], 'Julian Date']
 
-            integrated_states = nbody.integrate_n_body(object_states, epoch, 10 * config['SECONDS_PER_DAY'], 3600)
+            integrated_states, earth_states = nbody.integrate_n_body(spacecraft_state_helio, spacecraft_epoch, 20 * config['SECONDS_PER_DAY'], 3600, type="SPACECRAFT")
 
             ####################################
             # Comparison
             ####################################
 
+            # convert integrated s/c traj to sun-earth co
+            spacecraft_pos = util.eclip_to_sun_earth_corotating_batch_n_body_integrator_output(integrated_states / config['KM_TO_M'], -earth_states / config['KM_TO_M'])
+
+
+            # spacecraft_state = np.tile(spacecraft_state, (5, 1)).T
+            # spacecraft_state = spacecraft_state[np.newaxis, :, :]
+            # earth_helio_state = np.tile(earth_helio_state, (5, 1)).T
+            #
+            # spacecraft_pos = util.eclip_to_sun_earth_corotating_batch_n_body_integrator_output(spacecraft_state, earth_helio_state)
+
+            spacecraft_pos =  np.array(spacecraft_pos) / (config['AU_TO_M'] / config['KM_TO_M'])
+            # spacecraft_state[3:] /= (config['AU_TO_M'] / config['KM_TO_M'] / config['SECONDS_PER_DAY'])
+            # earth_helio_state[:3] /= (config['AU_TO_M'] / config['KM_TO_M'])  # to match spice
+            # earth_helio_state[3:] /= (config['AU_TO_M'] / config['KM_TO_M'] / config['SECONDS_PER_DAY'])
+
+            # get the original s/c orbit and get the original s/c starting points
+            # create a formation object, it has s/c s randomly placed
+            formation = Formation(config)
+
+            # we already had a saved formation, saved according to the s/c 1 position, get the correspoding index in overall orbit file
+            sc1_ini_index = formation.get_index_from_pos(detected_minimoon['spacecraft_1_ini_pos'])
+
+            # re-initialize formation with this index
+            formation.recall_formation(sc1_ini_index, config)
+
+            # match the spacecraft trajectories to that of the asteroid in terms of length and sampling (asteroid sampled at one hour)
+            formation.match_spacecraft_trajectory(len(detected_minimoon['values']), config)
+            current_minimoon = Asteroid(detected_minimoon.name[1], 100, config)
+
+            # visualize it all
+            util.viz(spacecraft_pos, current_minimoon, formation, config)
+
+
+            """
             asteroid_x = integrated_states[0, 0, :]
             asteroid_y = integrated_states[0, 1, :]
             asteroid_z = integrated_states[0, 2, :]
@@ -249,7 +289,7 @@ def run_sim_runnumbers_MPI_getIOD_data(minimoon_master, config):
             plt.legend()
 
             plt.show()
-
+            """
 
 
         # calc ra and dec
