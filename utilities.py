@@ -169,17 +169,76 @@ def eclip_to_sun_earth_corotating_batch(minimoon_df):
     return positions_corotating
 
 
-def eclip_to_sun_earth_corotating_batch_n_body_integrator_output(states, earth_states):
+def helio_eclip_to_sun_earth_corotating_batch_full(states, earth_states):
     """
-    Converts a batch of positions and velocities from the heliocentric ECLIPJ2000 frame
-    to the Sun-Earth co-rotating frame.
+    Converts a batch of position and velocity state vectors from heliocentric ECLIPJ2000
+    to the Earth-centered Sun-Earth co-rotating frame with fixed ecliptic north.
 
     Parameters:
-    - positions_eclip (numpy array): Nx3 array of positions in ECLIPJ2000 (AU).
-    - et_times (numpy array): N-element array of ephemeris times.
+    - states: (M, 6, N) array of states in heliocentric ECLIPJ2000, for M objects and N timesteps
+    - earth_states: (6, N) array of Earth state vectors in the same frame at each timestep
 
     Returns:
-    - positions_corotating (numpy array): Nx3 array of positions in Sun-Earth co-rotating frame (AU).
+    - states_corotating: (M, 6, N) array of transformed states in the SECR frame
+    """
+
+    M, _, N = states.shape
+
+    r_E = earth_states[:3, :].T  # (N, 3)
+    v_E = earth_states[3:, :].T  # (N, 3)
+
+    # Compute Earth's orbital angle (angle in the ecliptic plane)
+    angles = np.arctan2(-r_E[:, 1], -r_E[:, 0])  # Shape: (N,)
+
+    # Compute cosines and sines of rotation angles
+    cos_angles = np.cos(-angles)
+    sin_angles = np.sin(-angles)
+
+    # Construct rotation matrices (shape: Nx3x3), Z axis is fixed along ecliptic north
+    rotation_matrices = np.zeros((N, 3, 3))
+    rotation_matrices[:, 0, 0] = cos_angles
+    rotation_matrices[:, 0, 1] = -sin_angles
+    rotation_matrices[:, 1, 0] = sin_angles
+    rotation_matrices[:, 1, 1] = cos_angles
+    rotation_matrices[:, 2, 2] = 1  # Z remains unchanged (ecliptic north)
+
+    # Angular velocity vector assuming uniform circular motion in ecliptic plane
+    omega_mag = np.linalg.norm(np.cross(r_E, v_E), axis=1) / (np.linalg.norm(r_E, axis=1) ** 2)  # (N,)
+    omega = np.zeros((N, 3))
+    omega[:, 2] = omega_mag  # Only z-component for ecliptic plane rotation
+
+    states_corotating = np.zeros_like(states)
+
+    for i in range(M):
+        r_O = states[i, :3, :].T  # (N, 3)
+        v_O = states[i, 3:, :].T  # (N, 3)
+
+        rel_r = r_O - r_E  # position relative to Earth
+        rel_v = v_O - v_E  # velocity relative to Earth
+
+        # Rotation correction term (N, 3)
+        v_rot = np.cross(omega, rel_r)
+
+        # Rotate position and velocity into co-rotating frame
+        r_rot = np.einsum('nij,nj->ni', rotation_matrices, rel_r)
+        v_rotated = np.einsum('nij,nj->ni', rotation_matrices, rel_v - v_rot)
+
+        states_corotating[i, :3, :] = r_rot.T
+        states_corotating[i, 3:, :] = v_rotated.T
+
+    return states_corotating
+
+def eclip_to_sun_earth_corotating_batch_n_body_integrator_output(states, earth_states):
+    """
+    Converts a batch of position and velocity state vectors from heliocentric ECLIPJ2000
+    to the Earth-centered Sun-Earth co-rotating frame (X toward Sun, Z along orbital angular momentum).
+
+    Parameters:
+    - states: (M, 6, N) array of states in heliocentric ECLIPJ2000, for M objects and N timesteps
+    - earth_states: (6, N) array of Earth state vectors in the same frame at each timestep
+
+    Returns:
+    - states_corotating: (M, 6, N) array of transformed states in the SECR frame
     """
 
     earth_positions = earth_states[:3, :].T
@@ -215,6 +274,7 @@ def eclip_to_sun_earth_corotating_batch_n_body_integrator_output(states, earth_s
 
 
     return positions_corotating
+
 
 
 def plot_fov_projection(spacecraft, asteroid, index):
@@ -494,3 +554,16 @@ def eme_to_ecliptic_batch(state_vectors_eme):
     state_vectors_ecliptic = np.hstack((pos_ecliptic, vel_ecliptic))
 
     return state_vectors_ecliptic
+
+
+def ms_to_aud(states):
+    with open("orbit_det_configuration.yaml", "r") as file:
+        config = yaml.safe_load(file)
+
+    state_out = np.copy(states)
+    state_out[:3] /= (config['AU_TO_M'])
+    state_out[3:] /= (config['AU_TO_M'] / config['SECONDS_PER_DAY'])
+
+    return state_out
+
+

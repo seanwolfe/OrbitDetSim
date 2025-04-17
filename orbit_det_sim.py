@@ -195,13 +195,23 @@ def run_sim_runnumbers_MPI_getIOD_data(minimoon_master, config):
             file_path = config['minimoon_files_folder'] + detected_minimoon.name[1] + '.csv'
             orbit = pd.read_csv(file_path, sep=' ', header=0, names=config['minimoon_column_names'])
 
-            # Add an asteroid (near Earth)
+            # asteroid ##############
             asteroid_state = orbit.loc[
                 detected_minimoon['min_nonnegative'], ['Helio x', 'Helio y', 'Helio z', 'Helio vx', 'Helio vy',
                                       'Helio vz']].values  # au and au/d
             asteroid_state[:3] *= config['AU_TO_M'] / config['KM_TO_M']  # to match spice
             asteroid_state[3:] *= (config['AU_TO_M'] / config['KM_TO_M'] / config['SECONDS_PER_DAY'])
 
+            asteroid_epoch = orbit.loc[detected_minimoon['min_nonnegative'], 'Julian Date']
+
+            # integrate s/c traj
+            asteroid_integrated_states, asteroid_earth_states = nbody.integrate_n_body(asteroid_state, asteroid_epoch,
+                                                                     1 * config['SECONDS_PER_DAY'], 3600,
+                                                                     type="ASTEROID")
+
+            ##########
+
+            # spacecraft ###############
             spacecraft_state_geo = detected_minimoon[['GEO_ECLIP_X_(km)', 'GEO_ECLIP_Y_(km)', 'GEO_ECLIP_Z_(km)', 'GEO_ECLIP_Vx_(km/s)', 'GEO_ECLIP_Vy_(km/s)',
                   'GEO_ECLIP_Vz_(km/s)']].to_numpy()
             spacecraft_epoch = detected_minimoon['sc_epoch']
@@ -210,89 +220,70 @@ def run_sim_runnumbers_MPI_getIOD_data(minimoon_master, config):
             sun_geo_state = sp.spkgeo(10, sp.str2et(spacecraft_epoch), "ECLIPJ2000", 399)[0]
             spacecraft_state_helio = spacecraft_state_geo - sun_geo_state
 
-            # epoch = orbit.loc[detected_minimoon['min_nonnegative'], 'Julian Date']
+            # integrate s/c traj
+            integrated_states, earth_states = nbody.integrate_n_body(spacecraft_state_helio, spacecraft_epoch, 1 * config['SECONDS_PER_DAY'], 3600, type="SPACECRAFT")
 
-            integrated_states, earth_states = nbody.integrate_n_body(spacecraft_state_helio, spacecraft_epoch, 20 * config['SECONDS_PER_DAY'], 3600, type="SPACECRAFT")
+            integrated_states_aud = util.ms_to_aud(integrated_states)
+            earth_states_aud = util.ms_to_aud(earth_states)
 
-            ####################################
-            # Comparison
-            ####################################
+            # convert integrated s/c traj to sun-earth co in au and day
+            spacecraft_state = util.eclip_to_sun_earth_corotating_batch_n_body_integrator_output(integrated_states_aud, -earth_states_aud)
 
-            # convert integrated s/c traj to sun-earth co
-            spacecraft_pos = util.eclip_to_sun_earth_corotating_batch_n_body_integrator_output(integrated_states / config['KM_TO_M'], -earth_states / config['KM_TO_M'])
+            ###
+            # does not seem right for velocity
+            ###
+            spacecraft_state2 = util.helio_eclip_to_sun_earth_corotating_batch_full(integrated_states_aud, earth_states_aud)
+
+            from scipy.signal import savgol_filter
+            deriv = savgol_filter(spacecraft_state[0], window_length=11, polyorder=3, deriv=1, delta= 3600 / 86400, axis=1)
+            print(spacecraft_state)
+            print(deriv)
+            print(spacecraft_state2)
 
 
-            # spacecraft_state = np.tile(spacecraft_state, (5, 1)).T
-            # spacecraft_state = spacecraft_state[np.newaxis, :, :]
-            # earth_helio_state = np.tile(earth_helio_state, (5, 1)).T
-            #
-            # spacecraft_pos = util.eclip_to_sun_earth_corotating_batch_n_body_integrator_output(spacecraft_state, earth_helio_state)
+            # convert back to helio based on asteroid epoch
 
-            spacecraft_pos =  np.array(spacecraft_pos) / (config['AU_TO_M'] / config['KM_TO_M'])
+            #############
+
+            # calc ra and dec from helio
+
+
+            ####
+            # comparison
+            ####
+
+            # convert asteroid state to sun-earth-co
+
+            # calc ra and dec from sun-earth-co
+
+
+
             # spacecraft_state[3:] /= (config['AU_TO_M'] / config['KM_TO_M'] / config['SECONDS_PER_DAY'])
             # earth_helio_state[:3] /= (config['AU_TO_M'] / config['KM_TO_M'])  # to match spice
             # earth_helio_state[3:] /= (config['AU_TO_M'] / config['KM_TO_M'] / config['SECONDS_PER_DAY'])
 
+            #######################
+            # for visualization
+            ###################
             # get the original s/c orbit and get the original s/c starting points
             # create a formation object, it has s/c s randomly placed
-            formation = Formation(config)
+            # formation = Formation(config)
 
             # we already had a saved formation, saved according to the s/c 1 position, get the correspoding index in overall orbit file
-            sc1_ini_index = formation.get_index_from_pos(detected_minimoon['spacecraft_1_ini_pos'])
+            # sc1_ini_index = formation.get_index_from_pos(detected_minimoon['spacecraft_1_ini_pos'])
 
             # re-initialize formation with this index
-            formation.recall_formation(sc1_ini_index, config)
+            # formation.recall_formation(sc1_ini_index, config)
 
             # match the spacecraft trajectories to that of the asteroid in terms of length and sampling (asteroid sampled at one hour)
-            formation.match_spacecraft_trajectory(len(detected_minimoon['values']), config)
-            current_minimoon = Asteroid(detected_minimoon.name[1], 100, config)
+            # formation.match_spacecraft_trajectory(len(detected_minimoon['values']), config)
+            # current_minimoon = Asteroid(detected_minimoon.name[1], 100, config)
 
             # visualize it all
-            util.viz(spacecraft_pos, current_minimoon, formation, config)
+            # util.viz(spacecraft_pos, current_minimoon, formation, config)
+            ################
 
 
-            """
-            asteroid_x = integrated_states[0, 0, :]
-            asteroid_y = integrated_states[0, 1, :]
-            asteroid_z = integrated_states[0, 2, :]
-            asteroid_vx = integrated_states[0, 3, :]
-            asteroid_vy = integrated_states[0, 4, :]
-            asteroid_vz = integrated_states[0, 5, :]
-
-            # Plot results
-            fig = plt.figure()
-            ax = fig.add_subplot(projection='3d')
-            ax.plot(asteroid_x / config['AU_TO_M'], asteroid_y / config['AU_TO_M'], asteroid_z / config['AU_TO_M'],
-                    'r-',
-                    label="Integrated", linewidth=3, zorder=5)
-            ax.scatter(asteroid_x[0] / config['AU_TO_M'], asteroid_y[0] / config['AU_TO_M'],
-                       asteroid_z[0] / config['AU_TO_M'],
-                       'g',
-                       label="Start", s=10, zorder=15)
-            ax.plot(orbit['Helio x'], orbit['Helio y'], orbit['Helio z'], 'b', label="Openorb", linewidth=1, zorder=10)
-            ax.set_xlabel("X Position (au)")
-            ax.set_ylabel("Y Position (au)")
-            ax.set_zlabel("Z Position (au)")
-            plt.legend()
-
-            fig2 = plt.figure()
-            ax2 = fig2.add_subplot(projection='3d')
-            ax2.plot(asteroid_vx / config['AU_TO_M'] * config['SECONDS_PER_DAY'],
-                     asteroid_vy / config['AU_TO_M'] * config['SECONDS_PER_DAY'],
-                     asteroid_vz / config['AU_TO_M'] * config['SECONDS_PER_DAY'], 'r-', label="Integrated", linewidth=3,
-                     zorder=5)
-            ax2.plot(orbit['Helio vx'], orbit['Helio vy'], orbit['Helio vz'], 'b', label="Openorb vel", linewidth=1,
-                     zorder=10)
-            ax2.set_xlabel("X Velocity (au/d)")
-            ax2.set_ylabel("Y Velocity (au/d)")
-            ax2.set_zlabel("Z Velocity (au/d)")
-            plt.legend()
-
-            plt.show()
-            """
-
-
-        # calc ra and dec
 
         # generate output file with epoch , ast xyz vxvyvz, detecting sc id xyz vxvyvz RA Dec
         # file name: run-x_minimoon-id-y_sc-id-z_index_k.csv

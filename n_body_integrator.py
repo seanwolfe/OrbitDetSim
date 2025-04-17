@@ -167,7 +167,7 @@ def integrate_n_body(object_state, epoch, end_time, time_interval, type):
     object_idx = n_bodies - 1  # asteroid index
 
     earth_positions = sol.y[9:12, :]
-    earth_velocities = sol.y[3 * (n_bodies + 3), :]
+    earth_velocities = sol.y[3 * (n_bodies + 3):3 * (n_bodies + 3) + 3, :]
     object_positions = sol.y[3 * object_idx: 3 * (object_idx + 1), :]
     object_velocities = sol.y[2 * 3 * object_idx + 3: 2 * 3 * object_idx + 6, :]
 
