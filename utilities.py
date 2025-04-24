@@ -17,7 +17,7 @@ import spiceypy as spice
 spice.furnsh("de430.bsp")
 spice.furnsh('naif0012.tls')
 
-def viz(object_pos, minimoon_pos, minimoon, sc_formation, configs):
+def viz(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, configs):
     # asteroid position
     asteroid_pos = minimoon.orbit.loc[:, ['Synodic x', 'Synodic y', 'Synodic z']].values
     earth_pos = np.zeros_like(asteroid_pos)
@@ -79,6 +79,15 @@ def viz(object_pos, minimoon_pos, minimoon, sc_formation, configs):
             # Draw FOV projection as a polygon
             fov_poly = Poly3DCollection([fov_corners], color='cyan', alpha=0.3, edgecolor='k')
             ax.add_collection3d(fov_poly)
+            triad = [spacecraft_pos, spacecraft_pos - [0.001, 0, 0], spacecraft_pos - [0, 0.001, 0], spacecraft_pos + [0, 0, 0.001]]
+            x_axis = np.array([triad[0], triad[1]]).T
+            y_axis = np.array([triad[0], triad[2]]).T
+            z_axis = np.array([triad[0], triad[3]]).T
+            ax.plot(*x_axis, color='black')
+            ax.plot(*y_axis, color='black')
+            ax.plot(*z_axis, color='black')
+            print(np.rad2deg(np.arcsin(ra_dec[0])))
+            print(np.rad2deg(np.arcsin(ra_dec[2])))
 
             for j, spacecraft_j in enumerate(sc_formation.spacecraft):
                 spacecraft_pos_j = spacecraft_j.get_spacecraft_pos(test_i)
@@ -97,6 +106,9 @@ def viz(object_pos, minimoon_pos, minimoon, sc_formation, configs):
                label='Integration start minimoon', zorder=19)
     ax.plot(-minimoon_pos[0, :], -minimoon_pos[1, :], minimoon_pos[2, :], color=colors[-2], linewidth=5,
             label='Integrated traj minimoon', zorder=14)
+
+
+
 
 
     ax.plot(sc_pos[:, 0], sc_pos[:, 1], sc_pos[:, 2], color='pink', label='Halo Orbit', zorder=5)

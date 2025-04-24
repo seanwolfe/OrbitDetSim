@@ -241,15 +241,19 @@ def run_sim_runnumbers_MPI_getIOD_data(minimoon_master, config):
             #############
 
             # calc ra and dec from helio
+            x_rel = new_asteroid_state_helio[0, :] - new_spacecraft_state_helio[0, :]
+            y_rel = new_asteroid_state_helio[1, :] - new_spacecraft_state_helio[1, :]
+            z_rel = new_asteroid_state_helio[2, :] - new_spacecraft_state_helio[2, :]
 
+            r_xy = np.sqrt(x_rel ** 2 + y_rel ** 2)
+            r = np.sqrt(x_rel ** 2 + y_rel ** 2 + z_rel ** 2)
 
-            ####
-            # comparison
-            ####
+            sin_ra = y_rel / r_xy
+            cos_ra = x_rel / r_xy
+            sin_dec = z_rel / r
 
-
-            # calc ra and dec from sun-earth-co
-
+            # generate output file with epoch , ast xyz vxvyvz, detecting sc id xyz vxvyvz RA Dec
+            # file name: run-x_minimoon-id-y_sc-id-z_index_k.csv
 
             #######################
             # for visualization
@@ -268,14 +272,23 @@ def run_sim_runnumbers_MPI_getIOD_data(minimoon_master, config):
             # formation.match_spacecraft_trajectory(len(detected_minimoon['values']), config)
             # current_minimoon = Asteroid(detected_minimoon.name[1], 100, config)
 
+            # calc ra and dec from sun-earth-co (visualized in a different frame)
+            # calc ra and dec from helio
+            # x_rel = asteroid_state[0, :] + spacecraft_state[0, :]
+            # y_rel = asteroid_state[1, :] + spacecraft_state[1, :]
+            # z_rel = asteroid_state[2, :] - spacecraft_state[2, :]
+
+            # r_xy = np.sqrt(x_rel ** 2 + y_rel ** 2)
+            # r = np.sqrt(x_rel ** 2 + y_rel ** 2 + z_rel ** 2)
+
+            # sin_ra = y_rel / r_xy
+            # cos_ra = x_rel / r_xy
+            # sin_dec = z_rel / r
+
             # visualize it all
-            # util.viz(spacecraft_state[:3, :], asteroid_state[:3, :], current_minimoon, formation, config)
+            # util.viz(spacecraft_state[:3, :], asteroid_state[:3, :], current_minimoon, formation, [sin_ra, cos_ra, sin_dec], config)
             ################
 
-
-
-        # generate output file with epoch , ast xyz vxvyvz, detecting sc id xyz vxvyvz RA Dec
-        # file name: run-x_minimoon-id-y_sc-id-z_index_k.csv
 
     return
 
