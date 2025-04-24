@@ -17,7 +17,7 @@ import spiceypy as spice
 spice.furnsh("de430.bsp")
 spice.furnsh('naif0012.tls')
 
-def viz(objects_pos, minimoon, sc_formation, configs):
+def viz(object_pos, minimoon_pos, minimoon, sc_formation, configs):
     # asteroid position
     asteroid_pos = minimoon.orbit.loc[:, ['Synodic x', 'Synodic y', 'Synodic z']].values
     earth_pos = np.zeros_like(asteroid_pos)
@@ -27,7 +27,7 @@ def viz(objects_pos, minimoon, sc_formation, configs):
     fig = plt.figure()
     ax = fig.add_subplot(projection='3d')
     ax.plot(moon_pos[:, 0], moon_pos[:, 1], moon_pos[:, 2], label='Moon')
-    ax.plot(asteroid_pos[:, 0], asteroid_pos[:, 1], asteroid_pos[:, 2], label='Asteroid', color='green')
+    ax.plot(asteroid_pos[:, 0], asteroid_pos[:, 1], asteroid_pos[:, 2], label='Asteroid', color='green', zorder=15)
     ax.scatter(0.009, 0, 0, label='L_1', s=20)
     # Create a sphere (Earth model)
     theta = np.linspace(0, np.pi, 30)  # Latitude
@@ -67,7 +67,7 @@ def viz(objects_pos, minimoon, sc_formation, configs):
         else:
             # for indi in is_visible:
             test_i = int(is_visible[0])
-            ax.scatter(*minimoon.get_asteroid_pos(test_i), s=20, color='green')
+            ax.scatter(*minimoon.get_asteroid_pos(test_i), s=20, color='green', zorder=20)
             fov_corners = plot_fov_projection(spacecraft, minimoon, test_i)
             spacecraft_pos = spacecraft.get_spacecraft_pos(test_i)
             # Plot dotted lines from spacecraft to FOV corners
@@ -89,11 +89,14 @@ def viz(objects_pos, minimoon, sc_formation, configs):
                            zorder=20, marker='^')
                 ax.scatter(*spacecraft_pos_j, s=20, color=colors[j], label='Detection instant sc ' + str(j), zorder=20)
 
-                if j == 0:
-                    object_pos = objects_pos[j]
-                    ax.scatter(object_pos[0, 0], object_pos[1, 0], object_pos[2, 0], color=colors[j + 2], s=30, label='Integration start sc ' + str(j), zorder=19)
-                    ax.plot(object_pos[0, :], object_pos[1, :], object_pos[2, :], color=colors[j + 2], linewidth=3, label='Integrated traj sc ' + str(j), zorder=14)
 
+
+    ax.scatter(object_pos[0, 0], object_pos[1, 0], object_pos[2, 0], color=colors[-1], s=30, label='Integration start sc', zorder=19)
+    ax.plot(object_pos[0, :], object_pos[1, :], object_pos[2, :], color=colors[-1], linewidth=5, label='Integrated traj sc', zorder=14)
+    ax.scatter(-minimoon_pos[0, 0], -minimoon_pos[1, 0], minimoon_pos[2, 0], color=colors[-2], s=30,
+               label='Integration start minimoon', zorder=19)
+    ax.plot(-minimoon_pos[0, :], -minimoon_pos[1, :], minimoon_pos[2, :], color=colors[-2], linewidth=5,
+            label='Integrated traj minimoon', zorder=14)
 
 
     ax.plot(sc_pos[:, 0], sc_pos[:, 1], sc_pos[:, 2], color='pink', label='Halo Orbit', zorder=5)
@@ -169,6 +172,45 @@ def eclip_to_sun_earth_corotating_batch(minimoon_df):
     return positions_corotating
 
 
+def eclip_to_sun_earth_corotating_batch_full_original_asteroid(states, earth_states):
+    """
+    Converts a batch of positions and velocities from the heliocentric ECLIPJ2000 frame
+    to the Sun-Earth co-rotating frame.
+
+    Parameters:
+    - positions_eclip (numpy array): Nx3 array of positions in ECLIPJ2000 (AU).
+    - et_times (numpy array): N-element array of ephemeris times.
+
+    Returns:
+    - positions_corotating (numpy array): Nx3 array of positions in Sun-Earth co-rotating frame (AU).
+    """
+
+    h_r_E = earth_states[:3, :].T  # (N, 3)
+    h_v_E = earth_states[3:, :].T  # (N, 3)
+    h_r_o = states[:3, :].T
+    h_v_o = states[3:, :].T
+
+    # Compute Earth's orbital angle (angle in the ecliptic plane)
+    angles = np.arctan2(h_r_E[:, 1], h_r_E[:, 0])  # Shape: (N,)
+
+    # Compute cosines and sines of rotation angles
+    cos_angles = np.cos(-angles)
+    sin_angles = np.sin(-angles)
+
+    # Construct rotation matrices (shape: Nx3x3)
+    rotation_matrices = np.zeros((len(angles), 3, 3))
+    rotation_matrices[:, 0, 0] = cos_angles
+    rotation_matrices[:, 0, 1] = -sin_angles
+    rotation_matrices[:, 1, 0] = sin_angles
+    rotation_matrices[:, 1, 1] = cos_angles
+    rotation_matrices[:, 2, 2] = 1  # No rotation in the Z direction
+
+    # Apply the rotation to transform positions
+    positions_corotating = np.einsum("nij,nj->ni", rotation_matrices, h_r_o - h_r_E)
+
+    return positions_corotating.T
+
+
 def helio_eclip_to_sun_earth_corotating_batch_full(states, earth_states):
     """
     Converts a batch of position and velocity state vectors from heliocentric ECLIPJ2000
@@ -182,13 +224,13 @@ def helio_eclip_to_sun_earth_corotating_batch_full(states, earth_states):
     - states_corotating: (M, 6, N) array of transformed states in the SECR frame
     """
 
-    M, _, N = states.shape
+    _, N = states.shape
 
-    r_E = earth_states[:3, :].T  # (N, 3)
-    v_E = earth_states[3:, :].T  # (N, 3)
+    h_r_E = earth_states[:3, :].T  # (N, 3)
+    h_v_E = earth_states[3:, :].T  # (N, 3)
 
     # Compute Earth's orbital angle (angle in the ecliptic plane)
-    angles = np.arctan2(-r_E[:, 1], -r_E[:, 0])  # Shape: (N,)
+    angles = np.arctan2(-h_r_E[:, 1], -h_r_E[:, 0])  # Shape: (N,)
 
     # Compute cosines and sines of rotation angles
     cos_angles = np.cos(-angles)
@@ -203,28 +245,27 @@ def helio_eclip_to_sun_earth_corotating_batch_full(states, earth_states):
     rotation_matrices[:, 2, 2] = 1  # Z remains unchanged (ecliptic north)
 
     # Angular velocity vector assuming uniform circular motion in ecliptic plane
-    omega_mag = np.linalg.norm(np.cross(r_E, v_E), axis=1) / (np.linalg.norm(r_E, axis=1) ** 2)  # (N,)
-    omega = np.zeros((N, 3))
-    omega[:, 2] = omega_mag  # Only z-component for ecliptic plane rotation
+    h_omega_mag = np.linalg.norm(np.cross(h_r_E, h_v_E), axis=1) / (np.linalg.norm(h_r_E, axis=1) ** 2)  # (N,)
+    h_omega = np.zeros((N, 3))
+    h_omega[:, 2] = h_omega_mag  # Only z-component for ecliptic plane rotation
 
     states_corotating = np.zeros_like(states)
 
-    for i in range(M):
-        r_O = states[i, :3, :].T  # (N, 3)
-        v_O = states[i, 3:, :].T  # (N, 3)
 
-        rel_r = r_O - r_E  # position relative to Earth
-        rel_v = v_O - v_E  # velocity relative to Earth
+    h_r_O = states[:3, :].T  # (N, 3)
+    h_v_O = states[3:, :].T  # (N, 3)
 
-        # Rotation correction term (N, 3)
-        v_rot = np.cross(omega, rel_r)
+    h_rel_r = h_r_O - h_r_E  # position relative to Earth (in inertial)
+    h_rel_v = h_v_O - h_v_E  # velocity relative to Earth (in inertial)
 
-        # Rotate position and velocity into co-rotating frame
-        r_rot = np.einsum('nij,nj->ni', rotation_matrices, rel_r)
-        v_rotated = np.einsum('nij,nj->ni', rotation_matrices, rel_v - v_rot)
+    E_r_o_prime = np.einsum('nij,nj->ni', rotation_matrices, h_rel_r)  # now co-rotating frame
+    v_rel_rot = np.einsum('nij,nj->ni', rotation_matrices, h_rel_v)
+    E_omega = np.einsum('nij,nj->ni', rotation_matrices, h_omega)
+    v_rot = np.cross(E_omega, E_r_o_prime)  # correct: using rotated position
+    E_v_o_prime = v_rel_rot - v_rot  # total velocity in rotating frame
 
-        states_corotating[i, :3, :] = r_rot.T
-        states_corotating[i, 3:, :] = v_rotated.T
+    states_corotating[:3, :] = E_r_o_prime.T
+    states_corotating[3:, :] = E_v_o_prime.T
 
     return states_corotating
 
@@ -258,22 +299,15 @@ def eclip_to_sun_earth_corotating_batch_n_body_integrator_output(states, earth_s
     rotation_matrices[:, 1, 1] = cos_angles
     rotation_matrices[:, 2, 2] = 1  # No rotation in the Z direction
 
-    num_objects = len(states)
+    object_i_pos = states[:3, :].T  + earth_positions
 
-    positions_corotating = []
-    for i in range(0, num_objects):
+    rotation_matrices = np.asarray(rotation_matrices, dtype=np.float64)
+    relative_positions = np.asarray(object_i_pos, dtype=np.float64)
 
-        object_i_pos = states[i, :3, :].T  + earth_positions
+    # Apply the rotation to transform positions
+    position_corotating = np.einsum("nij,nj->ni", rotation_matrices, relative_positions)
 
-        rotation_matrices = np.asarray(rotation_matrices, dtype=np.float64)
-        relative_positions = np.asarray(object_i_pos, dtype=np.float64)
-
-        # Apply the rotation to transform positions
-        position_corotating = np.einsum("nij,nj->ni", rotation_matrices, relative_positions)
-        positions_corotating.append(position_corotating.T)
-
-
-    return positions_corotating
+    return position_corotating
 
 
 

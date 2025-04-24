@@ -171,12 +171,5 @@ def integrate_n_body(object_state, epoch, end_time, time_interval, type):
     object_positions = sol.y[3 * object_idx: 3 * (object_idx + 1), :]
     object_velocities = sol.y[2 * 3 * object_idx + 3: 2 * 3 * object_idx + 6, :]
 
-    M = object_positions.shape[0] // 3  # Number of objects
-    N = object_positions.shape[1]  # Number of time steps
-
-    # Reshape to (M, 3, N), where 3 corresponds to x, y, z
-    object_pos_reshaped = object_positions.reshape(M, 3, N)  # (M, 3, N)
-    object_vel_reshaped = object_velocities.reshape(M, 3, N)  # (M, 3, N)
-
-    return np.hstack((object_pos_reshaped, object_vel_reshaped)), np.vstack((earth_positions, earth_velocities))
+    return np.vstack((object_positions, object_velocities)), np.vstack((earth_positions, earth_velocities))
 
