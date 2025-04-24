@@ -210,8 +210,9 @@ def run_sim_runnumbers_MPI_getIOD_data(minimoon_master, config):
                                                                      type="ASTEROID")
 
             asteroid_states_aud = util.ms_to_aud(asteroid_integrated_states)
+
             earthasteroid_states_aud = util.ms_to_aud(asteroid_earth_states)
-            asteroid_state= util.helio_eclip_to_sun_earth_corotating_batch_full(asteroid_states_aud,
+            asteroid_state = util.helio_eclip_to_sun_earth_corotating_batch_full(asteroid_states_aud,
                                                                                    earthasteroid_states_aud)
 
             ##########
@@ -234,7 +235,8 @@ def run_sim_runnumbers_MPI_getIOD_data(minimoon_master, config):
             spacecraft_state = util.helio_eclip_to_sun_earth_corotating_batch_full(integrated_states_aud, earth_states_aud)
 
             # convert back to helio based on asteroid epoch
-
+            new_spacecraft_state_helio = util.sun_earth_corotating_to_helio_eclip_batch_full(spacecraft_state, earthasteroid_states_aud)
+            new_asteroid_state_helio = util.sun_earth_corotating_to_helio_eclip_batch_full(asteroid_state, earthasteroid_states_aud)
 
             #############
 
@@ -245,7 +247,6 @@ def run_sim_runnumbers_MPI_getIOD_data(minimoon_master, config):
             # comparison
             ####
 
-            # convert asteroid state to sun-earth-co
 
             # calc ra and dec from sun-earth-co
 
@@ -255,20 +256,20 @@ def run_sim_runnumbers_MPI_getIOD_data(minimoon_master, config):
             ###################
             # get the original s/c orbit and get the original s/c starting points
             # create a formation object, it has s/c s randomly placed
-            formation = Formation(config)
+            # formation = Formation(config)
 
             # we already had a saved formation, saved according to the s/c 1 position, get the correspoding index in overall orbit file
-            sc1_ini_index = formation.get_index_from_pos(detected_minimoon['spacecraft_1_ini_pos'])
+            # sc1_ini_index = formation.get_index_from_pos(detected_minimoon['spacecraft_1_ini_pos'])
 
             # re-initialize formation with this index
-            formation.recall_formation(sc1_ini_index, config)
+            # formation.recall_formation(sc1_ini_index, config)
 
             # match the spacecraft trajectories to that of the asteroid in terms of length and sampling (asteroid sampled at one hour)
-            formation.match_spacecraft_trajectory(len(detected_minimoon['values']), config)
-            current_minimoon = Asteroid(detected_minimoon.name[1], 100, config)
+            # formation.match_spacecraft_trajectory(len(detected_minimoon['values']), config)
+            # current_minimoon = Asteroid(detected_minimoon.name[1], 100, config)
 
             # visualize it all
-            util.viz(spacecraft_state[:3, :], asteroid_state[:3, :], current_minimoon, formation, config)
+            # util.viz(spacecraft_state[:3, :], asteroid_state[:3, :], current_minimoon, formation, config)
             ################
 
 

@@ -127,90 +127,6 @@ def read_master(file_path, config):
                        index_col=config['index_columns'])
 
 
-def eclip_to_sun_earth_corotating_batch(minimoon_df):
-    """
-    Converts a batch of positions and velocities from the heliocentric ECLIPJ2000 frame
-    to the Sun-Earth co-rotating frame.
-
-    Parameters:
-    - positions_eclip (numpy array): Nx3 array of positions in ECLIPJ2000 (AU).
-    - et_times (numpy array): N-element array of ephemeris times.
-
-    Returns:
-    - positions_corotating (numpy array): Nx3 array of positions in Sun-Earth co-rotating frame (AU).
-    """
-
-    moon_pos = minimoon_df.loc[:, ["Moon x (Helio)", "Moon y (Helio)", "Moon z (Helio)"]].to_numpy()
-    earth_positions = minimoon_df.loc[:, ["Earth x (Helio)", "Earth y (Helio)", "Earth z (Helio)"]].to_numpy()
-
-    # Compute Earth's orbital angle (angle in the ecliptic plane)
-    angles = np.arctan2(earth_positions[:, 1], earth_positions[:, 0])  # Shape: (N,)
-
-    # Compute cosines and sines of rotation angles
-    cos_angles = np.cos(-angles)
-    sin_angles = np.sin(-angles)
-
-    # Construct rotation matrices (shape: Nx3x3)
-    rotation_matrices = np.zeros((len(angles), 3, 3))
-    rotation_matrices[:, 0, 0] = cos_angles
-    rotation_matrices[:, 0, 1] = -sin_angles
-    rotation_matrices[:, 1, 0] = sin_angles
-    rotation_matrices[:, 1, 1] = cos_angles
-    rotation_matrices[:, 2, 2] = 1  # No rotation in the Z direction
-
-    # Apply the rotation to transform positions
-    positions_corotating = np.einsum("nij,nj->ni", rotation_matrices, moon_pos - earth_positions)
-
-    old_file_convention = positions_corotating.copy()
-    old_file_convention[:, :2] *= -1
-
-    minimoon_df[['Moon Synodic x', 'Moon Synodic y', 'Moon Synodic z']] = old_file_convention
-    file_path = '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb/' + str(
-        minimoon_df['Object id'].iloc[0]) + '.csv'
-    minimoon_df.to_csv(file_path, sep=' ', header=True, index=False)
-
-    return positions_corotating
-
-
-def eclip_to_sun_earth_corotating_batch_full_original_asteroid(states, earth_states):
-    """
-    Converts a batch of positions and velocities from the heliocentric ECLIPJ2000 frame
-    to the Sun-Earth co-rotating frame.
-
-    Parameters:
-    - positions_eclip (numpy array): Nx3 array of positions in ECLIPJ2000 (AU).
-    - et_times (numpy array): N-element array of ephemeris times.
-
-    Returns:
-    - positions_corotating (numpy array): Nx3 array of positions in Sun-Earth co-rotating frame (AU).
-    """
-
-    h_r_E = earth_states[:3, :].T  # (N, 3)
-    h_v_E = earth_states[3:, :].T  # (N, 3)
-    h_r_o = states[:3, :].T
-    h_v_o = states[3:, :].T
-
-    # Compute Earth's orbital angle (angle in the ecliptic plane)
-    angles = np.arctan2(h_r_E[:, 1], h_r_E[:, 0])  # Shape: (N,)
-
-    # Compute cosines and sines of rotation angles
-    cos_angles = np.cos(-angles)
-    sin_angles = np.sin(-angles)
-
-    # Construct rotation matrices (shape: Nx3x3)
-    rotation_matrices = np.zeros((len(angles), 3, 3))
-    rotation_matrices[:, 0, 0] = cos_angles
-    rotation_matrices[:, 0, 1] = -sin_angles
-    rotation_matrices[:, 1, 0] = sin_angles
-    rotation_matrices[:, 1, 1] = cos_angles
-    rotation_matrices[:, 2, 2] = 1  # No rotation in the Z direction
-
-    # Apply the rotation to transform positions
-    positions_corotating = np.einsum("nij,nj->ni", rotation_matrices, h_r_o - h_r_E)
-
-    return positions_corotating.T
-
-
 def helio_eclip_to_sun_earth_corotating_batch_full(states, earth_states):
     """
     Converts a batch of position and velocity state vectors from heliocentric ECLIPJ2000
@@ -269,46 +185,137 @@ def helio_eclip_to_sun_earth_corotating_batch_full(states, earth_states):
 
     return states_corotating
 
-def eclip_to_sun_earth_corotating_batch_n_body_integrator_output(states, earth_states):
+
+def sun_earth_corotating_to_helio_eclip_batch_full(states_corotating, earth_states):
     """
-    Converts a batch of position and velocity state vectors from heliocentric ECLIPJ2000
-    to the Earth-centered Sun-Earth co-rotating frame (X toward Sun, Z along orbital angular momentum).
+    Converts a batch of position and velocity state vectors from the Earth-centered
+    Sun-Earth co-rotating frame (SECR) to heliocentric ECLIPJ2000, accounting for the Coriolis term.
 
     Parameters:
-    - states: (M, 6, N) array of states in heliocentric ECLIPJ2000, for M objects and N timesteps
-    - earth_states: (6, N) array of Earth state vectors in the same frame at each timestep
+    - states_corotating: (6, N) array of states in the SECR frame, where M is the number of objects
+      and N is the number of timesteps. The first 3 rows represent positions, and the last 3 rows represent velocities.
+    - earth_states: (6, N) array of Earth state vectors in the heliocentric ECLIPJ2000 frame at each timestep.
+      The first 3 rows represent Earth's position, and the last 3 rows represent Earth's velocity.
 
     Returns:
-    - states_corotating: (M, 6, N) array of transformed states in the SECR frame
+    - states_heliocentric: (6, N) array of transformed states in heliocentric ECLIPJ2000 frame.
+      The first 3 rows represent positions, and the last 3 rows represent velocities.
     """
 
-    earth_positions = earth_states[:3, :].T
+    _, N = states_corotating.shape
+
+    # Extract Earth's position and velocity from heliocentric ECLIPJ2000
+    h_r_E = earth_states[:3, :].T  # (N, 3)
+    h_v_E = earth_states[3:, :].T  # (N, 3)
+    E_r_o_prime = states_corotating[:3, :].T
+    E_v_o_prime = states_corotating[3:, :].T
 
     # Compute Earth's orbital angle (angle in the ecliptic plane)
-    angles = np.arctan2(earth_positions[:, 1], earth_positions[:, 0])  # Shape: (N,)
+    angles = np.arctan2(-h_r_E[:, 1], -h_r_E[:, 0])  # Shape: (N,)
 
     # Compute cosines and sines of rotation angles
-    cos_angles = np.cos(-angles)
-    sin_angles = np.sin(-angles)
+    cos_angles = np.cos(angles)
+    sin_angles = np.sin(angles)
 
-    # Construct rotation matrices (shape: Nx3x3)
-    rotation_matrices = np.zeros((len(angles), 3, 3))
+    # Construct rotation matrices (shape: Nx3x3), Z axis is fixed along ecliptic north
+    rotation_matrices = np.zeros((N, 3, 3))
     rotation_matrices[:, 0, 0] = cos_angles
     rotation_matrices[:, 0, 1] = -sin_angles
     rotation_matrices[:, 1, 0] = sin_angles
     rotation_matrices[:, 1, 1] = cos_angles
-    rotation_matrices[:, 2, 2] = 1  # No rotation in the Z direction
+    rotation_matrices[:, 2, 2] = 1  # Z remains unchanged (ecliptic north)
 
-    object_i_pos = states[:3, :].T  + earth_positions
+    states_heliocentric = np.zeros_like(states_corotating)
 
-    rotation_matrices = np.asarray(rotation_matrices, dtype=np.float64)
-    relative_positions = np.asarray(object_i_pos, dtype=np.float64)
+    h_rel_o = np.einsum('nij,nj->ni', rotation_matrices, E_r_o_prime)  # now co-rotating frame
+    h_r_o = h_rel_o + h_r_E
 
-    # Apply the rotation to transform positions
-    position_corotating = np.einsum("nij,nj->ni", rotation_matrices, relative_positions)
+    # Angular velocity vector assuming uniform circular motion in ecliptic plane
+    h_omega_mag = np.linalg.norm(np.cross(h_r_E, h_v_E), axis=1) / (np.linalg.norm(h_r_E, axis=1) ** 2)  # (N,)
+    h_omega = np.zeros((N, 3))
+    h_omega[:, 2] = h_omega_mag  # Only z-component for ecliptic plane rotation
 
-    return position_corotating
 
+    E_omega = np.einsum('nij,nj->ni', rotation_matrices, h_omega)
+    v_rot = np.cross(E_omega, E_r_o_prime)  # correct: using rotated position
+    v_rel_rot = E_v_o_prime + v_rot
+    h_rel_v = np.einsum('nij,nj->ni', rotation_matrices, v_rel_rot)
+    h_v_o = h_rel_v + h_v_E
+
+    states_heliocentric[:3, :] = h_r_o.T
+    states_heliocentric[3:, :] = h_v_o.T
+
+    return states_heliocentric
+
+
+def get_sc_state_from_sc1_position(detected_pop, config):
+    closest_indices = []
+    scs_helio = []
+    sc_epochs = []
+    for kdx, detection in detected_pop.iterrows():
+        # create a formation object, it has s/c s randomly placed
+        formation = Formation(config)
+
+        # we already had a saved formation, saved according to the s/c 1 position, get the correspoding index in overall orbit file
+        sc1_ini_index = formation.get_index_from_pos(detection['spacecraft_1_ini_pos'])
+
+        # re-initialize formation with this index
+        formation.recall_formation(sc1_ini_index, config)
+
+        # match the spacecraft trajectories to that of the asteroid in terms of length and sampling (asteroid sampled at one hour)
+        formation.match_spacecraft_trajectory(len(detection['values']), config)
+
+        # the spacecraft that detected the asteroid
+        detecting_spacecraft = formation.spacecraft[detection.name[2] - 1]  # spacecraft id start from 1
+        # detecting_spacecraft = formation.spacecraft[0]  # spacecraft id start from 1
+
+        # the position of the detecting spacecraft at the detection instant
+        desired_sc_pos = detecting_spacecraft.matched_trajectory[int(detection['min_nonnegative']), :] * (
+                config['AU_TO_M'] / 1000)  # now in km sun-earth-syn
+
+        # desired_sc_pos = detecting_spacecraft.matched_trajectory[0, :] * (
+        #         config['AU_TO_M'] / 1000)
+
+        # match this position to the overall orbit file
+        possible_positions = formation.orbit.loc[:, ['SUN_EARTH_CO_X_(km)',
+                                                     'SUN_EARTH_CO_Y_(km)',
+                                                     'SUN_EARTH_CO_Z_(km)']]
+        distances = np.linalg.norm(possible_positions - desired_sc_pos, axis=1)
+        closest_position_index = np.argmin(distances)
+
+        # use the index at the match to query spacecraft state vector
+        geo_eme_state = formation.orbit.loc[
+            formation.orbit.index[closest_position_index], ["GEO_EME_X_(km)", "GEO_EME_Y_(km)", "GEO_EME_Z_(km)",
+                                                            "GEO_EME_Vx_(km/s)", "GEO_EME_Vy_(km/s)",
+                                                            "GEO_EME_Vz_(km/s)"]].to_numpy()
+
+
+        # get the earth's state vector at detection instant
+        sc_time = formation.orbit.loc[formation.orbit.index[closest_position_index], "Time"]
+
+        # get the detecting spacecraft state in geo eclip frame
+        geo_eclip_state = eme_to_ecliptic_batch(geo_eme_state)
+        scs_helio.append(geo_eclip_state)
+        closest_indices.append(closest_position_index)
+        sc_epochs.append(sc_time.strftime("%Y-%m-%d %H:%M:%S"))
+
+    detected_pop.loc[:, 'detecting_sc_lpf_orbit_index'] = closest_indices
+    detected_pop.loc[:, 'sc_epoch'] = sc_epochs
+    detected_pop.loc[:, ['GEO_ECLIP_X_(km)', 'GEO_ECLIP_Y_(km)', 'GEO_ECLIP_Z_(km)', 'GEO_ECLIP_Vx_(km/s)', 'GEO_ECLIP_Vy_(km/s)',
+                  'GEO_ECLIP_Vz_(km/s)']] = np.array(scs_helio)
+
+    return  detected_pop
+
+
+def ms_to_aud(states):
+    with open("orbit_det_configuration.yaml", "r") as file:
+        config = yaml.safe_load(file)
+
+    state_out = np.copy(states)
+    state_out[:3] /= (config['AU_TO_M'])
+    state_out[3:] /= (config['AU_TO_M'] / config['SECONDS_PER_DAY'])
+
+    return state_out
 
 
 def plot_fov_projection(spacecraft, asteroid, index):
@@ -464,65 +471,6 @@ def parse_master_new_new_new(file_path):
     return master_data
 
 
-def get_sc_state_from_sc1_position(detected_pop, config):
-    closest_indices = []
-    scs_helio = []
-    sc_epochs = []
-    for kdx, detection in detected_pop.iterrows():
-        # create a formation object, it has s/c s randomly placed
-        formation = Formation(config)
-
-        # we already had a saved formation, saved according to the s/c 1 position, get the correspoding index in overall orbit file
-        sc1_ini_index = formation.get_index_from_pos(detection['spacecraft_1_ini_pos'])
-
-        # re-initialize formation with this index
-        formation.recall_formation(sc1_ini_index, config)
-
-        # match the spacecraft trajectories to that of the asteroid in terms of length and sampling (asteroid sampled at one hour)
-        formation.match_spacecraft_trajectory(len(detection['values']), config)
-
-        # the spacecraft that detected the asteroid
-        detecting_spacecraft = formation.spacecraft[detection.name[2] - 1]  # spacecraft id start from 1
-        # detecting_spacecraft = formation.spacecraft[0]  # spacecraft id start from 1
-
-        # the position of the detecting spacecraft at the detection instant
-        desired_sc_pos = detecting_spacecraft.matched_trajectory[int(detection['min_nonnegative']), :] * (
-                config['AU_TO_M'] / 1000)  # now in km sun-earth-syn
-
-        # desired_sc_pos = detecting_spacecraft.matched_trajectory[0, :] * (
-        #         config['AU_TO_M'] / 1000)
-
-        # match this position to the overall orbit file
-        possible_positions = formation.orbit.loc[:, ['SUN_EARTH_CO_X_(km)',
-                                                     'SUN_EARTH_CO_Y_(km)',
-                                                     'SUN_EARTH_CO_Z_(km)']]
-        distances = np.linalg.norm(possible_positions - desired_sc_pos, axis=1)
-        closest_position_index = np.argmin(distances)
-
-        # use the index at the match to query spacecraft state vector
-        geo_eme_state = formation.orbit.loc[
-            formation.orbit.index[closest_position_index], ["GEO_EME_X_(km)", "GEO_EME_Y_(km)", "GEO_EME_Z_(km)",
-                                                            "GEO_EME_Vx_(km/s)", "GEO_EME_Vy_(km/s)",
-                                                            "GEO_EME_Vz_(km/s)"]].to_numpy()
-
-
-        # get the earth's state vector at detection instant
-        sc_time = formation.orbit.loc[formation.orbit.index[closest_position_index], "Time"]
-
-        # get the detecting spacecraft state in geo eclip frame
-        geo_eclip_state = eme_to_ecliptic_batch(geo_eme_state)
-        scs_helio.append(geo_eclip_state)
-        closest_indices.append(closest_position_index)
-        sc_epochs.append(sc_time.strftime("%Y-%m-%d %H:%M:%S"))
-
-    detected_pop.loc[:, 'detecting_sc_lpf_orbit_index'] = closest_indices
-    detected_pop.loc[:, 'sc_epoch'] = sc_epochs
-    detected_pop.loc[:, ['GEO_ECLIP_X_(km)', 'GEO_ECLIP_Y_(km)', 'GEO_ECLIP_Z_(km)', 'GEO_ECLIP_Vx_(km/s)', 'GEO_ECLIP_Vy_(km/s)',
-                  'GEO_ECLIP_Vz_(km/s)']] = np.array(scs_helio)
-
-    return  detected_pop
-
-
 def helio_eclip_from_geo_eme(eme_vectors, earth_helio_state):
     ###########################
     # convert geo eme to geo elcip
@@ -590,14 +538,131 @@ def eme_to_ecliptic_batch(state_vectors_eme):
     return state_vectors_ecliptic
 
 
-def ms_to_aud(states):
-    with open("orbit_det_configuration.yaml", "r") as file:
-        config = yaml.safe_load(file)
+def eclip_to_sun_earth_corotating_batch_n_body_integrator_output(states, earth_states):
+    """
+    Converts a batch of position and velocity state vectors from heliocentric ECLIPJ2000
+    to the Earth-centered Sun-Earth co-rotating frame (X toward Sun, Z along orbital angular momentum).
 
-    state_out = np.copy(states)
-    state_out[:3] /= (config['AU_TO_M'])
-    state_out[3:] /= (config['AU_TO_M'] / config['SECONDS_PER_DAY'])
+    Parameters:
+    - states: (M, 6, N) array of states in heliocentric ECLIPJ2000, for M objects and N timesteps
+    - earth_states: (6, N) array of Earth state vectors in the same frame at each timestep
 
-    return state_out
+    Returns:
+    - states_corotating: (M, 6, N) array of transformed states in the SECR frame
+    """
+
+    earth_positions = earth_states[:3, :].T
+
+    # Compute Earth's orbital angle (angle in the ecliptic plane)
+    angles = np.arctan2(earth_positions[:, 1], earth_positions[:, 0])  # Shape: (N,)
+
+    # Compute cosines and sines of rotation angles
+    cos_angles = np.cos(-angles)
+    sin_angles = np.sin(-angles)
+
+    # Construct rotation matrices (shape: Nx3x3)
+    rotation_matrices = np.zeros((len(angles), 3, 3))
+    rotation_matrices[:, 0, 0] = cos_angles
+    rotation_matrices[:, 0, 1] = -sin_angles
+    rotation_matrices[:, 1, 0] = sin_angles
+    rotation_matrices[:, 1, 1] = cos_angles
+    rotation_matrices[:, 2, 2] = 1  # No rotation in the Z direction
+
+    object_i_pos = states[:3, :].T  + earth_positions
+
+    rotation_matrices = np.asarray(rotation_matrices, dtype=np.float64)
+    relative_positions = np.asarray(object_i_pos, dtype=np.float64)
+
+    # Apply the rotation to transform positions
+    position_corotating = np.einsum("nij,nj->ni", rotation_matrices, relative_positions)
+
+    return position_corotating
+
+
+def eclip_to_sun_earth_corotating_batch(minimoon_df):
+    """
+    Converts a batch of positions and velocities from the heliocentric ECLIPJ2000 frame
+    to the Sun-Earth co-rotating frame.
+
+    Parameters:
+    - positions_eclip (numpy array): Nx3 array of positions in ECLIPJ2000 (AU).
+    - et_times (numpy array): N-element array of ephemeris times.
+
+    Returns:
+    - positions_corotating (numpy array): Nx3 array of positions in Sun-Earth co-rotating frame (AU).
+    """
+
+    moon_pos = minimoon_df.loc[:, ["Moon x (Helio)", "Moon y (Helio)", "Moon z (Helio)"]].to_numpy()
+    earth_positions = minimoon_df.loc[:, ["Earth x (Helio)", "Earth y (Helio)", "Earth z (Helio)"]].to_numpy()
+
+    # Compute Earth's orbital angle (angle in the ecliptic plane)
+    angles = np.arctan2(earth_positions[:, 1], earth_positions[:, 0])  # Shape: (N,)
+
+    # Compute cosines and sines of rotation angles
+    cos_angles = np.cos(-angles)
+    sin_angles = np.sin(-angles)
+
+    # Construct rotation matrices (shape: Nx3x3)
+    rotation_matrices = np.zeros((len(angles), 3, 3))
+    rotation_matrices[:, 0, 0] = cos_angles
+    rotation_matrices[:, 0, 1] = -sin_angles
+    rotation_matrices[:, 1, 0] = sin_angles
+    rotation_matrices[:, 1, 1] = cos_angles
+    rotation_matrices[:, 2, 2] = 1  # No rotation in the Z direction
+
+    # Apply the rotation to transform positions
+    positions_corotating = np.einsum("nij,nj->ni", rotation_matrices, moon_pos - earth_positions)
+
+    old_file_convention = positions_corotating.copy()
+    old_file_convention[:, :2] *= -1
+
+    minimoon_df[['Moon Synodic x', 'Moon Synodic y', 'Moon Synodic z']] = old_file_convention
+    file_path = '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb/' + str(
+        minimoon_df['Object id'].iloc[0]) + '.csv'
+    minimoon_df.to_csv(file_path, sep=' ', header=True, index=False)
+
+    return positions_corotating
+
+
+def eclip_to_sun_earth_corotating_batch_full_original_asteroid(states, earth_states):
+    """
+    Converts a batch of positions and velocities from the heliocentric ECLIPJ2000 frame
+    to the Sun-Earth co-rotating frame.
+
+    Parameters:
+    - positions_eclip (numpy array): Nx3 array of positions in ECLIPJ2000 (AU).
+    - et_times (numpy array): N-element array of ephemeris times.
+
+    Returns:
+    - positions_corotating (numpy array): Nx3 array of positions in Sun-Earth co-rotating frame (AU).
+    """
+
+    h_r_E = earth_states[:3, :].T  # (N, 3)
+    h_v_E = earth_states[3:, :].T  # (N, 3)
+    h_r_o = states[:3, :].T
+    h_v_o = states[3:, :].T
+
+    # Compute Earth's orbital angle (angle in the ecliptic plane)
+    angles = np.arctan2(h_r_E[:, 1], h_r_E[:, 0])  # Shape: (N,)
+
+    # Compute cosines and sines of rotation angles
+    cos_angles = np.cos(-angles)
+    sin_angles = np.sin(-angles)
+
+    # Construct rotation matrices (shape: Nx3x3)
+    rotation_matrices = np.zeros((len(angles), 3, 3))
+    rotation_matrices[:, 0, 0] = cos_angles
+    rotation_matrices[:, 0, 1] = -sin_angles
+    rotation_matrices[:, 1, 0] = sin_angles
+    rotation_matrices[:, 1, 1] = cos_angles
+    rotation_matrices[:, 2, 2] = 1  # No rotation in the Z direction
+
+    # Apply the rotation to transform positions
+    positions_corotating = np.einsum("nij,nj->ni", rotation_matrices, h_r_o - h_r_E)
+
+    return positions_corotating.T
+
+
+
 
 
