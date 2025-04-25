@@ -12,7 +12,6 @@ from matplotlib.ticker import MaxNLocator
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import ast
 import mpi4py.rc
-
 mpi4py.rc.threads = False
 from mpi4py import MPI
 import spiceypy as sp
