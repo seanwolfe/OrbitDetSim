@@ -67,6 +67,8 @@ visible_file_columns: ['values', 'spacecraft_1_ini_pos' ]
 index_columns: ["run_number", "object_id", "spacecraft_number"]
 asteroid_mass: 1.0e+5
 spacecraft_mass: 1.0e+2
+number_of_frames: 10  # the number of measurements expected from detection technique
+time_between_frames: 86400  # the time between consecutive frames from detection technique, in seconds
 
 
 

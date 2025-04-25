@@ -141,7 +141,7 @@ def integrate_n_body(object_state, epoch, end_time, time_interval, type):
 
     start_time = 0
     t_span = (start_time, end_time)  # Start at t=0, end at t=900s
-    t_eval = np.linspace(start_time, end_time, time_interval)  # 30s intervals
+    t_eval = np.arange(start_time, end_time, time_interval)  # 30s intervals
 
     # Define N-body equations of motion
     def nbody_derivatives(t, y):
