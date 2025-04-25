@@ -16,6 +16,7 @@ import spiceypy as spice
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
 spice.furnsh("de430.bsp")
 spice.furnsh('naif0012.tls')
+pd.options.mode.chained_assignment = None
 
 def viz(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, configs):
     # asteroid position
@@ -481,6 +482,21 @@ def parse_master_new_new_new(file_path):
                                                                    "Min_SunEarthL1_V_index"])
 
     return master_data
+
+
+def count_files_in_folder(folder_path):
+    num_files = sum(
+        1 for entry in os.scandir(folder_path) if entry.is_file()
+    )
+    return num_files
+
+
+def get_all_files(folder_path):
+    file_paths = []
+    for root, _, files in os.walk(folder_path):
+        for file in files:
+            file_paths.append(os.path.join(root, file))
+    return file_paths
 
 
 def helio_eclip_from_geo_eme(eme_vectors, earth_helio_state):

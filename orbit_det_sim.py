@@ -157,27 +157,25 @@ def run_sim_runnumbers_MPI(minimoon_master, config):
     #     return
 
 
-def run_sim_runnumbers_MPI_getIOD_data(minimoon_master, config):
+def run_sim_runnumbers_MPI_getIOD_data(config):
+    # --- MPI setup ---
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     size = comm.Get_size()
 
-    # Determine chunk size
-    chunk_size = config['number_of_runs'] // size
-    remainder = config['number_of_runs'] % size
+    # --- Master (rank 0) gathers the list of all files ---
+    if rank == 0:
+        all_files = util.get_all_files(config['visible_files_folder'])
+    else:
+        all_files = None
 
-    # Calculate start and end indices for this process
-    start = rank * chunk_size
-    end = start + chunk_size
-    if rank == size - 1:
-        end += remainder  # Last process takes any remaining elements
+    # --- Broadcast total list to all ranks ---
+    all_files = comm.bcast(all_files, root=0)
 
-    for idx in range(start, end):
-        # read file of visible
-        folder = config['visible_files_folder'] + '_' + str(config['num_spacecraft'])
-        file_name = ('spacecraft_' + str(config['num_spacecraft']) + '_runs_' + str(config['number_of_runs']) +
-                     '_run_' + str(idx + 1) + '.csv')
-        full_path = folder + '/' + file_name
+    # --- Distribute work: each rank gets a subset ---
+    for i in range(rank, len(all_files), size):
+        print(str(rank) + '_' + str(i))
+        full_path = all_files[i]
         run_data = util.read_master(full_path, config)
 
         # Create a mask to filter nonnegative values
@@ -192,7 +190,7 @@ def run_sim_runnumbers_MPI_getIOD_data(minimoon_master, config):
 
         # re integrate according to exposure time and slew time to get 16 samples
         for jdx, detected_minimoon in detected_appended_pop.iterrows():
-            print(detected_minimoon.name)
+            # print(detected_minimoon.name)
             file_path = config['minimoon_files_folder'] + detected_minimoon.name[1] + '.csv'
             orbit = pd.read_csv(file_path, sep=' ', header=0, names=config['minimoon_column_names'])
 
@@ -273,11 +271,25 @@ def run_sim_runnumbers_MPI_getIOD_data(minimoon_master, config):
             sin_dec = z_rel / r
 
 
-
             # generate output file with epoch , ast xyz vxvyvz, detecting sc id xyz vxvyvz sinRA cosRA sinDec
-            # file name: run-x_minimoon-id-y_sc-id-z_index_k.csv
+            # file name: run-x_minimoon-y_sc-z_index-k.csv
+            file_name = ('minimoon-' + str(detected_minimoon.name[1]) + '_sc-'
+                         + str(detected_minimoon.name[2]) + '_index-' + str(int(detected_minimoon['min_nonnegative'])))
+            file_path = (config['IOD_folder_path'] + '/' + file_name + '_' + full_path.split('/')[-1].split('.')[0] +
+                         '.csv')
 
-            vis = True
+            # make dataframe
+            data = np.array([epochs, new_asteroid_state_helio[0, :], new_asteroid_state_helio[1, :],
+                    new_asteroid_state_helio[2, :], new_asteroid_state_helio[3, :], new_asteroid_state_helio[4, :],
+                    new_asteroid_state_helio[5, :], new_spacecraft_state_helio[0, :], new_spacecraft_state_helio[1, :],
+                    new_spacecraft_state_helio[2, :], new_spacecraft_state_helio[3, :], new_spacecraft_state_helio[4, :],
+                    new_spacecraft_state_helio[5, :], sin_ra, cos_ra, sin_dec]).T
+
+            df = pd.DataFrame(data, columns=config['IOD_data_columns'])
+            df.to_csv(file_path, sep=',', header=True, index=False)
+
+
+            vis = False
             if vis:
                 #######################
                 # for visualization
@@ -340,7 +352,7 @@ size = comm.Get_size()
 # Run parrallel sim to get IOD data using MPI
 ###################################
 
-run_sim_runnumbers_MPI_getIOD_data(master, config)
+run_sim_runnumbers_MPI_getIOD_data(config)
 
 ###################################
 # Single results file implementation
