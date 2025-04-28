@@ -265,6 +265,7 @@ def get_sc_state_from_sc1_position(detected_pop, config):
     closest_indices = []
     scs_helio = []
     sc_epochs = []
+
     for kdx, detection in detected_pop.iterrows():
         # create a formation object, it has s/c s randomly placed
         formation = Formation(config)

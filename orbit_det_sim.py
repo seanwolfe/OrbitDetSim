@@ -165,6 +165,7 @@ def run_sim_runnumbers_MPI_getIOD_data(config):
     # --- Master (rank 0) gathers the list of all files ---
     if rank == 0:
         all_files = util.get_all_files(config['visible_files_folder'])
+        num_files = 0
     else:
         all_files = None
 
@@ -172,24 +173,63 @@ def run_sim_runnumbers_MPI_getIOD_data(config):
     all_files = comm.bcast(all_files, root=0)
 
     # --- Distribute work: each rank gets a subset ---
-    for i in range(rank, len(all_files), size):
-        print(str(rank) + '_' + str(i))
-        full_path = all_files[i]
-        run_data = util.read_master(full_path, config)
+    for i, file_i in enumerate(all_files):
+        if rank == 0:
+            print(f"Files completed: {num_files}")
+            num_files += 1
+            print(file_i.split('/')[-1].split('.')[0])
 
-        # Create a mask to filter nonnegative values
-        run_data["min_nonnegative"] = run_data["values"].apply(
-            lambda x: min([y for y in x if y >= 0]) if np.any(np.array(x) >= 0) else np.nan)
+            run_data = util.read_master(file_i, config)
+            # Create a mask to filter nonnegative values
+            run_data["min_nonnegative"] = run_data["values"].apply(
+                lambda x: min([y for y in x if y >= 0]) if np.any(np.array(x) >= 0) else np.nan)
+            print("Read master and applied filter")
 
-        # Find the spacecraft with the minimum value for each object_id
-        detected_pop = run_data[~np.isnan(run_data["min_nonnegative"])]
-        missed_pop = run_data[np.isnan(run_data["min_nonnegative"])]
+            # Find the spacecraft with the minimum value for each object_id
+            detected_pop = run_data[~np.isnan(run_data["min_nonnegative"])]
+            missed_pop = run_data[np.isnan(run_data["min_nonnegative"])]
 
-        detected_appended_pop = util.get_sc_state_from_sc1_position(detected_pop, config)
+
+            # Split detected_pop into chunks (one chunk per rank)
+            num_rows = len(detected_pop)
+            chunk_size = num_rows // size  # Base number of rows per rank
+            remainder = num_rows % size  # Remainder to be distributed
+
+            # Create the chunks
+            chunks = []
+            start_row = 0
+            for i in range(size):
+                # If there is a remainder, give one more row to the current rank
+                end_row = start_row + chunk_size + (1 if i < remainder else 0)
+                chunks.append(detected_pop.iloc[start_row:end_row])
+                start_row = end_row
+
+        else:
+            chunks = None
+
+        # --- Now scatter manually ---
+        if rank == 0:
+            # Send each chunk individually
+            for dest in range(1, size):
+                comm.send(chunks[dest], dest=dest, tag=77)
+            my_chunk = chunks[0]
+        else:
+            # Receive my chunk
+            my_chunk = comm.recv(source=0, tag=77)
+
+        # Now my_chunk is a small DataFrame (only my portion)
+        print(f"Rank {rank} got {len(my_chunk)} rows.")
+
+        comm.barrier()
+
+        detected_appended_pop_chunk = util.get_sc_state_from_sc1_position(my_chunk, config)
+
+        print(f"Rank {rank} computed appended population")
 
         # re integrate according to exposure time and slew time to get 16 samples
-        for jdx, detected_minimoon in detected_appended_pop.iterrows():
-            # print(detected_minimoon.name)
+        for jdx, detected_minimoon in detected_appended_pop_chunk.iterrows():
+
+            # print(str(rank) + ': ' + str(detected_minimoon.name))
             file_path = config['minimoon_files_folder'] + detected_minimoon.name[1] + '.csv'
             orbit = pd.read_csv(file_path, sep=' ', header=0, names=config['minimoon_column_names'])
 
@@ -274,7 +314,7 @@ def run_sim_runnumbers_MPI_getIOD_data(config):
             # file name: run-x_minimoon-y_sc-z_index-k.csv
             file_name = ('minimoon-' + str(detected_minimoon.name[1]) + '_sc-'
                          + str(detected_minimoon.name[2]) + '_index-' + str(int(detected_minimoon['min_nonnegative'])))
-            file_path = (config['IOD_folder_path'] + '/' + file_name + '_' + full_path.split('/')[-1].split('.')[0] +
+            file_path = (config['IOD_folder_path'] + '/' + file_name + '_' + file_i.split('/')[-1].split('.')[0] +
                          '.csv')
 
             # make dataframe
