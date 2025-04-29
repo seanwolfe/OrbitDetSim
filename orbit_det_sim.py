@@ -17,6 +17,7 @@ from mpi4py import MPI
 import spiceypy as sp
 import utilities as util
 import n_body_integrator as nbody
+import argparse
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
 sp.furnsh("de430.bsp")
@@ -35,6 +36,66 @@ def run_sim_viz_minimoons(object_id, minimoon_master, config):
     sc_visible = util.viz(current_minimoon, formation, config)
 
     return sc_visible
+
+
+def run_sim_runnumbers_new(run_number, minimoon_master, config):
+    df_buffer = pd.DataFrame(columns=["run_number", "object_id", "spacecraft_number", "values", "total_length", "spacecraft_1_ini_pos"])
+    part_number = 1
+    num_of_rows = config['number_of_rows_per_part']
+    save_format = config['save_format']  # default to 'csv' if not specified
+
+    for idx, master_i in minimoon_master.iterrows():
+        current_minimoon = Asteroid(master_i['Object id'], master_i['Min_SunEarthL1_V_index'], config)
+        formation = Formation(config)
+
+        asteroid_pos = current_minimoon.orbit.loc[:, ['Synodic x', 'Synodic y', 'Synodic z']].values
+        earth_pos = np.zeros_like(asteroid_pos)
+        moon_pos = current_minimoon.orbit.loc[:, ['Moon Synodic x', 'Moon Synodic y', 'Moon Synodic z']].values
+
+        formation.match_spacecraft_trajectory(len(asteroid_pos[:, 0]), config)
+
+        new_data = []  # temporary buffer for this minimoon
+
+        for jdx, spacecraft in enumerate(formation.spacecraft):
+            # print(run_number, current_minimoon.id, jdx + 1)
+
+            sc_pos = spacecraft.matched_trajectory
+            visible = spacecraft.asteroid_in_fov_batch(asteroid_pos, sc_pos, earth_pos, moon_pos, config)
+            visible = np.array(visible)  # ensures it's an array
+            len_visible = len(visible)
+            visible = visible[visible >= 0]
+
+            new_data.append({
+                "run_number": run_number,
+                "object_id": current_minimoon.id,
+                "spacecraft_number": jdx + 1,
+                "values": tuple(visible),
+                "total_length": len_visible,
+                "spacecraft_1_ini_pos": tuple(formation.spacecraft[0].ini_position)
+            })
+
+        df_buffer = pd.concat([df_buffer, pd.DataFrame(new_data)], ignore_index=True)
+
+        if len(df_buffer) >= num_of_rows or idx == len(minimoon_master) - 1:
+            df_buffer.set_index(["run_number", "object_id", "spacecraft_number"], inplace=True)
+
+            base_filename = f"{config['output_df_file_name']}_run_{run_number}_part_{part_number}"
+
+            if save_format == 'csv':
+                filename = base_filename + ".csv"
+                df_buffer.to_csv(filename, sep=',', header=True, index=True)
+            elif save_format == 'parquet':
+                filename = base_filename + ".parquet"
+                df_buffer.to_parquet(filename, index=True)
+            else:
+                raise ValueError(f"Unsupported save format: {save_format}")
+
+            print(f"Saved {len(df_buffer)} rows to {filename}")
+
+            df_buffer = pd.DataFrame(columns=["run_number", "object_id", "spacecraft_number", "values", "total_length", "spacecraft_1_ini_pos"])
+            part_number += 1
+
+    return
 
 
 def run_sim_runnumbers(run_number, minimoon_master, config):
@@ -117,7 +178,8 @@ def run_sim_runnumbers_MPI(minimoon_master, config):
         end += remainder  # Last process takes any remaining elements
 
     for idx in range(start, end):
-        run_sim_runnumbers(idx + 1, minimoon_master, config)
+        # run_sim_runnumbers(idx + 1, minimoon_master, config)
+        run_sim_runnumbers_new(idx + 1, minimoon_master, config)
 
         # flat_data = []
         # for jdx, run in enumerate(result):
@@ -164,7 +226,7 @@ def run_sim_runnumbers_MPI_getIOD_data(config):
 
     # --- Master (rank 0) gathers the list of all files ---
     if rank == 0:
-        all_files = util.get_all_files(config['visible_files_folder'])
+        all_files = util.get_all_files(config['visible_files_folder'], config['save_format'])
         num_files = 0
     else:
         all_files = None
@@ -182,13 +244,11 @@ def run_sim_runnumbers_MPI_getIOD_data(config):
             run_data = util.read_master(file_i, config)
             # Create a mask to filter nonnegative values
             run_data["min_nonnegative"] = run_data["values"].apply(
-                lambda x: min([y for y in x if y >= 0]) if np.any(np.array(x) >= 0) else np.nan)
-            print("Read master and applied filter")
+                lambda x: min(x) if np.any(np.array(x) >= 0) else np.nan)
 
             # Find the spacecraft with the minimum value for each object_id
             detected_pop = run_data[~np.isnan(run_data["min_nonnegative"])]
             missed_pop = run_data[np.isnan(run_data["min_nonnegative"])]
-
 
             # Split detected_pop into chunks (one chunk per rank)
             num_rows = len(detected_pop)
@@ -325,8 +385,17 @@ def run_sim_runnumbers_MPI_getIOD_data(config):
                     new_spacecraft_state_helio[5, :], sin_ra, cos_ra, sin_dec]).T
 
             df = pd.DataFrame(data, columns=config['IOD_data_columns'])
-            df.to_csv(file_path, sep=',', header=True, index=False)
+            # Get desired format from config
+            output_format = config['save_format']  # default to csv
 
+            # Write based on format
+            base_path, _ = os.path.splitext(file_path)
+
+            if output_format in ['csv', 'both']:
+                df.to_csv(base_path + '.csv', sep=',', header=True, index=False)
+
+            if output_format in ['parquet', 'both']:
+                df.to_parquet(base_path + '.parquet', index=False)
 
             vis = False
             if vis:
@@ -371,8 +440,13 @@ def run_sim_runnumbers_MPI_getIOD_data(config):
 # run sim
 ##########################
 
-# Load YAML config file
-with open("orbit_det_configuration.yaml", "r") as file:
+# Argument parser to get the config file path
+parser = argparse.ArgumentParser(description="Run the spacecraft simulation")
+parser.add_argument('--config', type=str, required=True, help="Path to the config file")
+args = parser.parse_args()
+
+# Load the config file
+with open(args.config, 'r') as file:
     config = yaml.safe_load(file)
 
 # get the master file

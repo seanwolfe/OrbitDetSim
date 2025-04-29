@@ -4,6 +4,7 @@ from scipy.integrate import solve_ivp
 import matplotlib.pyplot as plt
 import pandas as pd
 import yaml
+import argparse
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
 spice.furnsh("de430.bsp")
@@ -11,8 +12,14 @@ spice.furnsh('naif0012.tls')
 
 
 def integrate_n_body_multi(object_states, epoch, end_time, time_interval):
-    # Load YAML config file
-    with open("orbit_det_configuration.yaml", "r") as file:
+
+    # Argument parser to get the config file path
+    parser = argparse.ArgumentParser(description="Run the spacecraft simulation")
+    parser.add_argument('--config', type=str, required=True, help="Path to the config file")
+    args = parser.parse_args()
+
+    # Load the config file
+    with open(args.config, 'r') as file:
         config = yaml.safe_load(file)
 
     epoch_et = spice.unitim(epoch, 'JDTDB', 'ET')  # initial epoch
@@ -94,8 +101,13 @@ def integrate_n_body_multi(object_states, epoch, end_time, time_interval):
     return np.hstack((object_pos_reshaped, object_vel_reshaped)), np.vstack((earth_positions, earth_velocities))
 
 def integrate_n_body(object_state, epoch, end_time, time_interval, type):
-    # Load YAML config file
-    with open("orbit_det_configuration.yaml", "r") as file:
+    # Argument parser to get the config file path
+    parser = argparse.ArgumentParser(description="Run the spacecraft simulation")
+    parser.add_argument('--config', type=str, required=True, help="Path to the config file")
+    args = parser.parse_args()
+
+    # Load the config file
+    with open(args.config, 'r') as file:
         config = yaml.safe_load(file)
 
     bodies = [10, 1, 2, 399, 4, 5, 6, 7, 8,

@@ -12,6 +12,7 @@ from matplotlib.ticker import MaxNLocator
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import ast
 import spiceypy as spice
+import argparse
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
 spice.furnsh("de430.bsp")
@@ -127,17 +128,36 @@ def viz(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, configs):
 
 
 # Define a converter function
-def str_to_tuple(x):
-    try:
-        return ast.literal_eval(x)
-    except (ValueError, SyntaxError):
-        return x
+def str_to_tuple(val):
+    if isinstance(val, str):
+        try:
+            return ast.literal_eval(val)
+        except (ValueError, SyntaxError):
+            return val  # fallback
+    return val
 
 
 def read_master(file_path, config):
     columns_to_convert = config['visible_file_columns']
-    return pd.read_csv(file_path, sep=',', converters={col: str_to_tuple for col in columns_to_convert},
-                       index_col=config['index_columns'])
+    file_ext = os.path.splitext(file_path)[1].lower()
+
+    if file_ext == '.csv':
+        return pd.read_csv(
+            file_path,
+            sep=',',
+            converters={col: str_to_tuple for col in columns_to_convert},
+            index_col=config['index_columns']
+        )
+    elif file_ext == '.parquet':
+        df = pd.read_parquet(file_path)
+
+        # Apply conversions manually after reading
+        for col in columns_to_convert:
+            if col in df.columns:
+                df[col] = df[col].apply(str_to_tuple)
+        return df
+    else:
+        raise ValueError(f"Unsupported file type: {file_ext}")
 
 
 def helio_eclip_to_sun_earth_corotating_batch_full(states, earth_states):
@@ -277,7 +297,7 @@ def get_sc_state_from_sc1_position(detected_pop, config):
         formation.recall_formation(sc1_ini_index, config)
 
         # match the spacecraft trajectories to that of the asteroid in terms of length and sampling (asteroid sampled at one hour)
-        formation.match_spacecraft_trajectory(len(detection['values']), config)
+        formation.match_spacecraft_trajectory(int(detection['total_length']), config)
 
         # the spacecraft that detected the asteroid
         detecting_spacecraft = formation.spacecraft[detection.name[2] - 1]  # spacecraft id start from 1
@@ -322,7 +342,13 @@ def get_sc_state_from_sc1_position(detected_pop, config):
 
 
 def ms_to_aud(states):
-    with open("orbit_det_configuration.yaml", "r") as file:
+    # Argument parser to get the config file path
+    parser = argparse.ArgumentParser(description="Run the spacecraft simulation")
+    parser.add_argument('--config', type=str, required=True, help="Path to the config file")
+    args = parser.parse_args()
+
+    # Load the config file
+    with open(args.config, 'r') as file:
         config = yaml.safe_load(file)
 
     state_out = np.copy(states)
@@ -492,11 +518,14 @@ def count_files_in_folder(folder_path):
     return num_files
 
 
-def get_all_files(folder_path):
+def get_all_files(folder_path, filetype='csv'):
+    assert filetype in ['csv', 'parquet'], "filetype must be 'csv' or 'parquet'"
+
     file_paths = []
     for root, _, files in os.walk(folder_path):
         for file in files:
-            file_paths.append(os.path.join(root, file))
+            if file.endswith(f'.{filetype}'):
+                file_paths.append(os.path.join(root, file))
     return file_paths
 
 

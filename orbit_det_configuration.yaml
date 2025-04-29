@@ -18,8 +18,6 @@ sigma_pointing: 7200  # pointing uncertainty - mas
 ##################################################
 # Formation parameters
 #################################################
-
-num_spacecraft: 4
 orbit_file_path: 'LPF_orbit_2.csv'
 orbit_column_names: [
   "Time", "GEO_EME_X_(km)", "GEO_EME_Y_(km)", "GEO_EME_Z_(km)",
@@ -54,16 +52,19 @@ minimoon_column_names: [ "Object id", "Julian Date", "Distance", "Helio q", "Hel
 ######################################################
 # minimoon_master_file_path: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb/minimoon_master_new.csv'
 minimoon_master_file_path: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb_testset/minimoon_master_new_testset.csv'
-number_of_runs: 1  # number of runs per minimoon (the formation is reinitiallized each time)
-number_of_process: 1  # number of processes to use when usen multiprocess for parallel implementation
-output_df_file_name: 'results/spacecraft_4/spacecraft_4_runs_4'
+num_spacecraft: 5
+number_of_runs: 3  # number of runs per minimoon (the formation is reinitiallized each time)
+# number_of_process: 1  # number of processes to use when usen multiprocess for parallel implementation
+output_df_file_name: 'results/spacecraft_5/spacecraft_5_runs_3'
+number_of_rows_per_part: 10000000
+save_format: 'parquet' # csv or parquet, also needs to be specified when expecting to read files
 
 
 #####################################################
 # Getting IOD data parameters
 ####################################################
 visible_files_folder: "results"
-visible_file_columns: ['values', 'spacecraft_1_ini_pos' ]
+visible_file_columns: ['values', "total_length", 'spacecraft_1_ini_pos']
 IOD_folder_path: "/media/aeromec/Seagate Desktop Drive/data_IOD"
 IOD_data_columns: ["EPOCH(JDTDB)", "HELIO_X(AU)", "HELIO_Y(AU)", "HELIO_Z(AU)", "HELIO_VX(AU/D)", "HELIO_VY(AU/D)",
                    "HELIO_VZ(AU/D)", "SC_HELIO_X(AU)", "SC_HELIO_Y(AU)", "SC_HELIO_Z(AU)", "SC_HELIO_VX(AU/D)",
@@ -73,6 +74,13 @@ asteroid_mass: 1.0e+5
 spacecraft_mass: 1.0e+2
 number_of_frames: 10  # the number of measurements expected from detection technique
 time_between_frames: 86400  # the time between consecutive frames from detection technique, in seconds
+
+
+#################################################
+# Getting number of spacecraft figure
+################################################
+# spacecraft_folder: '/media/aeromec/Seagate Desktop Drive/results'
+spacecraft_folder: 'results'
 
 
 
