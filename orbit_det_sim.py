@@ -436,6 +436,40 @@ def run_sim_runnumbers_MPI_getIOD_data(config):
     return
 
 
+def run_IOD_MPI(config):
+    # --- MPI setup ---
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    size = comm.Get_size()
+
+    # --- Master (rank 0) gathers the list of all files ---
+    if rank == 0:
+        all_files = util.get_all_files(config['IOD_folder_path'], config['save_format'])
+        num_files = 0
+    else:
+        all_files = None
+
+    # --- Broadcast total list to all ranks ---
+    all_files = comm.bcast(all_files, root=0)
+
+    # --- Round-robin distribution ---
+    files_for_this_rank = all_files[rank::size]
+
+    # --- Process each file assigned to this rank ---
+    for file_path in files_for_this_rank:
+
+        # read data
+
+        # add noise
+
+        # run pielm
+
+        # make data
+
+        raise NotImplementedError
+
+    return
+
 ###########################
 # run sim
 ##########################
@@ -459,13 +493,22 @@ comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
 
-run_sim_runnumbers_MPI(master, config)
+# run_sim_runnumbers_MPI(master, config)
 
 ####################################
 # Run parrallel sim to get IOD data using MPI
 ###################################
 
 # run_sim_runnumbers_MPI_getIOD_data(config)
+
+
+###################################
+# Run IOD simulation in parallel
+###################################
+
+run_IOD_MPI(config)
+
+
 
 ###################################
 # Single results file implementation
