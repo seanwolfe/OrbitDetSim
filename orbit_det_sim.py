@@ -459,13 +459,13 @@ comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
 
-# run_sim_runnumbers_MPI(master, config)
+run_sim_runnumbers_MPI(master, config)
 
 ####################################
 # Run parrallel sim to get IOD data using MPI
 ###################################
 
-run_sim_runnumbers_MPI_getIOD_data(config)
+# run_sim_runnumbers_MPI_getIOD_data(config)
 
 ###################################
 # Single results file implementation

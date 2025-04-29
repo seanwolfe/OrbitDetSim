@@ -52,12 +52,12 @@ minimoon_column_names: [ "Object id", "Julian Date", "Distance", "Helio q", "Hel
 ######################################################
 # minimoon_master_file_path: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb/minimoon_master_new.csv'
 minimoon_master_file_path: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb_testset/minimoon_master_new_testset.csv'
-num_spacecraft: 5
-number_of_runs: 3  # number of runs per minimoon (the formation is reinitiallized each time)
+num_spacecraft: 1
+number_of_runs: 10  # number of runs per minimoon (the formation is reinitiallized each time)
 # number_of_process: 1  # number of processes to use when usen multiprocess for parallel implementation
-output_df_file_name: 'results/spacecraft_5/spacecraft_5_runs_3'
+output_df_file_name: 'results/spacecraft_1/spacecraft_1_runs_10'
 number_of_rows_per_part: 10000000
-save_format: 'parquet' # csv or parquet, also needs to be specified when expecting to read files
+save_format: 'csv' # csv or parquet, also needs to be specified when expecting to read files
 
 
 #####################################################
@@ -81,6 +81,7 @@ time_between_frames: 86400  # the time between consecutive frames from detection
 ################################################
 # spacecraft_folder: '/media/aeromec/Seagate Desktop Drive/results'
 spacecraft_folder: 'results'
+base_filename: 'fig_num_spacecraft_data'
 
 
 
