@@ -79,8 +79,8 @@ time_between_frames: 86400  # the time between consecutive frames from detection
 #################################################
 # Getting number of spacecraft figure
 ################################################
-# spacecraft_folder: '/media/aeromec/Seagate Desktop Drive/results'
-spacecraft_folder: 'results'
+spacecraft_folder: '/media/aeromec/Seagate Desktop Drive/results'
+# spacecraft_folder: 'results'
 base_filename: 'fig_num_spacecraft_data'
 
 

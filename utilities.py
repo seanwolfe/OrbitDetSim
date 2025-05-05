@@ -287,6 +287,7 @@ def get_sc_state_from_sc1_position(detected_pop, config):
     sc_epochs = []
 
     for kdx, detection in detected_pop.iterrows():
+
         # create a formation object, it has s/c s randomly placed
         formation = Formation(config)
 
@@ -527,6 +528,19 @@ def get_all_files(folder_path, filetype='csv'):
             if file.endswith(f'.{filetype}'):
                 file_paths.append(os.path.join(root, file))
     return file_paths
+
+
+def get_files_per_folder(parent_folder):
+    subfolders = sorted([os.path.join(parent_folder, d) for d in os.listdir(parent_folder) if os.path.isdir(os.path.join(parent_folder, d))])
+    all_files = []
+    for folder in subfolders:
+        files = sorted([
+            os.path.join(folder, f)
+            for f in os.listdir(folder)
+            if os.path.isfile(os.path.join(folder, f))
+        ])
+        all_files.append(files)
+    return all_files
 
 
 def helio_eclip_from_geo_eme(eme_vectors, earth_helio_state):

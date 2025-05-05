@@ -242,6 +242,7 @@ def run_sim_runnumbers_MPI_getIOD_data(config):
             print(file_i.split('/')[-1].split('.')[0])
 
             run_data = util.read_master(file_i, config)
+
             # Create a mask to filter nonnegative values
             run_data["min_nonnegative"] = run_data["values"].apply(
                 lambda x: min(x) if np.any(np.array(x) >= 0) else np.nan)
@@ -282,6 +283,7 @@ def run_sim_runnumbers_MPI_getIOD_data(config):
 
         comm.barrier()
 
+        config['num_spacecraft'] = int(file_i.split('/')[-1].split('.')[0].split('_')[1])
         detected_appended_pop_chunk = util.get_sc_state_from_sc1_position(my_chunk, config)
 
         print(f"Rank {rank} computed appended population")
@@ -436,6 +438,194 @@ def run_sim_runnumbers_MPI_getIOD_data(config):
     return
 
 
+def run_sim_runnumbers_MPI_getIOD_data_new(config):
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    size = comm.Get_size()
+
+    if rank == 0:
+        all_files = util.get_files_per_folder(config['visible_files_folder'])
+    else:
+        all_files = None
+
+    # Broadcast the file list structure
+    all_files = comm.bcast(all_files, root=0)
+
+    assigned_files = []
+
+    for folder_files in all_files:
+        # Round-robin assignment of files from this folder
+        for i, file_path in enumerate(folder_files):
+            if i % size == rank:
+                assigned_files.append(file_path)
+
+
+    # --- Distribute work: each rank gets a subset ---
+    for i, file_i in enumerate(assigned_files):
+        print(file_i.split('/')[-1].split('.')[0])
+
+        run_data = util.read_master(file_i, config)
+        # Create a mask to filter nonnegative values
+        run_data["min_nonnegative"] = run_data["values"].apply(
+            lambda x: min(x) if np.any(np.array(x) >= 0) else np.nan)
+
+        # Find the spacecraft with the minimum value for each object_id
+        detected_pop = run_data[~np.isnan(run_data["min_nonnegative"])]
+        missed_pop = run_data[np.isnan(run_data["min_nonnegative"])]
+
+        detected_appended_pop = util.get_sc_state_from_sc1_position(detected_pop, config)
+
+        print(f"Rank {rank} computed appended population")
+
+        # re integrate according to exposure time and slew time to get 16 samples
+        for jdx, detected_minimoon in detected_appended_pop.iterrows():
+
+            # print(str(rank) + ': ' + str(detected_minimoon.name))
+            file_path = config['minimoon_files_folder'] + detected_minimoon.name[1] + '.csv'
+            orbit = pd.read_csv(file_path, sep=' ', header=0, names=config['minimoon_column_names'])
+
+            # asteroid ##############
+            asteroid_state_helio = orbit.loc[
+                detected_minimoon['min_nonnegative'], ['Helio x', 'Helio y', 'Helio z', 'Helio vx', 'Helio vy',
+                                                       'Helio vz']].values  # au and au/d
+            asteroid_state_helio[:3] *= config['AU_TO_M'] / config['KM_TO_M']  # to match spice
+            asteroid_state_helio[3:] *= (config['AU_TO_M'] / config['KM_TO_M'] / config['SECONDS_PER_DAY'])
+
+            asteroid_epoch = orbit.loc[detected_minimoon['min_nonnegative'], 'Julian Date']
+
+            # calc epochs
+            num_frames = config['number_of_frames']
+            start_time = asteroid_epoch
+            step = config['time_between_frames'] / config['SECONDS_PER_DAY']
+            total_observation_window = num_frames * step  # epoch is in jd
+            epochs = np.arange(start_time, start_time + total_observation_window, step)
+
+            # integrate s/c traj
+            asteroid_integrated_states, asteroid_earth_states = nbody.integrate_n_body(asteroid_state_helio,
+                                                                                       asteroid_epoch,
+                                                                                       total_observation_window *
+                                                                                       config['SECONDS_PER_DAY'],
+                                                                                       config['time_between_frames'],
+                                                                                       type="ASTEROID")  # integrator takes seconds
+
+            asteroid_states_aud = util.ms_to_aud(asteroid_integrated_states)
+
+
+            earthasteroid_states_aud = util.ms_to_aud(asteroid_earth_states)
+            asteroid_state = util.helio_eclip_to_sun_earth_corotating_batch_full(asteroid_states_aud,
+                                                                                 earthasteroid_states_aud)
+
+            ##########
+
+            # spacecraft ###############
+            spacecraft_state_geo = detected_minimoon[
+                ['GEO_ECLIP_X_(km)', 'GEO_ECLIP_Y_(km)', 'GEO_ECLIP_Z_(km)', 'GEO_ECLIP_Vx_(km/s)',
+                 'GEO_ECLIP_Vy_(km/s)',
+                 'GEO_ECLIP_Vz_(km/s)']].to_numpy()
+            spacecraft_epoch = detected_minimoon['sc_epoch']
+
+            # convert to heliocentric for integration
+            sun_geo_state = sp.spkgeo(10, sp.str2et(spacecraft_epoch), "ECLIPJ2000", 399)[0]
+            spacecraft_state_helio = spacecraft_state_geo - sun_geo_state
+
+            # integrate s/c traj
+            integrated_states, earth_states = nbody.integrate_n_body(spacecraft_state_helio, spacecraft_epoch,
+                                                                     total_observation_window * config[
+                                                                         'SECONDS_PER_DAY'],
+                                                                     config['time_between_frames'], type="SPACECRAFT")
+
+            integrated_states_aud = util.ms_to_aud(integrated_states)
+            earth_states_aud = util.ms_to_aud(earth_states)
+
+            spacecraft_state = util.helio_eclip_to_sun_earth_corotating_batch_full(integrated_states_aud,
+                                                                                   earth_states_aud)
+
+            # convert back to helio based on asteroid epoch
+            new_spacecraft_state_helio = util.sun_earth_corotating_to_helio_eclip_batch_full(spacecraft_state,
+                                                                                             earthasteroid_states_aud)
+            new_asteroid_state_helio = util.sun_earth_corotating_to_helio_eclip_batch_full(asteroid_state,
+                                                                                           earthasteroid_states_aud)
+
+            #############
+
+            # calc ra and dec from helio
+            x_rel = new_asteroid_state_helio[0, :] - new_spacecraft_state_helio[0, :]
+            y_rel = new_asteroid_state_helio[1, :] - new_spacecraft_state_helio[1, :]
+            z_rel = new_asteroid_state_helio[2, :] - new_spacecraft_state_helio[2, :]
+
+            r_xy = np.sqrt(x_rel ** 2 + y_rel ** 2)
+            r = np.sqrt(x_rel ** 2 + y_rel ** 2 + z_rel ** 2)
+
+            sin_ra = y_rel / r_xy
+            cos_ra = x_rel / r_xy
+            sin_dec = z_rel / r
+
+
+            # generate output file with epoch , ast xyz vxvyvz, detecting sc id xyz vxvyvz sinRA cosRA sinDec
+            # file name: run-x_minimoon-y_sc-z_index-k.csv
+            file_name = ('minimoon-' + str(detected_minimoon.name[1]) + '_sc-'
+                         + str(detected_minimoon.name[2]) + '_index-' + str(int(detected_minimoon['min_nonnegative'])))
+            file_path = (config['IOD_folder_path'] + '/' + file_name + '_' + file_i.split('/')[-1].split('.')[0] +
+                         '.csv')
+
+            # make dataframe
+            data = np.array([epochs, new_asteroid_state_helio[0, :], new_asteroid_state_helio[1, :],
+                    new_asteroid_state_helio[2, :], new_asteroid_state_helio[3, :], new_asteroid_state_helio[4, :],
+                    new_asteroid_state_helio[5, :], new_spacecraft_state_helio[0, :], new_spacecraft_state_helio[1, :],
+                    new_spacecraft_state_helio[2, :], new_spacecraft_state_helio[3, :], new_spacecraft_state_helio[4, :],
+                    new_spacecraft_state_helio[5, :], sin_ra, cos_ra, sin_dec]).T
+
+            df = pd.DataFrame(data, columns=config['IOD_data_columns'])
+            # Get desired format from config
+            output_format = config['save_format']  # default to csv
+
+            # Write based on format
+            base_path, _ = os.path.splitext(file_path)
+
+            if output_format in ['csv', 'both']:
+                df.to_csv(base_path + '.csv', sep=',', header=True, index=False)
+
+            if output_format in ['parquet', 'both']:
+                df.to_parquet(base_path + '.parquet', index=False)
+
+            vis = False
+            if vis:
+                #######################
+                # for visualization
+                ###################
+                # get the original s/c orbit and get the original s/c starting points
+                # create a formation object, it has s/c s randomly placed
+                formation = Formation(config)
+
+                # we already had a saved formation, saved according to the s/c 1 position, get the correspoding index in overall orbit file
+                sc1_ini_index = formation.get_index_from_pos(detected_minimoon['spacecraft_1_ini_pos'])
+
+                # re-initialize formation with this index
+                formation.recall_formation(sc1_ini_index, config)
+
+                # match the spacecraft trajectories to that of the asteroid in terms of length and sampling (asteroid sampled at one hour)
+                formation.match_spacecraft_trajectory(len(detected_minimoon['values']), config)
+                current_minimoon = Asteroid(detected_minimoon.name[1], 100, config)
+
+                # calc ra and dec from sun-earth-co (visualized in a different frame)
+                # calc ra and dec from helio
+                x_rel = asteroid_state[0, :] + spacecraft_state[0, :]
+                y_rel = asteroid_state[1, :] + spacecraft_state[1, :]
+                z_rel = asteroid_state[2, :] - spacecraft_state[2, :]
+
+                # r_xy = np.sqrt(x_rel ** 2 + y_rel ** 2)
+                r = np.sqrt(x_rel ** 2 + y_rel ** 2 + z_rel ** 2)
+
+                # sin_ra = y_rel / r_xy
+                cos_ra = x_rel / r_xy
+                sin_dec = z_rel / r
+
+                # visualize it all
+                util.viz(spacecraft_state[:3, :], asteroid_state[:3, :], current_minimoon, formation, [sin_ra, cos_ra, sin_dec], config)
+                ################
+
+    return
+
 def run_IOD_MPI(config):
     # --- MPI setup ---
     comm = MPI.COMM_WORLD
@@ -499,14 +689,14 @@ size = comm.Get_size()
 # Run parrallel sim to get IOD data using MPI
 ###################################
 
-# run_sim_runnumbers_MPI_getIOD_data(config)
+run_sim_runnumbers_MPI_getIOD_data(config)
 
 
 ###################################
 # Run IOD simulation in parallel
 ###################################
 
-run_IOD_MPI(config)
+# run_IOD_MPI(config)
 
 
 

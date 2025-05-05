@@ -56,7 +56,7 @@ def save_data_num_spacecraft(config):
             run_number_idx = int(file_i.split('_')[-3]) - 1
 
             percentages[run_number_idx, spacecraft_number_idx] = unique_object_ids / total * 100
-            print(percentages)
+
 
     spacecraft_numbers = [str(i + 1) + '_Spacecraft' for i in range(num_cols)]
     run_numbers =  np.arange(1, num_rows + 1).reshape(-1, 1)
@@ -114,7 +114,7 @@ args = parser.parse_args()
 with open(args.config, 'r') as file:
     config = yaml.safe_load(file)
 
-# file_name = save_data_num_spacecraft(config)
-file_name = 'fig_num_spacecraft_data.csv'
+file_name = save_data_num_spacecraft(config)
+# file_name = 'fig_num_spacecraft_data.csv'
 
 generate_figure(file_name, config)
