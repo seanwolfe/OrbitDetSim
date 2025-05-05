@@ -226,7 +226,9 @@ def run_sim_runnumbers_MPI_getIOD_data(config):
 
     # --- Master (rank 0) gathers the list of all files ---
     if rank == 0:
-        all_files = util.get_all_files(config['visible_files_folder'], config['save_format'])
+        # all_files = util.get_all_files(config['visible_files_folder'], config['save_format'])
+        all_files = util.get_all_files_run_number(config['visible_files_folder'], config['save_format'], config['run_number'])
+        print(all_files)
         num_files = 0
     else:
         all_files = None
@@ -444,25 +446,27 @@ def run_sim_runnumbers_MPI_getIOD_data_new(config):
     size = comm.Get_size()
 
     if rank == 0:
-        all_files = util.get_files_per_folder(config['visible_files_folder'])
+        all_files_per_folder = util.get_files_per_folder(config['visible_files_folder'], config['save_format'])
+
+        # Flatten and tag each file with folder index for balance tracking
+        tagged_files = []
+        for folder_idx, folder_files in enumerate(all_files_per_folder):
+            for f in folder_files:
+                tagged_files.append((folder_idx, f))
+
+        # Round-robin assignment
+        assignments = [[] for _ in range(size)]
+        for i, (_, f) in enumerate(tagged_files):
+            assignments[i % size].append(f)
     else:
-        all_files = None
+        assignments = None
 
-    # Broadcast the file list structure
-    all_files = comm.bcast(all_files, root=0)
-
-    assigned_files = []
-
-    for folder_files in all_files:
-        # Round-robin assignment of files from this folder
-        for i, file_path in enumerate(folder_files):
-            if i % size == rank:
-                assigned_files.append(file_path)
-
+        # Scatter assignments
+    local_files = comm.scatter(assignments, root=0)
 
     # --- Distribute work: each rank gets a subset ---
-    for i, file_i in enumerate(assigned_files):
-        print(file_i.split('/')[-1].split('.')[0])
+    for i, file_i in enumerate(local_files):
+        print(f"Rank {rank}: " + file_i.split('/')[-1].split('.')[0])
 
         run_data = util.read_master(file_i, config)
         # Create a mask to filter nonnegative values
@@ -471,8 +475,8 @@ def run_sim_runnumbers_MPI_getIOD_data_new(config):
 
         # Find the spacecraft with the minimum value for each object_id
         detected_pop = run_data[~np.isnan(run_data["min_nonnegative"])]
-        missed_pop = run_data[np.isnan(run_data["min_nonnegative"])]
 
+        config['num_spacecraft'] = int(file_i.split('/')[-1].split('.')[0].split('_')[1])
         detected_appended_pop = util.get_sc_state_from_sc1_position(detected_pop, config)
 
         print(f"Rank {rank} computed appended population")
@@ -690,7 +694,6 @@ size = comm.Get_size()
 ###################################
 
 run_sim_runnumbers_MPI_getIOD_data(config)
-
 
 ###################################
 # Run IOD simulation in parallel

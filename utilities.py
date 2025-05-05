@@ -530,16 +530,37 @@ def get_all_files(folder_path, filetype='csv'):
     return file_paths
 
 
-def get_files_per_folder(parent_folder):
-    subfolders = sorted([os.path.join(parent_folder, d) for d in os.listdir(parent_folder) if os.path.isdir(os.path.join(parent_folder, d))])
+def get_all_files_run_number(folder_path, filetype='csv', run_number=None):
+    assert filetype in ['csv', 'parquet'], "filetype must be 'csv' or 'parquet'"
+
+    file_paths = []
+    run_str = f"run_{run_number}" if run_number is not None else None
+
+    for root, _, files in os.walk(folder_path):
+        for file in files:
+            if file.endswith(f'.{filetype}'):
+                if run_str is None or run_str in file:
+                    file_paths.append(os.path.join(root, file))
+
+    return file_paths
+
+
+def get_files_per_folder(parent_folder, filetype):
+    subfolders = sorted([
+        os.path.join(parent_folder, d)
+        for d in os.listdir(parent_folder)
+        if os.path.isdir(os.path.join(parent_folder, d))
+    ])
+
     all_files = []
     for folder in subfolders:
         files = sorted([
             os.path.join(folder, f)
             for f in os.listdir(folder)
-            if os.path.isfile(os.path.join(folder, f))
+            if os.path.isfile(os.path.join(folder, f)) and f.endswith('.' + filetype)
         ])
         all_files.append(files)
+
     return all_files
 
 
