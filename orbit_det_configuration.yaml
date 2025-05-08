@@ -93,6 +93,7 @@ base_filename: 'fig_num_spacecraft_data'
 
 
 
+
 ###############################################
 # Running the PIELM IOD simulation
 ##############################################
@@ -105,6 +106,7 @@ base_filename: 'fig_num_spacecraft_data'
 AU_TO_M: 149597870691  # 1 AU in meters
 KM_TO_M: 1000
 SECONDS_PER_DAY: 86400
+MAS_TO_DEGREE: 3600000
 EARTH_RADIUS_AU: 6371000
 MOON_RADIUS_AU: 1737000
 SUN_MASS: 1.989E+30

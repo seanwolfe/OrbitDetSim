@@ -160,6 +160,45 @@ def read_master(file_path, config):
         raise ValueError(f"Unsupported file type: {file_ext}")
 
 
+def read_IOD_data(file, configuration):
+    file_ext = os.path.splitext(file)[1].lower()
+
+    if file_ext == '.csv':
+        return pd.read_csv(
+            file,
+            sep=',',
+            header=0,
+            names=configuration['IOD_data_columns']
+        )
+    elif file_ext == '.parquet':
+        return pd.read_parquet(file)
+
+
+def add_noise_to_angles(df, std_ra_deg=1.0, std_dec_deg=1.0):
+    # Convert sin_ra and cos_ra to RA in degrees
+    ra_rad = np.arctan2(df['SIN_RA'], df['COS_RA'])  # range [-π, π]
+    ra_deg = np.degrees(ra_rad) % 360  # range [0, 360)
+
+    # Convert sin_dec to Dec in degrees
+    dec_rad = np.arcsin(df['SIN_DEC'])  # range [-π/2, π/2]
+    dec_deg = np.degrees(dec_rad)       # range [-90, 90]
+
+    # Add Gaussian noise in degrees
+    ra_noisy_deg = (ra_deg + np.random.normal(0, std_ra_deg, size=len(df))) % 360
+    dec_noisy_deg = np.clip(dec_deg + np.random.normal(0, std_dec_deg, size=len(df)), -90, 90)
+
+    # Convert back to radians
+    ra_noisy_rad = np.radians(ra_noisy_deg)
+    dec_noisy_rad = np.radians(dec_noisy_deg)
+
+    # Add noisy sin/cos columns
+    df['SIN_RA_NOISY'] = np.sin(ra_noisy_rad)
+    df['COS_RA_NOISY'] = np.cos(ra_noisy_rad)
+    df['SIN_DEC_NOISY'] = np.sin(dec_noisy_rad)
+
+    return df
+
+
 def helio_eclip_to_sun_earth_corotating_batch_full(states, earth_states):
     """
     Converts a batch of position and velocity state vectors from heliocentric ECLIPJ2000
@@ -534,7 +573,7 @@ def get_all_files_run_number(folder_path, filetype='csv', run_number=None):
     assert filetype in ['csv', 'parquet'], "filetype must be 'csv' or 'parquet'"
 
     file_paths = []
-    run_str = f"run_{run_number}" if run_number is not None else None
+    run_str = f"run_{run_number}_" if run_number is not None else None
 
     for root, _, files in os.walk(folder_path):
         for file in files:

@@ -653,8 +653,14 @@ def run_IOD_MPI(config):
     for file_path in files_for_this_rank:
 
         # read data
+        iod_data = util.read_IOD_data(file_path, config)
 
-        # add noise
+        # add noise in quadrature - assuming independent
+        sigma_ra = np.sqrt(config['sigma_ra'] ** 2 + config['sigma_pointing'] ** 2) / config['MAS_TO_DEGREE']
+        sigma_dec = np.sqrt(config['sigma_dec'] ** 2 + config['sigma_pointing'] ** 2) / config['MAS_TO_DEGREE']
+        iod_data_w_noise = util.add_noise_to_angles(iod_data, sigma_ra, sigma_dec)
+
+
 
         # run pielm
 
@@ -693,13 +699,13 @@ size = comm.Get_size()
 # Run parrallel sim to get IOD data using MPI
 ###################################
 
-run_sim_runnumbers_MPI_getIOD_data(config)
+# run_sim_runnumbers_MPI_getIOD_data(config)
 
 ###################################
 # Run IOD simulation in parallel
 ###################################
 
-# run_IOD_MPI(config)
+run_IOD_MPI(config)
 
 
 
