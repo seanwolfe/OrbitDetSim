@@ -127,11 +127,8 @@ def eclip_to_sun_earth_corotating_batch(positions_eclip, et_times):
     # Get Earth's position for each time in ECLIPJ2000
     sun_pos = np.array([sp.spkpos("SUN", et, "ECLIPJ2000", "NONE", "EARTH")[0] for et in et_times])
 
-
     # Calculate Earth's orbital angle for each time (angle in the ecliptic plane)
     angles = np.arctan2(sun_pos[:, 1], sun_pos[:, 0])  # Shape: (N,)
-
-    print(positions_eclip)
 
     # Calculate the cosine and sine of each angle
     cos_angles = np.cos(-angles)  # Shape: (N,)
@@ -160,18 +157,16 @@ lpf_orbit = pd.read_csv('LPF_orbit_2.csv', sep=',', header=0,
                                "MOON_SUN_EARTH_CO_X_(km)", "MOON_SUN_EARTH_CO_Y_(km)", "MOON_SUN_EARTH_CO_Z_(km)"
                                ])
 
-eme_pos = lpf_orbit[["GEO_EME_X_(km)", "GEO_EME_Y_(km)", "GEO_EME_Z_(km)"]].iloc[187671:187675]
-eclip_pos = eme_to_ecliptic_batch(eme_pos)
+# eme_pos = lpf_orbit[["GEO_EME_X_(km)", "GEO_EME_Y_(km)", "GEO_EME_Z_(km)"]]
+# eclip_pos = eme_to_ecliptic_batch(eme_pos)
 
 # Convert start time to ephemeris time
-et_times = [sp.str2et(row['Time']) for i, row in lpf_orbit.iloc[187671:187675].iterrows()]
+# et_times = [sp.str2et(row['Time']) for i, row in lpf_orbit.iterrows()]
 
 # Get Earth's position for each time in ECLIPJ2000
 # moon_pos = np.array([sp.spkpos("MOON", et, "ECLIPJ2000", "NONE", "EARTH")[0] for et in et_times])
 
-moon_sun_earth_co = eclip_to_sun_earth_corotating_batch(eclip_pos[:, :3], et_times)
-
-print(moon_sun_earth_co)
+# moon_sun_earth_co = eclip_to_sun_earth_corotating_batch(moon_pos[:, :3], et_times)
 
 # lpf_orbit[['GEO_ECLIP_X_(km)', 'GEO_ECLIP_Y_(km)', 'GEO_ECLIP_Z_(km)']] = moon_pos
 # lpf_orbit[["MOON_SUN_EARTH_CO_X_(km)", "MOON_SUN_EARTH_CO_Y_(km)", "MOON_SUN_EARTH_CO_Z_(km)"]] = moon_sun_earth_co
@@ -193,11 +188,8 @@ ax.scatter(lpf_orbit["SUN_EARTH_CO_X_(km)"].iloc[start] * kmtoau, lpf_orbit["SUN
            lpf_orbit["SUN_EARTH_CO_Z_(km)"].iloc[start] * kmtoau, s=20)
 ax.scatter(lpf_orbit["SUN_EARTH_CO_X_(km)"].iloc[end_final] * kmtoau, lpf_orbit["SUN_EARTH_CO_Y_(km)"].iloc[end_final] * kmtoau,
            lpf_orbit["SUN_EARTH_CO_Z_(km)"].iloc[end_final] * kmtoau, s=20)
-ax.plot(lpf_orbit["SUN_EARTH_CO_X_(km)"].iloc[start:end] * kmtoau, lpf_orbit["SUN_EARTH_CO_Y_(km)"].iloc[start:end] * kmtoau,
-           lpf_orbit["SUN_EARTH_CO_Z_(km)"].iloc[start:end] * kmtoau)
-ax.plot(lpf_orbit["SUN_EARTH_CO_X_(km)"].iloc[start:end_final] * kmtoau, lpf_orbit["SUN_EARTH_CO_Y_(km)"].iloc[start:end_final] * kmtoau,
-           lpf_orbit["SUN_EARTH_CO_Z_(km)"].iloc[start:end_final] * kmtoau)
-
+# ax.plot(lpf_orbit["SUN_EARTH_CO_X_(km)"].iloc[start:end] * kmtoau, lpf_orbit["SUN_EARTH_CO_Y_(km)"].iloc[start:end] * kmtoau,
+#            lpf_orbit["SUN_EARTH_CO_Z_(km)"].iloc[start:end] * kmtoau)
 
 # Create a sphere (Earth model)
 theta = np.linspace(0, np.pi, 30)  # Latitude

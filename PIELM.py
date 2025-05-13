@@ -1,8 +1,11 @@
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.autograd as autograd
 import spiceypy as spice
 import numpy as np
+import yaml
+import argparse
 
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
@@ -60,9 +63,9 @@ def nbody_physics_loss(Y_pred, Y_ddot_pred, epochs, configuration):
     masses: (n,) — masses of influencing bodies
     """
 
-    def get_nbody_positions(epochs, config):
+    def get_nbody_positions(epoch, config):
         """
-        :param epochs: numpy array of shape (N,) — JDTDB times
+        :param epoch: numpy array of shape (N,) — JDTDB times
         :param config: dictionary containing masses
         :return: positions (N, n, 3), masses (n,)
         """
@@ -72,12 +75,12 @@ def nbody_physics_loss(Y_pred, Y_ddot_pred, epochs, configuration):
                            ['SUN', 'MERCURY', 'VENUS', 'EARTH', 'MARS', 'JUPITER', 'SATURN', 'URANUS', 'NEPTUNE',
                             'MOON']])
 
-        N = len(epochs)
+        N = len(epoch)
         n = len(bodies)
         positions = np.zeros((N, n, 3))  # Output array
 
         # Convert epochs from JDTDB to ET
-        epoch_ets = spice.unitim(epochs, 'JDTDB', 'ET')  # (N,)
+        epoch_ets = [spice.unitim(epoch_i, 'JDTDB', 'ET') for epoch_i in epoch]  # (N,)
 
         for i, et in enumerate(epoch_ets):
             for j, body in enumerate(bodies):
@@ -97,7 +100,7 @@ def nbody_physics_loss(Y_pred, Y_ddot_pred, epochs, configuration):
     accel_terms = G * masses[None, :, None] * r_vecs / (r_norms ** 3 + 1e-9)  # (N, n, 3)  # in km
 
     total_accel = accel_terms.sum(dim=1)  # (N, 3)
-    return torch.mean((Y_ddot_pred - total_accel) ** 2)
+    return torch.mean((torch.tensor(Y_ddot_pred) - total_accel) ** 2)
 
 
 # Training
@@ -115,6 +118,22 @@ def train(model, x_data, y_data, epochs=1000, lr=1e-2, lambda_phys=1.0):
             print(f"Epoch {epoch}: Data Loss = {data_loss.item():.4e}, Physics Loss = {phys_loss.item():.4e}")
 
 
+# Argument parser to get the config file path
+parser = argparse.ArgumentParser(description="Run the spacecraft simulation")
+parser.add_argument('--config', type=str, required=True, help="Path to the config file")
+args = parser.parse_args()
+
+# Load the config file
+with open(args.config, 'r') as file:
+    config = yaml.safe_load(file)
+
 # elm = ELM(hidden_dim=50, q=3)
 # z = torch.linspace(0, 1, 100).unsqueeze(1)  # (100 x 1)
 # y_pred = elm(z)  # (100 x 3)
+traj = pd.read_csv('asteroid_trajectory_jdtdb.csv')
+y_pred = traj.loc[:, ['x', 'y', 'z']].values
+y_dot_dot_pred = traj.loc[:, ['ax', 'ay', 'az']].values
+epochss = traj.loc[:, 'jdtdb'].values
+
+loss = nbody_physics_loss(y_pred, y_dot_dot_pred, epochss, config)
+print(loss)
