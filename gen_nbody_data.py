@@ -1,50 +1,87 @@
 import rebound
+import spiceypy as spice
 import numpy as np
+import pandas as pd
 
-def add_solar_system_km(sim):
-    sun_mass = 1.9885e30  # kg
-    planet_data = [
-        ("Mercury",   3.3011e23,         5.79e7),
-        ("Venus",     4.8675e24,        1.082e8),
-        ("Earth",     5.9724e24,        1.496e8),
-        ("Moon",      7.3477e22,        1.5e8),
-        ("Mars",      6.4171e23,        2.279e8),
-        ("Jupiter",   1.8982e27,        7.785e8),
-        ("Saturn",    5.6834e26,        1.433e9),
-        ("Uranus",    8.6810e25,        2.877e9),
-        ("Neptune",   1.0241e26,        4.503e9),
-    ]
-    sim.add(m=sun_mass)
-    for _, mass, a in planet_data:
-        sim.add(m=mass, a=a)
+# Masses in kg (you can define this however you prefer — dictionary, class, etc.)
+body_masses = {
+    'SUN': 1.989e30,
+    'MERCURY': 3.3e23,
+    'VENUS': 4.87e24,
+    'EARTH': 5.97e24,
+    'MOON': 7.3e22,
+    'MARS': 6.42e23,
+    'JUPITER': 1.898e27,
+    'SATURN': 5.68e26,
+    'URANUS': 8.68e25,
+    'NEPTUNE': 1.02e26,
+}
 
-def generate_asteroid_trajectory_with_jdtdb(start_jdtdb=2460000.5):
+def add_body_from_spice(sim, target_name, spice_id, et, center='EARTH', frame='ECLIPJ2000'):
+    state, _ = spice.spkezr(str(spice_id), et, frame, 'NONE', center)
+    pos = state[:3]  # km
+    vel = state[3:]  # km/s
+    mass = body_masses.get(target_name, 0.0)
+
+    sim.add(m=mass, x=pos[0], y=pos[1], z=pos[2], vx=vel[0], vy=vel[1], vz=vel[2])
+
+def generate_asteroid_trajectory_real_epoch(start_utc="2023-01-01T00:00:00", duration_days=30):
+    # Load kernels
+    spice.furnsh("naif0012.tls")
+    spice.furnsh("de430.bsp")
+    filename = "asteroid_trajectory_jdtdb.csv"
+
+    et0 = spice.utc2et(start_utc)
     sim = rebound.Simulation()
     sim.units = ('km', 's', 'kg')
-    add_solar_system_km(sim)
 
-    # Add an asteroid
-    sim.add(m=0.0, x=1.6e8, y=3.0e7, z=0.0, vx=0.0, vy=30.0, vz=0.0)
+    # Add Sun and planets
+    planet_ids = {
+        'EARTH': 399,
+        'SUN': 10,
+        'MERCURY': 1,
+        'VENUS': 2,
+        'MOON': 301,
+        'MARS': 4,
+        'JUPITER': 5,
+        'SATURN': 6,
+        'URANUS': 7,
+        'NEPTUNE': 8
+    }
+
+    for name, spk_id in planet_ids.items():
+        add_body_from_spice(sim, name, spk_id, et0)
+
+    # Add your asteroid manually
+    sim.add(m=0.0, x=1.6e6, y=3e4, z=0.0, vx=0.0, vy=5.0, vz=0.0)
     sim.move_to_com()
 
-    dt = 3600  # seconds (1 hour)
-    n_steps = 24 * 30  # 30 days
-    sec_per_day = 86400.0
-    trajectory = []
+    # Integrate
+    dt = 3600  # seconds
+    n_steps = int(duration_days * 24)
 
+    data = []
     for i in range(n_steps):
         sim.integrate(sim.t + dt)
+        jdtdb = spice.unitim(et0 + sim.t, 'ET', 'JDTDB')
+        earth = sim.particles[0]
         asteroid = sim.particles[-1]
-        # REBOUND's `sim.t` is in seconds from start
-        jdtdb = start_jdtdb + (sim.t / sec_per_day)
-        row = [jdtdb, asteroid.x, asteroid.y, asteroid.z, asteroid.ax, asteroid.ay, asteroid.az]
-        trajectory.append(row)
 
-    return np.array(trajectory)
 
-# Generate and save to CSV
-trajectory_data = generate_asteroid_trajectory_with_jdtdb()
-np.savetxt("asteroid_trajectory_jdtdb.csv", trajectory_data, delimiter=",",
-           header="jdtdb,x,y,z,ax,ay,az", comments='')
+        data.append({
+            "jdtdb": jdtdb,
+            "x": asteroid.x - earth.x,
+            "y": asteroid.y - earth.y,
+            "z": asteroid.z - earth.z,
+            "ax": asteroid.ax,
+            "ay": asteroid.ay,
+            "az": asteroid.az
+        })
 
-print("Saved trajectory with JDTDB epochs to 'asteroid_trajectory_jdtdb.csv'.")
+    df = pd.DataFrame(data)
+    df.to_csv(filename, index=False, float_format="%.10e")
+
+    print(f"Saved trajectory with JDTDB epochs to '{filename}'.")
+
+# Usage
+generate_asteroid_trajectory_real_epoch()

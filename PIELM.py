@@ -6,6 +6,7 @@ import spiceypy as spice
 import numpy as np
 import yaml
 import argparse
+import utilities as util
 
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
@@ -57,10 +58,10 @@ class ELM(nn.Module):
 
 def nbody_physics_loss(Y_pred, Y_ddot_pred, epochs, configuration):
     """
-    Y_pred: (N, 3) — predicted positions
-    Y_ddot_pred: (N, 3) — predicted accelerations
-    positions: (N, n, 3) — positions of other bodies at each epoch
-    masses: (n,) — masses of influencing bodies
+    Y_pred: (N, 3) — nondimensional predicted geocentric positions of asteroid
+    Y_ddot_pred: (N, 3) — nondimensional predicted accelerations
+    epochs: (N,) — JDTDB times
+    configuration: dict with physical constants and body masses
     """
 
     def get_nbody_positions(epoch, config):
@@ -71,36 +72,109 @@ def nbody_physics_loss(Y_pred, Y_ddot_pred, epochs, configuration):
         """
         bodies = [10, 1, 2, 399, 4, 5, 6, 7, 8, 301]  # SPICE IDs: SUN, MERCURY, ..., MOON
 
-        masses = np.array([config[f'{name}_MASS'] for name in
-                           ['SUN', 'MERCURY', 'VENUS', 'EARTH', 'MARS', 'JUPITER', 'SATURN', 'URANUS', 'NEPTUNE',
-                            'MOON']])
+        names = ['SUN', 'MERCURY', 'VENUS', 'EARTH', 'MARS', 'JUPITER', 'SATURN', 'URANUS', 'NEPTUNE', 'MOON']
+        masses = np.array([config[f'{name}_MASS'] for name in names])
 
-        N = len(epoch)
-        n = len(bodies)
-        positions = np.zeros((N, n, 3))  # Output array
+        N, n = len(epoch), len(bodies)
+        positions = np.zeros((N, n, 3))
 
         # Convert epochs from JDTDB to ET
         epoch_ets = [spice.unitim(epoch_i, 'JDTDB', 'ET') for epoch_i in epoch]  # (N,)
 
         for i, et in enumerate(epoch_ets):
             for j, body in enumerate(bodies):
-                state, _ = spice.spkgeo(targ=body, et=et, ref='ECLIPJ2000', obs=10)  # observer is Sun (10)
-                positions[i, j, :] = state[:3]  # only position
+                state, _ = spice.spkgeo(targ=body, et=et, ref='ECLIPJ2000', obs=399)  # observer is Earth
+                positions[i, j, :] = state[:3]  # km
 
         return torch.tensor(positions, dtype=torch.float32), torch.tensor(masses, dtype=torch.float32)
 
     positions, masses = get_nbody_positions(epochs, configuration)
-    G = configuration['GRAVITATIONAL_CONSTANT']
 
-    N, n, _ = positions.shape
+    # === Constants and scales ===
+    RH_km = configuration['EARTH_HILL_RADIUS_KM']
+    L = 3 * RH_km  # Length scale in km
+    M = configuration['EARTH_MASS']  # Mass scale in kg
+    T = np.sqrt(L ** 3 / (configuration['GRAVITATIONAL_CONSTANT'] / configuration['KM_TO_M'] ** 3 * M))
+
+    Y_pred /= L
+    Y_ddot_pred /= (L / T ** 2)
+
+    # Nondimensionalize positions (geocentric)
+    positions_nd = positions / L  # Now unitless
+
+    # Convert masses to nondimensional (mass / M)
+    masses_nd = masses / M  # (n,)
+
+    # The graviational constant is non-dimensionlized
+    G_nd = (configuration['GRAVITATIONAL_CONSTANT'] / configuration['KM_TO_M'] ** 3) *  T ** 2 * M / L ** 3
+
+    N, n, _ = positions_nd.shape
     Y_expanded = Y_pred[:, None, :]  # (N, 1, 3)
 
-    r_vecs = positions - Y_expanded  # (N, n, 3)
+    r_vecs = positions_nd - Y_expanded  # (N, n, 3)
     r_norms = torch.norm(r_vecs, dim=-1, keepdim=True)  # (N, n, 1)
-    accel_terms = G * masses[None, :, None] * r_vecs / (r_norms ** 3 + 1e-9)  # (N, n, 3)  # in km
+
+    accel_terms = G_nd * masses_nd[None, :, None] * r_vecs / (r_norms ** 3 + 1e-9)  # (N, n, 3)  # in km
 
     total_accel = accel_terms.sum(dim=1)  # (N, 3)
+
     return torch.mean((torch.tensor(Y_ddot_pred) - total_accel) ** 2)
+
+
+def ra_dec_observation_loss(Y_pred, Y_obs, spacecraft_pos, epochs, configuration):
+    """
+    Computes the MSE between observed and predicted [sin(RA), cos(RA), sin(DEC)].
+
+    :param Y_pred: (N, 3) geocentric non-dim predicted positions [x, y, z] in units of 3 Earth Hill Radii
+    :param Y_obs: (N, 3) observations as [sin(RA), cos(RA), sin(DEC)]
+    :param spacecraft_pos: (N, 3) spacecraft heliocentric positions (AU) - used to get observer-to-target vector
+    :param epochs: (N,) JDTDB times
+    :param configuration: dict with keys:
+        - 'EHILL_KM'
+        - 'AU_KM'
+    :return: scalar MSE loss between predicted and observed angular vectors
+    """
+    Y_obs = torch.tensor(Y_obs, dtype=torch.float32)
+
+    EHILL_KM = configuration['EARTH_HILL_RADIUS_KM']
+    AU_KM = configuration['AU_TO_M'] / configuration['KM_TO_M']
+
+    # Convert predicted positions to km (geocentric)
+    Y_pred_km = Y_pred * (3 * EHILL_KM)  # (N, 3)
+
+    # Get observer positions in km (AU -> km)
+    spacecraft_pos_km = torch.tensor(spacecraft_pos, dtype=torch.float32) * AU_KM
+
+    # Get Earth's position at each epoch in heliocentric km
+    earth_positions = np.zeros_like(Y_pred_km)
+    for i, jd in enumerate(epochs):
+        et = spice.unitim(jd, 'JDTDB', 'ET')
+        state, _ = spice.spkgeo(targ=399, et=et, ref='ECLIPJ2000', obs=10)  # Earth wrt Sun
+        earth_positions[i, :] = state[:3]
+    earth_positions_km = torch.tensor(earth_positions, dtype=torch.float32)
+
+    # Compute observer position in geocentric km
+    observer_pos_geo = spacecraft_pos_km - earth_positions_km  # (N, 3)
+
+    # Compute observer-to-target vector
+    obs_to_target = Y_pred_km - observer_pos_geo  # (N, 3)
+
+    # Convert to RA/DEC angular representation
+    x, y, z = obs_to_target[:, 0], obs_to_target[:, 1], obs_to_target[:, 2]
+    r = torch.norm(obs_to_target, dim=1) + 1e-12  # Avoid division by 0
+    dec = torch.asin(z / r)
+    ra = torch.atan2(y, x)
+
+    sin_ra = torch.sin(ra)
+    cos_ra = torch.cos(ra)
+    sin_dec = torch.sin(dec)
+
+    Y_pred_ang = torch.stack([sin_ra, cos_ra, sin_dec], dim=1)
+
+    # Compute MSE between predicted and observed [sin RA, cos RA, sin DEC]
+    loss = torch.mean((Y_pred_ang - Y_obs) ** 2)
+
+    return loss
 
 
 # Training
@@ -127,13 +201,49 @@ args = parser.parse_args()
 with open(args.config, 'r') as file:
     config = yaml.safe_load(file)
 
+# elm class test
 # elm = ELM(hidden_dim=50, q=3)
 # z = torch.linspace(0, 1, 100).unsqueeze(1)  # (100 x 1)
 # y_pred = elm(z)  # (100 x 3)
-traj = pd.read_csv('asteroid_trajectory_jdtdb.csv')
-y_pred = traj.loc[:, ['x', 'y', 'z']].values
-y_dot_dot_pred = traj.loc[:, ['ax', 'ay', 'az']].values
-epochss = traj.loc[:, 'jdtdb'].values
 
-loss = nbody_physics_loss(y_pred, y_dot_dot_pred, epochss, config)
-print(loss)
+# physics loss test
+# traj = pd.read_csv('asteroid_trajectory_jdtdb.csv')
+# y_pred = traj.loc[:, ['x', 'y', 'z']].values
+# y_dot_dot_pred = traj.loc[:, ['ax', 'ay', 'az']].values
+# epochss = traj.loc[:, 'jdtdb'].values
+# loss = nbody_physics_loss(y_pred, y_dot_dot_pred, epochss, config)
+# print(loss)
+
+# observation loss test
+# read data
+# file_path = 'minimoon-NESC000000B3_sc-1_index-10432_spacecraft_2_runs_2_run_2_part_1.csv'
+# iod_data = util.read_IOD_data(file_path, config)
+#
+# yp_helio = iod_data.loc[:, ["HELIO_X(AU)", "HELIO_Y(AU)", "HELIO_Z(AU)"]].values
+# e = iod_data.loc[:, 'EPOCH(JDTDB)']
+#
+# EHILL_KM = config['EARTH_HILL_RADIUS_KM']
+# AU_KM = config['AU_TO_M'] / config['KM_TO_M']
+
+# Get observer positions in km (AU -> km)
+# yp_helio_km = torch.tensor(yp_helio, dtype=torch.float32) * AU_KM
+
+# Get Earth's position at each epoch in heliocentric km
+# earth_positions = np.zeros_like(yp_helio_km)
+# for i, jd in enumerate(e):
+#     et = spice.unitim(jd, 'JDTDB', 'ET')
+#     state, _ = spice.spkgeo(targ=399, et=et, ref='ECLIPJ2000', obs=10)  # Earth wrt Sun
+#     earth_positions[i, :] = state[:3]
+# earth_positions_km = torch.tensor(earth_positions, dtype=torch.float32)
+
+# Compute observer position in geocentric km
+# yp_geo_km = yp_helio_km - earth_positions_km  # (N, 3)
+
+# Convert predicted positions to km (geocentric)
+# yp = yp_geo_km / (3 * EHILL_KM)  # (N, 3)
+
+# sc = iod_data.loc[:, ["SC_HELIO_X(AU)", "SC_HELIO_Y(AU)", "SC_HELIO_Z(AU)"]].values
+# yo = iod_data.loc[:, ['SIN_RA', 'COS_RA', 'SIN_DEC']].values
+# print(ra_dec_observation_loss(yp, yo, sc, e, config))
+
+
