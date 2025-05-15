@@ -179,9 +179,6 @@ def ra_dec_observation_loss(Y_pred, Y_obs, spacecraft_pos, epochs, configuration
     return loss
 
 
-from typing import Literal, List, Tuple, Union
-import numpy as np
-
 def sample_time_points(
     method: Literal["lhs", "uniform", "gaussian"],
     observation_epochs: np.ndarray,
@@ -228,7 +225,6 @@ def sample_time_points(
         samples = []
         while len(samples) < n_sample:
             x = rng.normal(loc=mean, scale=std)
-            print(x)
             if domain_start <= x <= domain_end:
                 samples.append(x)
         additional_samples = np.array(samples)
@@ -282,6 +278,51 @@ def sample_time_points(
     combined = np.concatenate([observation_epochs, additional_samples])
     return np.sort(combined)
 
+def epoch_normalization(epoch, z_range, configuration):
+    """
+    Normalize JDTDB epochs to a specified z_range after non-dimensionalizing.
+
+    Parameters:
+        epoch (np.ndarray): Array of JDTDB times (Julian Dates).
+        z_range (Tuple[float, float]): Target range (z0, zf) to map the nondimensionalized epochs into.
+        configuration (dict): Must contain:
+            - 'EARTH_HILL_RADIUS_KM'
+            - 'EARTH_MASS'
+            - 'GRAVITATIONAL_CONSTANT'
+            - 'KM_TO_M'
+
+    Returns:
+        normalized_epoch (np.ndarray): Epochs mapped to z_range.
+        normalization_constant (float): (zf - z0) / (t_ndim_f - t_ndim_0)
+    """
+
+    # === Constants and scales ===
+    RH_km = configuration['EARTH_HILL_RADIUS_KM']
+    L = 3 * RH_km  # km
+    M = configuration['EARTH_MASS']  # kg
+    G = configuration['GRAVITATIONAL_CONSTANT']  # m^3 / kg / s^2
+    KM_TO_M = configuration['KM_TO_M']
+
+    # Convert G to km^3 / kg / s^2
+    G_km3 = G / KM_TO_M**3
+
+    # Time scale (in seconds)
+    T_scale = np.sqrt(L**3 / (G_km3 * M))
+
+    # === Convert JDTDB to seconds since first epoch ===
+    SECONDS_PER_DAY = 86400.0
+    t_seconds = (epoch - epoch[0]) * SECONDS_PER_DAY
+
+    # === Nondimensionalize ===
+    t_nondim = t_seconds / T_scale
+    t0, tf = t_nondim[0], t_nondim[-1]
+
+    # === Normalize to z_range ===
+    z0, zf = z_range
+    scale = (zf - z0) / (tf - t0)
+    normalized_epoch = z0 + scale * (t_nondim - t0)
+
+    return normalized_epoch, scale
 
 
 # Training
@@ -356,17 +397,17 @@ with open(args.config, 'r') as file:
 ##########
 # collocation points test
 ##########
-# obs_e = np.array([2454965.50836787, 2454966.50836787, 2454967.50836787, 2454968.50836787, 2454969.50836787, 2454970.50836787,
-#           2454971.50836787, 2454972.50836787, 2454973.50836787, 2454974.50836787])
-# delta = 10
-# num_points = 20
-# layer_ratios = [(0., 1/5), (1/5, 4/5), (4/5, 1.)]
-# mean = obs_e[0] + (obs_e[-1] - obs_e[0]) / 2
-# std = (obs_e[-1] - obs_e[0])
+obs_e = np.array([2454965.50836787, 2454966.50836787, 2454967.50836787, 2454968.50836787, 2454969.50836787, 2454970.50836787,
+          2454971.50836787, 2454972.50836787, 2454973.50836787, 2454974.50836787])
+delta = 10
+num_points = 20
+layer_ratios = [(0., 1/5), (1/5, 4/5), (4/5, 1.)]
+mean = obs_e[0] + (obs_e[-1] - obs_e[0]) / 2
+std = (obs_e[-1] - obs_e[0]) * 4
 # nbins = num_points
 
 # gaussian
-# colloc_points = sample_time_points("gaussian", obs_e, delta, num_points, mean, std, layer_ratios=layer_ratios, config=config)
+colloc_points = sample_time_points("gaussian", obs_e, delta, num_points, mean, std, layer_ratios=layer_ratios, config=config)
 # print(colloc_points.shape)
 # print(colloc_points[0])
 # print(colloc_points[-1])
@@ -414,3 +455,11 @@ with open(args.config, 'r') as file:
 # plt.hist(colloc_points, edgecolor='black', bins=nbins)
 # plt.hist(obs_e, edgecolor='black')
 # plt.show()
+
+############
+# time input non-dim and normalizatoin test, with colloc points
+###########
+epochs_nd_norm, c = epoch_normalization(colloc_points, (0, 1), config)
+
+print(epochs_nd_norm)
+print(c)
