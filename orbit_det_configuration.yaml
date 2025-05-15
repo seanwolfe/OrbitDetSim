@@ -89,7 +89,7 @@ base_filename: 'fig_num_spacecraft_data'
 ##############################################
 # Physics-informed extreme learning machine parameters
 ##############################################
-
+seed: 42
 
 
 

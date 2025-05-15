@@ -7,6 +7,8 @@ import numpy as np
 import yaml
 import argparse
 import utilities as util
+from typing import Callable, List, Literal, Tuple, Union
+import matplotlib.pyplot as plt
 
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
@@ -177,6 +179,111 @@ def ra_dec_observation_loss(Y_pred, Y_obs, spacecraft_pos, epochs, configuration
     return loss
 
 
+from typing import Literal, List, Tuple, Union
+import numpy as np
+
+def sample_time_points(
+    method: Literal["lhs", "uniform", "gaussian"],
+    observation_epochs: np.ndarray,
+    delta: float,
+    num_points: int,
+    mean: float = None,
+    std: float = None,
+    layer_ratios: List[Tuple[float, float]] = None,  # Only used for lhs and random_uniform
+    config: dict = {},
+    seed: Union[int, None] = None
+) -> np.ndarray:
+    """
+    Generate time samples using specified strategy, including observation epochs.
+
+    Parameters:
+        method: Sampling method to use ("lhs", "random_uniform", or "gaussian").
+        observation_epochs: Array of observation times.
+        delta: Time to extend before and after observation window.
+        num_points: Total number of time samples to draw (including observation_epochs).
+        layer_ratios: List of (start_ratio, end_ratio) defining sub-regions in [0, 1] (only for LHS and uniform).
+        config: Additional parameters:
+            - expansion: float, factor to expand domain beyond obs epochs
+            - mean: float (for Gaussian)
+            - std: float (for Gaussian)
+        seed: Random seed for reproducibility.
+
+    Returns:
+        np.ndarray of sampled time points, including observation_epochs.
+    """
+    rng = np.random.default_rng(config["seed"])
+    t0, tN = observation_epochs[0], observation_epochs[-1]
+    domain_start = t0 - delta
+    domain_end = tN + delta
+    layer_bounds = [(t0 - delta, t0), (t0, tN), (tN, tN + delta)]
+
+    # Number of additional points to sample
+    n_obs = len(observation_epochs)
+    n_sample = num_points - n_obs
+    if n_sample < 0:
+        raise ValueError("num_points must be greater than or equal to number of observation_epochs.")
+
+    # Sample additional time points
+    if method == "gaussian":
+        samples = []
+        while len(samples) < n_sample:
+            x = rng.normal(loc=mean, scale=std)
+            print(x)
+            if domain_start <= x <= domain_end:
+                samples.append(x)
+        additional_samples = np.array(samples)
+
+    else:
+        if layer_ratios is None:
+            raise ValueError("layer_ratios must be provided for LHS and random_uniform methods.")
+
+        # Convert layer_ratios to relative weights
+        ratios = [end - start for start, end in layer_ratios]
+        total_ratio = sum(ratios)
+        normalized_ratios = [r / total_ratio for r in ratios]
+
+        # Distribute `n_sample` as proportionally as possible across layers
+        raw_counts = np.array([r * n_sample for r in normalized_ratios])
+        base_counts = np.floor(raw_counts).astype(int)
+
+        # Distribute remaining samples to best approximate the target ratios
+        remainder = n_sample - np.sum(base_counts)
+        if remainder > 0:
+            fractional_parts = raw_counts - base_counts
+            top_indices = np.argsort(-fractional_parts)[:remainder]
+            for idx in top_indices:
+                base_counts[idx] += 1
+
+        points_per_layer = base_counts
+
+        all_samples = []
+        for i, (layer_start, layer_end) in enumerate(layer_bounds):
+            n = points_per_layer[i]
+            if n > 0:
+                if method == "lhs":
+                    strata = np.linspace(layer_start, layer_end, n + 1)
+                    print(strata)
+                    samples = strata[:-1] + rng.uniform(0, 1, size=n) * (strata[1:] - strata[:-1])
+                elif method == "uniform":
+                    if n == 1:
+                        samples = np.array([(layer_start + layer_end) / 2])
+                    else:
+                        samples = np.linspace(layer_start, layer_end, n, endpoint=False) + (layer_end - layer_start) / (
+                                    2 * n)
+
+            else:
+                raise ValueError(f"Unsupported method: {method}")
+
+            all_samples.append(samples)
+
+        additional_samples = np.concatenate(all_samples) if all_samples else np.array([])
+
+    # Combine with observation epochs and sort
+    combined = np.concatenate([observation_epochs, additional_samples])
+    return np.sort(combined)
+
+
+
 # Training
 def train(model, x_data, y_data, epochs=1000, lr=1e-2, lambda_phys=1.0):
     optimizer = torch.optim.Adam([model.output_weights], lr=lr)
@@ -246,4 +353,64 @@ with open(args.config, 'r') as file:
 # yo = iod_data.loc[:, ['SIN_RA', 'COS_RA', 'SIN_DEC']].values
 # print(ra_dec_observation_loss(yp, yo, sc, e, config))
 
+##########
+# collocation points test
+##########
+# obs_e = np.array([2454965.50836787, 2454966.50836787, 2454967.50836787, 2454968.50836787, 2454969.50836787, 2454970.50836787,
+#           2454971.50836787, 2454972.50836787, 2454973.50836787, 2454974.50836787])
+# delta = 10
+# num_points = 20
+# layer_ratios = [(0., 1/5), (1/5, 4/5), (4/5, 1.)]
+# mean = obs_e[0] + (obs_e[-1] - obs_e[0]) / 2
+# std = (obs_e[-1] - obs_e[0])
+# nbins = num_points
 
+# gaussian
+# colloc_points = sample_time_points("gaussian", obs_e, delta, num_points, mean, std, layer_ratios=layer_ratios, config=config)
+# print(colloc_points.shape)
+# print(colloc_points[0])
+# print(colloc_points[-1])
+# for obs in obs_e:
+#     if obs in colloc_points:
+#         print("True")
+#     else:
+#         print("False")
+# plt.figure()
+# plt.hist(colloc_points)
+# plt.hist(obs_e)
+# plt.show()
+
+
+# lhs
+# colloc_points = sample_time_points("lhs", obs_e, delta, num_points, layer_ratios=layer_ratios, config=config)
+# print(colloc_points.shape)
+# print(colloc_points[0])
+# print(colloc_points[-1])
+# print(len(colloc_points[colloc_points < obs_e[0]]))
+# print(len(colloc_points[colloc_points > obs_e[-1]]))
+# for obs in obs_e:
+#     if obs in colloc_points:
+#         print("True")
+#     else:
+#         print("False")
+# plt.figure()
+# plt.hist(colloc_points, edgecolor='black', bins=nbins)
+# plt.hist(obs_e, edgecolor='black')
+# plt.show()
+
+# uniform
+# colloc_points = sample_time_points("uniform", obs_e, delta, num_points, layer_ratios=layer_ratios, config=config)
+# print(colloc_points.shape)
+# print(colloc_points[0])
+# print(colloc_points[-1])
+# print(len(colloc_points[colloc_points < obs_e[0]]))
+# print(len(colloc_points[colloc_points > obs_e[-1]]))
+# for obs in obs_e:
+#     if obs in colloc_points:
+#         print("True")
+#     else:
+#         print("False")
+# plt.figure()
+# plt.hist(colloc_points, edgecolor='black', bins=nbins)
+# plt.hist(obs_e, edgecolor='black')
+# plt.show()
