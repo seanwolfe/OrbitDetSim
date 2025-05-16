@@ -9,6 +9,7 @@ import argparse
 import utilities as util
 from typing import Callable, List, Literal, Tuple, Union
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D  # Needed for 3D projection
 
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
@@ -94,7 +95,7 @@ def nbody_physics_loss(Y_pred, Y_ddot_pred, epochs, configuration):
 
     # === Constants and scales ===
     RH_km = configuration['EARTH_HILL_RADIUS_KM']
-    L = 3 * RH_km  # Length scale in km
+    L = configuration['normalization_ratio'] * RH_km  # Length scale in km
     M = configuration['EARTH_MASS']  # Mass scale in kg
     T = np.sqrt(L ** 3 / (configuration['GRAVITATIONAL_CONSTANT'] / configuration['KM_TO_M'] ** 3 * M))
 
@@ -129,7 +130,7 @@ def ra_dec_observation_loss(Y_pred, Y_obs, spacecraft_pos, epochs, configuration
 
     :param Y_pred: (N, 3) geocentric non-dim predicted positions [x, y, z] in units of 3 Earth Hill Radii
     :param Y_obs: (N, 3) observations as [sin(RA), cos(RA), sin(DEC)]
-    :param spacecraft_pos: (N, 3) spacecraft heliocentric positions (AU) - used to get observer-to-target vector
+    :param spacecraft_pos: (N, 3) spacecraft geo positions (KM) - used to get observer-to-target vector
     :param epochs: (N,) JDTDB times
     :param configuration: dict with keys:
         - 'EHILL_KM'
@@ -139,37 +140,24 @@ def ra_dec_observation_loss(Y_pred, Y_obs, spacecraft_pos, epochs, configuration
     Y_obs = torch.tensor(Y_obs, dtype=torch.float32)
 
     EHILL_KM = configuration['EARTH_HILL_RADIUS_KM']
-    AU_KM = configuration['AU_TO_M'] / configuration['KM_TO_M']
 
     # Convert predicted positions to km (geocentric)
-    Y_pred_km = Y_pred * (3 * EHILL_KM)  # (N, 3)
+    Y_pred_km = Y_pred * (configuration['normalization_ratio'] * EHILL_KM)  # (N, 3)
 
-    # Get observer positions in km (AU -> km)
-    spacecraft_pos_km = torch.tensor(spacecraft_pos, dtype=torch.float32) * AU_KM
-
-    # Get Earth's position at each epoch in heliocentric km
-    earth_positions = torch.zeros_like(Y_pred_km)
-    for i, jd in enumerate(epochs):
-        et = spice.unitim(jd, 'JDTDB', 'ET')
-        state, _ = spice.spkgeo(targ=399, et=et, ref='ECLIPJ2000', obs=10)  # Earth wrt Sun
-        earth_positions[i, :] = torch.tensor(state[:3], dtype=torch.float32)
-
-
-    # Compute observer position in geocentric km
-    observer_pos_geo = spacecraft_pos_km - earth_positions  # (N, 3)
+    # Get observer positions in km
+    spacecraft_pos_km = torch.tensor(spacecraft_pos, dtype=torch.float32)
 
     # Compute observer-to-target vector
-    obs_to_target = Y_pred_km - observer_pos_geo  # (N, 3)
+    obs_to_target = Y_pred_km - spacecraft_pos_km  # (N, 3)
 
     # Convert to RA/DEC angular representation
     x, y, z = obs_to_target[:, 0], obs_to_target[:, 1], obs_to_target[:, 2]
     r = torch.norm(obs_to_target, dim=1) + 1e-12  # Avoid division by 0
-    dec = torch.asin(z / r)
-    ra = torch.atan2(y, x)
+    r_xy = torch.norm(obs_to_target[:, :2], dim=1) + 1e-12
 
-    sin_ra = torch.sin(ra)
-    cos_ra = torch.cos(ra)
-    sin_dec = torch.sin(dec)
+    sin_ra = y / r_xy
+    cos_ra = x / r_xy
+    sin_dec = z / r
 
     Y_pred_ang = torch.stack([sin_ra, cos_ra, sin_dec], dim=1)
 
@@ -297,7 +285,7 @@ def epoch_normalization(epoch, z_range, configuration):
 
     # === Constants and scales ===
     RH_km = configuration['EARTH_HILL_RADIUS_KM']
-    L = 3 * RH_km  # km
+    L = configuration['normalization_ratio'] * RH_km  # km
     M = configuration['EARTH_MASS']  # kg
     G = configuration['GRAVITATIONAL_CONSTANT']  # m^3 / kg / s^2
     KM_TO_M = configuration['KM_TO_M']
@@ -324,7 +312,7 @@ def epoch_normalization(epoch, z_range, configuration):
     return normalized_epoch, scale
 
 
-def train(model, z_data, y_obs, y_obs_index, spacecraft_pos, obs_epochs_jdtdb, colloc_epochs_jdtdb, configuration, epochs=100000, lr=1e-2, lambda_phys=0.000100):
+def train(true, model, z_data, y_obs, y_obs_index, spacecraft_pos, obs_epochs_jdtdb, colloc_epochs_jdtdb, configuration, epochs=2000, lr=1e-1, lambda_phys=1):
     optimizer = torch.optim.Adam([model.output_weights], lr=lr)
 
     for epoch in range(epochs):
@@ -347,9 +335,23 @@ def train(model, z_data, y_obs, y_obs_index, spacecraft_pos, obs_epochs_jdtdb, c
         if epoch % 100 == 0:
             print(f"Epoch {epoch}: Data Loss = {data_loss.item():.4e}, Physics Loss = {phys_loss.item():.4e}")
 
-    L = 3 * configuration['EARTH_HILL_RADIUS_KM'] * configuration['KM_TO_M'] / configuration['AU_TO_M']  # au
-    print(Y_pred[y_obs_index] * L)
-    # print(Y_dot_pred)
+
+    L = configuration['normalization_ratio'] * configuration['EARTH_HILL_RADIUS_KM']  # km
+    geo_pos_km = Y_pred[y_obs_index] * L
+    print(Y_pred)
+    print(geo_pos_km.detach().numpy() - true)
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
+
+    ax.plot(*geo_pos_km.detach().numpy().T, label='Heliocentric Pos')
+    ax.plot(*spacecraft_pos.T, label='Spacecraft Pos')
+    ax.plot(*true.T, label='True')
+
+    ax.set_xlabel('X [KM]')
+    ax.set_ylabel('Y [KM]')
+    ax.set_zlabel('Z [KM]')
+    ax.legend()
+    plt.show()
 
 # Argument parser to get the config file path
 parser = argparse.ArgumentParser(description="Run the spacecraft simulation")

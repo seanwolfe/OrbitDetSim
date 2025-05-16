@@ -174,6 +174,20 @@ def read_IOD_data(file, configuration):
         return pd.read_parquet(file)
 
 
+def read_IOD_data_geo(file, configuration):
+    file_ext = os.path.splitext(file)[1].lower()
+
+    if file_ext == '.csv':
+        return pd.read_csv(
+            file,
+            sep=',',
+            header=0,
+            names=configuration['IOD_data_columns_geo']
+        )
+    elif file_ext == '.parquet':
+        return pd.read_parquet(file)
+
+
 def add_noise_to_angles(df, std_ra_deg=1.0, std_dec_deg=1.0):
     # Convert sin_ra and cos_ra to RA in degrees
     ra_rad = np.arctan2(df['SIN_RA'], df['COS_RA'])  # range [-π, π]
@@ -318,6 +332,67 @@ def sun_earth_corotating_to_helio_eclip_batch_full(states_corotating, earth_stat
     states_heliocentric[3:, :] = h_v_o.T
 
     return states_heliocentric
+
+
+def sun_earth_corotating_to_geo_eclip_batch_full(states_corotating, earth_states):
+    """
+    Converts a batch of state vectors from the Sun-Earth co-rotating (SECR) frame
+    to geocentric ECLIPJ2000 coordinates.
+
+    Parameters:
+    - states_corotating: (6, N) array in SECR frame; first 3 rows = position, last 3 = velocity
+    - earth_states: (6, N) array in heliocentric ECLIPJ2000; used only for rotation angle
+
+    Returns:
+    - states_geocentric: (6, N) array in geocentric ECLIPJ2000
+    """
+
+    _, N = states_corotating.shape
+
+    # Earth's heliocentric position (used only for rotation)
+    h_r_E = earth_states[:3, :].T  # (N, 3)
+    h_v_E = earth_states[3:, :].T  # (N, 3)
+
+    # Co-rotating frame state
+    E_r_o_prime = states_corotating[:3, :].T  # (N, 3)
+    E_v_o_prime = states_corotating[3:, :].T  # (N, 3)
+
+    # Compute rotation angles from Earth-Sun vector (negate for SECR to inertial)
+    angles = np.arctan2(-h_r_E[:, 1], -h_r_E[:, 0])  # Shape: (N,)
+
+    # Rotation matrices: from SECR to ECLIPJ2000
+    cos_angles = np.cos(angles)
+    sin_angles = np.sin(angles)
+
+    rotation_matrices = np.zeros((N, 3, 3))
+    rotation_matrices[:, 0, 0] = cos_angles
+    rotation_matrices[:, 0, 1] = -sin_angles
+    rotation_matrices[:, 1, 0] = sin_angles
+    rotation_matrices[:, 1, 1] = cos_angles
+    rotation_matrices[:, 2, 2] = 1  # z-axis (ecliptic north) unchanged
+
+    # Rotate position to ECLIPJ2000 (geocentric)
+    geo_r_o = np.einsum('nij,nj->ni', rotation_matrices, E_r_o_prime)  # (N, 3)
+
+    # Angular velocity vector (magnitude from Earth's motion)
+    h_omega_mag = np.linalg.norm(np.cross(h_r_E, h_v_E), axis=1) / (np.linalg.norm(h_r_E, axis=1) ** 2)  # (N,)
+    h_omega = np.zeros((N, 3))
+    h_omega[:, 2] = h_omega_mag  # z-axis angular velocity
+
+    # Rotate angular velocity to SECR frame
+    E_omega = np.einsum('nij,nj->ni', rotation_matrices, h_omega)
+
+    # Add Coriolis term to get inertial velocity
+    v_rot = np.cross(E_omega, E_r_o_prime)  # (N, 3)
+    v_rel_rot = E_v_o_prime + v_rot  # (N, 3)
+    geo_v_o = np.einsum('nij,nj->ni', rotation_matrices, v_rel_rot)  # (N, 3)
+
+    # Assemble full state vector
+    states_geocentric = np.zeros_like(states_corotating)
+    states_geocentric[:3, :] = geo_r_o.T
+    states_geocentric[3:, :] = geo_v_o.T
+
+    return states_geocentric
 
 
 def get_sc_state_from_sc1_position(detected_pop, config):

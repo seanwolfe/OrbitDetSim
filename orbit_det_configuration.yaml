@@ -69,6 +69,9 @@ IOD_folder_path: "/media/aeromec/Seagate Desktop Drive/data_IOD"
 IOD_data_columns: ["EPOCH(JDTDB)", "HELIO_X(AU)", "HELIO_Y(AU)", "HELIO_Z(AU)", "HELIO_VX(AU/D)", "HELIO_VY(AU/D)",
                    "HELIO_VZ(AU/D)", "SC_HELIO_X(AU)", "SC_HELIO_Y(AU)", "SC_HELIO_Z(AU)", "SC_HELIO_VX(AU/D)",
                    "SC_HELIO_VY(AU/D)", "SC_HELIO_VZ(AU/D)", 'SIN_RA', 'COS_RA', 'SIN_DEC']
+IOD_data_columns_geo: ["EPOCH(JDTDB)", "GEO_X(KM)", "GEO_Y(KM)", "GEO_Z(KM)", "GEO_VX(KM/S)", "GEO_VY(KM/S)",
+                   "GEO_VZ(KM/S)", "SC_GEO_X(KM)", "SC_GEO_Y(KM)", "SC_GEO_Z(KM)", "SC_GEO_VX(KM/S)",
+                   "SC_GEO_VY(KM/S)", "SC_GEO_VZ(KM/S)", 'SIN_RA', 'COS_RA', 'SIN_DEC']
 index_columns: ["run_number", "object_id", "spacecraft_number"]
 asteroid_mass: 1.0e+5
 spacecraft_mass: 1.0e+2
@@ -90,6 +93,7 @@ base_filename: 'fig_num_spacecraft_data'
 # Physics-informed extreme learning machine parameters
 ##############################################
 seed: 42
+normalization_ratio: 1
 
 
 
