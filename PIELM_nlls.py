@@ -98,8 +98,8 @@ def nbody_physics_loss(Y_pred, Y_ddot_pred, epochs, configuration):
     M = configuration['EARTH_MASS']  # Mass scale in kg
     T = np.sqrt(L ** 3 / (configuration['GRAVITATIONAL_CONSTANT'] / configuration['KM_TO_M'] ** 3 * M))
 
-    Y_pred /= L
-    Y_ddot_pred /= (L / T ** 2)
+    # Y_pred /= L
+    # Y_ddot_pred /= (L / T ** 2)
 
     # Nondimensionalize positions (geocentric)
     positions_nd = positions / L  # Now unitless
@@ -120,7 +120,7 @@ def nbody_physics_loss(Y_pred, Y_ddot_pred, epochs, configuration):
 
     total_accel = accel_terms.sum(dim=1)  # (N, 3)
 
-    return torch.mean((torch.tensor(Y_ddot_pred) - total_accel) ** 2)
+    return torch.mean((Y_ddot_pred - total_accel) ** 2)
 
 
 def ra_dec_observation_loss(Y_pred, Y_obs, spacecraft_pos, epochs, configuration):
@@ -148,15 +148,15 @@ def ra_dec_observation_loss(Y_pred, Y_obs, spacecraft_pos, epochs, configuration
     spacecraft_pos_km = torch.tensor(spacecraft_pos, dtype=torch.float32) * AU_KM
 
     # Get Earth's position at each epoch in heliocentric km
-    earth_positions = np.zeros_like(Y_pred_km)
+    earth_positions = torch.zeros_like(Y_pred_km)
     for i, jd in enumerate(epochs):
         et = spice.unitim(jd, 'JDTDB', 'ET')
         state, _ = spice.spkgeo(targ=399, et=et, ref='ECLIPJ2000', obs=10)  # Earth wrt Sun
-        earth_positions[i, :] = state[:3]
-    earth_positions_km = torch.tensor(earth_positions, dtype=torch.float32)
+        earth_positions[i, :] = torch.tensor(state[:3], dtype=torch.float32)
+
 
     # Compute observer position in geocentric km
-    observer_pos_geo = spacecraft_pos_km - earth_positions_km  # (N, 3)
+    observer_pos_geo = spacecraft_pos_km - earth_positions  # (N, 3)
 
     # Compute observer-to-target vector
     obs_to_target = Y_pred_km - observer_pos_geo  # (N, 3)
@@ -258,7 +258,6 @@ def sample_time_points(
             if n > 0:
                 if method == "lhs":
                     strata = np.linspace(layer_start, layer_end, n + 1)
-                    print(strata)
                     samples = strata[:-1] + rng.uniform(0, 1, size=n) * (strata[1:] - strata[:-1])
                 elif method == "uniform":
                     if n == 1:
@@ -325,20 +324,32 @@ def epoch_normalization(epoch, z_range, configuration):
     return normalized_epoch, scale
 
 
-# Training
-def train(model, x_data, y_data, epochs=1000, lr=1e-2, lambda_phys=1.0):
+def train(model, z_data, y_obs, y_obs_index, spacecraft_pos, obs_epochs_jdtdb, colloc_epochs_jdtdb, configuration, epochs=100000, lr=1e-2, lambda_phys=0.000100):
     optimizer = torch.optim.Adam([model.output_weights], lr=lr)
+
     for epoch in range(epochs):
         optimizer.zero_grad()
-        pred = model(x_data)
-        data_loss = torch.mean((pred - y_data) ** 2)
-        phys_loss = physics_loss(model, x_data)
+
+        # Forward pass with derivatives
+        Y_pred, Y_dot_pred, Y_ddot_pred = model.forward_with_derivatives(z_data)
+
+        Y_pred_obs = Y_pred[y_obs_index]
+
+        # Compute losses
+        data_loss = ra_dec_observation_loss(Y_pred_obs, y_obs, spacecraft_pos, obs_epochs_jdtdb, configuration)
+        phys_loss = nbody_physics_loss(Y_pred, Y_ddot_pred, colloc_epochs_jdtdb, configuration)
+
+        # Total loss
         loss = data_loss + lambda_phys * phys_loss
         loss.backward()
         optimizer.step()
+
         if epoch % 100 == 0:
             print(f"Epoch {epoch}: Data Loss = {data_loss.item():.4e}, Physics Loss = {phys_loss.item():.4e}")
 
+    L = 3 * configuration['EARTH_HILL_RADIUS_KM'] * configuration['KM_TO_M'] / configuration['AU_TO_M']  # au
+    print(Y_pred[y_obs_index] * L)
+    # print(Y_dot_pred)
 
 # Argument parser to get the config file path
 parser = argparse.ArgumentParser(description="Run the spacecraft simulation")
@@ -397,17 +408,17 @@ with open(args.config, 'r') as file:
 ##########
 # collocation points test
 ##########
-obs_e = np.array([2454965.50836787, 2454966.50836787, 2454967.50836787, 2454968.50836787, 2454969.50836787, 2454970.50836787,
-          2454971.50836787, 2454972.50836787, 2454973.50836787, 2454974.50836787])
-delta = 10
-num_points = 20
-layer_ratios = [(0., 1/5), (1/5, 4/5), (4/5, 1.)]
-mean = obs_e[0] + (obs_e[-1] - obs_e[0]) / 2
-std = (obs_e[-1] - obs_e[0]) * 4
+# obs_e = np.array([2454965.50836787, 2454966.50836787, 2454967.50836787, 2454968.50836787, 2454969.50836787, 2454970.50836787,
+#           2454971.50836787, 2454972.50836787, 2454973.50836787, 2454974.50836787])
+# delta = 10
+# num_points = 20
+# layer_ratios = [(0., 1/5), (1/5, 4/5), (4/5, 1.)]
+# mean = obs_e[0] + (obs_e[-1] - obs_e[0]) / 2
+# std = (obs_e[-1] - obs_e[0]) * 4
 # nbins = num_points
 
 # gaussian
-colloc_points = sample_time_points("gaussian", obs_e, delta, num_points, mean, std, layer_ratios=layer_ratios, config=config)
+# colloc_points = sample_time_points("gaussian", obs_e, delta, num_points, mean, std, layer_ratios=layer_ratios, config=config)
 # print(colloc_points.shape)
 # print(colloc_points[0])
 # print(colloc_points[-1])
@@ -459,7 +470,12 @@ colloc_points = sample_time_points("gaussian", obs_e, delta, num_points, mean, s
 ############
 # time input non-dim and normalizatoin test, with colloc points
 ###########
-epochs_nd_norm, c = epoch_normalization(colloc_points, (0, 1), config)
+# epochs_nd_norm, c = epoch_normalization(colloc_points, (0, 1), config)
+#
+# print(epochs_nd_norm)
+# print(c)
 
-print(epochs_nd_norm)
-print(c)
+
+###############
+# full-test
+##############

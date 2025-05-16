@@ -1,3 +1,4 @@
+import torch
 import yaml
 import sys
 import os
@@ -18,6 +19,8 @@ import spiceypy as sp
 import utilities as util
 import n_body_integrator as nbody
 import argparse
+import PIELM_sgd as pielm
+from PIELM_sgd import ELM
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
 sp.furnsh("de430.bsp")
@@ -652,6 +655,8 @@ def run_IOD_MPI(config):
     # --- Process each file assigned to this rank ---
     for file_path in files_for_this_rank:
 
+        print(file_path.split('/')[-1])
+
         # read data
         iod_data = util.read_IOD_data(file_path, config)
 
@@ -660,9 +665,47 @@ def run_IOD_MPI(config):
         sigma_dec = np.sqrt(config['sigma_dec'] ** 2 + config['sigma_pointing'] ** 2) / config['MAS_TO_DEGREE']
         iod_data_w_noise = util.add_noise_to_angles(iod_data, sigma_ra, sigma_dec)
 
+        # observation epochs
+        obs_e = iod_data_w_noise['EPOCH(JDTDB)'].values
+        # spacecraft position at observation
+        spacecraft_pos = iod_data_w_noise.loc[:, ['SC_HELIO_X(AU)', 'SC_HELIO_Y(AU)', 'SC_HELIO_Z(AU)']].values
+        # observations - without noise
+        obs = iod_data.loc[:, ['SIN_RA', 'COS_RA', 'SIN_DEC']].values
+        # observations - wit noise
+        # obs = iod_data_w_noise.loc[:, ['SIN_RA', 'COS_RA', 'SIN_DEC']].values
 
 
-        # run pielm
+        # other relevant parameters
+        delta = 10
+        num_points = 100
+        layer_ratios = [(0., 1/3), (1/3, 2/3), (2/3, 1.)]
+        # mean = obs_e[0] + (obs_e[-1] - obs_e[0]) / 2
+        # std = (obs_e[-1] - obs_e[0]) * 4
+        z_range = (-1, 1)
+        method = "lhs"
+        hidden_dim = 200
+
+        # generate collocation points
+        colloc_points = pielm.sample_time_points(method, obs_e, delta, num_points, layer_ratios=layer_ratios, config=config)
+
+        # Step 1: Build a mask for which collocation points are in the observation epochs
+        obs_mask = np.isin(colloc_points, obs_e)
+
+        # Step 2: Get the indices of observation epochs in colloc_points
+        obs_indices = np.where(obs_mask)[0]
+
+        # normalize epochs (inputs)
+        epochs_nd_norm, c = pielm.epoch_normalization(colloc_points, z_range, config)
+
+
+        # as a 2D tensor
+        epochs_nd_norm_reshaped_tensor = torch.tensor(epochs_nd_norm, dtype=torch.float32).unsqueeze(1)
+
+        # declare pielm
+        elm = ELM(hidden_dim, c_normalization=c)
+
+        # train pielm
+        pielm.train(elm, epochs_nd_norm_reshaped_tensor, obs, obs_indices, spacecraft_pos, obs_e, colloc_points, config)
 
         # make data
 
