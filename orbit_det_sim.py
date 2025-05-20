@@ -19,8 +19,9 @@ import spiceypy as sp
 import utilities as util
 import n_body_integrator as nbody
 import argparse
-import PIELM_sgd as pielm
+import PIELM_sgd as pielm_sgd
 from PIELM_sgd import ELM
+import PIELM_nlls as pielm_nlls
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
 sp.furnsh("de430.bsp")
@@ -627,18 +628,23 @@ def run_IOD_MPI(config):
 
 
         # other relevant parameters
-        delta = 10
-        num_points = 300
+        delta = 5
+        num_points = 150
         layer_ratios = [(0., 1/3), (1/3, 2/3), (2/3, 1.)]
         # mean = obs_e[0] + (obs_e[-1] - obs_e[0]) / 2
         # std = (obs_e[-1] - obs_e[0]) * 4
         z_range = (-1, 1)
         method = "lhs"
-        hidden_dim = 300
+        hidden_dim = 100
+
+
+        ###################################
+        # Non-linear least squares
+        ###################################
 
         # generate collocation points
-        colloc_points = pielm.sample_time_points(method, obs_e, delta, num_points, layer_ratios=layer_ratios, config=config)
-
+        colloc_points = pielm_nlls.sample_time_points(method, obs_e, delta, num_points, layer_ratios=layer_ratios,
+                                                     config=config)
         # Step 1: Build a mask for which collocation points are in the observation epochs
         obs_mask = np.isin(colloc_points, obs_e)
 
@@ -646,22 +652,46 @@ def run_IOD_MPI(config):
         obs_indices = np.where(obs_mask)[0]
 
         # normalize epochs (inputs)
-        epochs_nd_norm, c = pielm.epoch_normalization(colloc_points, z_range, config)
-
+        epochs_nd_norm, c = pielm_nlls.epoch_normalization(colloc_points, z_range, config)
 
         # as a 2D tensor
         epochs_nd_norm_reshaped_tensor = torch.tensor(epochs_nd_norm, dtype=torch.float32).unsqueeze(1)
 
-        # declare pielm
-        elm = ELM(hidden_dim, c_normalization=c)
-
         # train pielm
         true = iod_data_w_noise.loc[:, ['GEO_X(KM)', 'GEO_Y(KM)', 'GEO_Z(KM)']].values
-        pielm.train(true, elm, epochs_nd_norm_reshaped_tensor, obs, obs_indices, spacecraft_pos, obs_e, colloc_points, config)
+        pielm_nlls.solve(true, epochs_nd_norm_reshaped_tensor, obs, obs_indices, spacecraft_pos,
+                        colloc_points, hidden_dim, c, config)
+
+        ########################################
+        # Stochastic Gradient Desent Implementation
+        ##########################################
+
+        # generate collocation points
+        # colloc_points = pielm_sgd.sample_time_points(method, obs_e, delta, num_points, layer_ratios=layer_ratios, config=config)
+
+        # Step 1: Build a mask for which collocation points are in the observation epochs
+        # obs_mask = np.isin(colloc_points, obs_e)
+
+        # Step 2: Get the indices of observation epochs in colloc_points
+        # obs_indices = np.where(obs_mask)[0]
+
+        # normalize epochs (inputs)
+        # epochs_nd_norm, c = pielm_sgd.epoch_normalization(colloc_points, z_range, config)
+
+
+        # as a 2D tensor
+        # epochs_nd_norm_reshaped_tensor = torch.tensor(epochs_nd_norm, dtype=torch.float32).unsqueeze(1)
+
+        # declare pielm
+        # elm = ELM(hidden_dim, c_normalization=c)
+
+        # train pielm
+        # true = iod_data_w_noise.loc[:, ['GEO_X(KM)', 'GEO_Y(KM)', 'GEO_Z(KM)']].values
+        # pielm_sgd.train(true, elm, epochs_nd_norm_reshaped_tensor, obs, obs_indices, spacecraft_pos, obs_e, colloc_points, config)
 
         # make data
 
-        raise NotImplementedError
+        # raise NotImplementedError
 
     return
 

@@ -338,7 +338,6 @@ def train(true, model, z_data, y_obs, y_obs_index, spacecraft_pos, obs_epochs_jd
 
     L = configuration['normalization_ratio'] * configuration['EARTH_HILL_RADIUS_KM']  # km
     geo_pos_km = Y_pred[y_obs_index] * L
-    print(Y_pred)
     print(geo_pos_km.detach().numpy() - true)
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
