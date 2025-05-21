@@ -503,6 +503,7 @@ def run_sim_runnumbers_MPI_getIOD_data_bychunk_geo(config):
             spacecraft_state = util.helio_eclip_to_sun_earth_corotating_batch_full(
                 integrated_states / config['KM_TO_M'],
                 earth_states / config['KM_TO_M'])
+            spacecraft_state[:2, :] *= -1
 
             # convert back to helio based on asteroid epoch
             new_spacecraft_state_geo = util.sun_earth_corotating_to_geo_eclip_batch_full(spacecraft_state,
@@ -553,7 +554,7 @@ def run_sim_runnumbers_MPI_getIOD_data_bychunk_geo(config):
             if output_format in ['parquet', 'both']:
                 df.to_parquet(base_path + '.parquet', index=False)
 
-            vis = True
+            vis = False
             if vis:
                 #######################
                 # for visualization
@@ -574,8 +575,8 @@ def run_sim_runnumbers_MPI_getIOD_data_bychunk_geo(config):
 
                 # calc ra and dec from sun-earth-co
                 # calc ra and dec from helio
-                x_rel = asteroid_state[0, :] + spacecraft_state[0, :]
-                y_rel = asteroid_state[1, :] + spacecraft_state[1, :]
+                x_rel = asteroid_state[0, :] - spacecraft_state[0, :]
+                y_rel = asteroid_state[1, :] - spacecraft_state[1, :]
                 z_rel = asteroid_state[2, :] - spacecraft_state[2, :]
 
                 # r_xy = np.sqrt(x_rel ** 2 + y_rel ** 2)
@@ -730,13 +731,13 @@ size = comm.Get_size()
 # Run parrallel sim to get IOD data using MPI
 ###################################
 
-run_sim_runnumbers_MPI_getIOD_data_bychunk_geo(config)
+# run_sim_runnumbers_MPI_getIOD_data_bychunk_geo(config)
 
 ###################################
 # Run IOD simulation in parallel
 ###################################
 
-# run_IOD_MPI(config)
+run_IOD_MPI(config)
 
 
 ###################################

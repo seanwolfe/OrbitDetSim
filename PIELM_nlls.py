@@ -60,7 +60,7 @@ def solve(true, epochs_nd_norm, observations, obs_incdices, spacecraft_position,
 
 
     c = normalization_constant  # normalization constant from z-domain
-    lambda_phys = 1e6 # physics weight (can be tuned)
+    lambda_phys = 1e1 # physics weight (can be tuned)
 
     # === Residual Function for Least Squares ===
     def residual_function(beta_flat):
