@@ -13,6 +13,7 @@ from matplotlib.ticker import MaxNLocator
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import ast
 import mpi4py.rc
+
 mpi4py.rc.threads = False
 from mpi4py import MPI
 import spiceypy as sp
@@ -29,7 +30,8 @@ sp.furnsh('naif0012.tls')
 
 
 def run_sim_runnumbers_less_memory(run_number, minimoon_master, config):
-    df_buffer = pd.DataFrame(columns=["run_number", "object_id", "spacecraft_number", "values", "total_length", "spacecraft_1_ini_pos"])
+    df_buffer = pd.DataFrame(
+        columns=["run_number", "object_id", "spacecraft_number", "values", "total_length", "spacecraft_1_ini_pos"])
     part_number = 1
     num_of_rows = config['number_of_rows_per_part']
     save_format = config['save_format']  # default to 'csv' if not specified
@@ -82,11 +84,11 @@ def run_sim_runnumbers_less_memory(run_number, minimoon_master, config):
 
             print(f"Saved {len(df_buffer)} rows to {filename}")
 
-            df_buffer = pd.DataFrame(columns=["run_number", "object_id", "spacecraft_number", "values", "total_length", "spacecraft_1_ini_pos"])
+            df_buffer = pd.DataFrame(columns=["run_number", "object_id", "spacecraft_number", "values", "total_length",
+                                              "spacecraft_1_ini_pos"])
             part_number += 1
 
     return
-
 
 
 def run_sim_runnumbers_MPI(minimoon_master, config):
@@ -154,7 +156,8 @@ def run_sim_runnumbers_MPI_getIOD_data_bychunk_helio(config):
     # --- Master (rank 0) gathers the list of all files ---
     if rank == 0:
         # all_files = util.get_all_files(config['visible_files_folder'], config['save_format'])
-        all_files = util.get_all_files_run_number(config['visible_files_folder'], config['save_format'], config['run_number'])
+        all_files = util.get_all_files_run_number(config['visible_files_folder'], config['save_format'],
+                                                  config['run_number'])
         print(all_files)
         num_files = 0
     else:
@@ -250,7 +253,6 @@ def run_sim_runnumbers_MPI_getIOD_data_bychunk_helio(config):
 
             asteroid_states_aud = util.ms_to_aud(asteroid_integrated_states)
 
-
             earthasteroid_states_aud = util.ms_to_aud(asteroid_earth_states)
             asteroid_state = util.helio_eclip_to_sun_earth_corotating_batch_full(asteroid_states_aud,
                                                                                  earthasteroid_states_aud)
@@ -300,7 +302,6 @@ def run_sim_runnumbers_MPI_getIOD_data_bychunk_helio(config):
             cos_ra = x_rel / r_xy
             sin_dec = z_rel / r
 
-
             # generate output file with epoch , ast xyz vxvyvz, detecting sc id xyz vxvyvz sinRA cosRA sinDec
             # file name: run-x_minimoon-y_sc-z_index-k.csv
             file_name = ('minimoon-' + str(detected_minimoon.name[1]) + '_sc-'
@@ -310,10 +311,13 @@ def run_sim_runnumbers_MPI_getIOD_data_bychunk_helio(config):
 
             # make dataframe
             data = np.array([epochs, new_asteroid_state_helio[0, :], new_asteroid_state_helio[1, :],
-                    new_asteroid_state_helio[2, :], new_asteroid_state_helio[3, :], new_asteroid_state_helio[4, :],
-                    new_asteroid_state_helio[5, :], new_spacecraft_state_helio[0, :], new_spacecraft_state_helio[1, :],
-                    new_spacecraft_state_helio[2, :], new_spacecraft_state_helio[3, :], new_spacecraft_state_helio[4, :],
-                    new_spacecraft_state_helio[5, :], sin_ra, cos_ra, sin_dec]).T
+                             new_asteroid_state_helio[2, :], new_asteroid_state_helio[3, :],
+                             new_asteroid_state_helio[4, :],
+                             new_asteroid_state_helio[5, :], new_spacecraft_state_helio[0, :],
+                             new_spacecraft_state_helio[1, :],
+                             new_spacecraft_state_helio[2, :], new_spacecraft_state_helio[3, :],
+                             new_spacecraft_state_helio[4, :],
+                             new_spacecraft_state_helio[5, :], sin_ra, cos_ra, sin_dec]).T
 
             df = pd.DataFrame(data, columns=config['IOD_data_columns'])
             # Get desired format from config
@@ -361,7 +365,8 @@ def run_sim_runnumbers_MPI_getIOD_data_bychunk_helio(config):
                 sin_dec = z_rel / r
 
                 # visualize it all
-                util.viz(spacecraft_state[:3, :], asteroid_state[:3, :], current_minimoon, formation, [sin_ra, cos_ra, sin_dec], config)
+                util.viz(spacecraft_state[:3, :], asteroid_state[:3, :], current_minimoon, formation,
+                         [sin_ra, cos_ra, sin_dec], config)
                 ################
 
     return
@@ -375,8 +380,8 @@ def run_sim_runnumbers_MPI_getIOD_data_bychunk_geo(config):
 
     # --- Master (rank 0) gathers the list of all files ---
     if rank == 0:
-        # all_files = util.get_all_files(config['visible_files_folder'], config['save_format'])
-        all_files = util.get_all_files_run_number(config['visible_files_folder'], config['save_format'], config['run_number'])
+        all_files = util.get_all_files(config['visible_files_folder'], config['save_format'])
+        # all_files = util.get_all_files_run_number(config['visible_files_folder'], config['save_format'], config['run_number'])
         print(all_files)
         num_files = 0
     else:
@@ -471,8 +476,9 @@ def run_sim_runnumbers_MPI_getIOD_data_bychunk_geo(config):
                                                                                        type="ASTEROID")  # integrator takes seconds
 
             # km and km/s
-            asteroid_state = util.helio_eclip_to_sun_earth_corotating_batch_full(asteroid_integrated_states / config['KM_TO_M'] ,
-                                                                                 asteroid_earth_states / config['KM_TO_M'])
+            asteroid_state = util.helio_eclip_to_sun_earth_corotating_batch_full(
+                asteroid_integrated_states / config['KM_TO_M'],
+                asteroid_earth_states / config['KM_TO_M'])
 
             ##########
             # spacecraft
@@ -493,16 +499,16 @@ def run_sim_runnumbers_MPI_getIOD_data_bychunk_geo(config):
                                                                          'SECONDS_PER_DAY'],
                                                                      config['time_between_frames'], type="SPACECRAFT")
 
-
             # in km, km/s
-            spacecraft_state = util.helio_eclip_to_sun_earth_corotating_batch_full(integrated_states / config['KM_TO_M'],
-                                                                                   earth_states / config['KM_TO_M'])
+            spacecraft_state = util.helio_eclip_to_sun_earth_corotating_batch_full(
+                integrated_states / config['KM_TO_M'],
+                earth_states / config['KM_TO_M'])
 
             # convert back to helio based on asteroid epoch
             new_spacecraft_state_geo = util.sun_earth_corotating_to_geo_eclip_batch_full(spacecraft_state,
-                                                                                             asteroid_earth_states)
+                                                                                         asteroid_earth_states)
             new_asteroid_state_geo = util.sun_earth_corotating_to_geo_eclip_batch_full(asteroid_state,
-                                                                                           asteroid_earth_states)
+                                                                                       asteroid_earth_states)
 
             #############
 
@@ -518,7 +524,6 @@ def run_sim_runnumbers_MPI_getIOD_data_bychunk_geo(config):
             cos_ra = x_rel / r_xy
             sin_dec = z_rel / r
 
-
             # generate output file with epoch , ast xyz vxvyvz, detecting sc id xyz vxvyvz sinRA cosRA sinDec
             # file name: run-x_minimoon-y_sc-z_index-k.csv
             file_name = ('minimoon-' + str(detected_minimoon.name[1]) + '_sc-'
@@ -528,10 +533,12 @@ def run_sim_runnumbers_MPI_getIOD_data_bychunk_geo(config):
 
             # make dataframe
             data = np.array([epochs, new_asteroid_state_geo[0, :], new_asteroid_state_geo[1, :],
-                    new_asteroid_state_geo[2, :], new_asteroid_state_geo[3, :], new_asteroid_state_geo[4, :],
-                    new_asteroid_state_geo[5, :], new_spacecraft_state_geo[0, :], new_spacecraft_state_geo[1, :],
-                    new_spacecraft_state_geo[2, :], new_spacecraft_state_geo[3, :], new_spacecraft_state_geo[4, :],
-                    new_spacecraft_state_geo[5, :], sin_ra, cos_ra, sin_dec]).T
+                             new_asteroid_state_geo[2, :], new_asteroid_state_geo[3, :], new_asteroid_state_geo[4, :],
+                             new_asteroid_state_geo[5, :], new_spacecraft_state_geo[0, :],
+                             new_spacecraft_state_geo[1, :],
+                             new_spacecraft_state_geo[2, :], new_spacecraft_state_geo[3, :],
+                             new_spacecraft_state_geo[4, :],
+                             new_spacecraft_state_geo[5, :], sin_ra, cos_ra, sin_dec]).T
 
             df = pd.DataFrame(data, columns=config['IOD_data_columns_geo'])
             # Get desired format from config
@@ -546,7 +553,7 @@ def run_sim_runnumbers_MPI_getIOD_data_bychunk_geo(config):
             if output_format in ['parquet', 'both']:
                 df.to_parquet(base_path + '.parquet', index=False)
 
-            vis = False
+            vis = True
             if vis:
                 #######################
                 # for visualization
@@ -562,10 +569,10 @@ def run_sim_runnumbers_MPI_getIOD_data_bychunk_geo(config):
                 formation.recall_formation(sc1_ini_index, config)
 
                 # match the spacecraft trajectories to that of the asteroid in terms of length and sampling (asteroid sampled at one hour)
-                formation.match_spacecraft_trajectory(len(detected_minimoon['values']), config)
+                formation.match_spacecraft_trajectory(int(detected_minimoon['total_length']), config)
                 current_minimoon = Asteroid(detected_minimoon.name[1], 100, config)
 
-                # calc ra and dec from sun-earth-co (visualized in a different frame)
+                # calc ra and dec from sun-earth-co
                 # calc ra and dec from helio
                 x_rel = asteroid_state[0, :] + spacecraft_state[0, :]
                 y_rel = asteroid_state[1, :] + spacecraft_state[1, :]
@@ -579,7 +586,9 @@ def run_sim_runnumbers_MPI_getIOD_data_bychunk_geo(config):
                 sin_dec = z_rel / r
 
                 # visualize it all
-                util.viz(spacecraft_state[:3, :], asteroid_state[:3, :], current_minimoon, formation, [sin_ra, cos_ra, sin_dec], config)
+                util.viz_geo_and_secr(spacecraft_state[:3, :], asteroid_state[:3, :], current_minimoon, formation,
+                                      [sin_ra, cos_ra, sin_dec], detected_minimoon, new_asteroid_state_geo,
+                                      new_spacecraft_state_geo, config)
                 ################
 
     return
@@ -606,7 +615,6 @@ def run_IOD_MPI(config):
 
     # --- Process each file assigned to this rank ---
     for file_path in files_for_this_rank:
-
         print(file_path.split('/')[-1])
 
         # read data
@@ -626,17 +634,15 @@ def run_IOD_MPI(config):
         # observations - wit noise
         # obs = iod_data_w_noise.loc[:, ['SIN_RA', 'COS_RA', 'SIN_DEC']].values
 
-
         # other relevant parameters
         delta = 5
         num_points = 150
-        layer_ratios = [(0., 1/3), (1/3, 2/3), (2/3, 1.)]
+        layer_ratios = [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)]
         # mean = obs_e[0] + (obs_e[-1] - obs_e[0]) / 2
         # std = (obs_e[-1] - obs_e[0]) * 4
         z_range = (-1, 1)
         method = "lhs"
         hidden_dim = 100
-
 
         ###################################
         # Non-linear least squares
@@ -644,7 +650,7 @@ def run_IOD_MPI(config):
 
         # generate collocation points
         colloc_points = pielm_nlls.sample_time_points(method, obs_e, delta, num_points, layer_ratios=layer_ratios,
-                                                     config=config)
+                                                      config=config)
         # Step 1: Build a mask for which collocation points are in the observation epochs
         obs_mask = np.isin(colloc_points, obs_e)
 
@@ -660,7 +666,7 @@ def run_IOD_MPI(config):
         # train pielm
         true = iod_data_w_noise.loc[:, ['GEO_X(KM)', 'GEO_Y(KM)', 'GEO_Z(KM)']].values
         pielm_nlls.solve(true, epochs_nd_norm_reshaped_tensor, obs, obs_indices, spacecraft_pos,
-                        colloc_points, hidden_dim, c, config)
+                         colloc_points, hidden_dim, c, config)
 
         ########################################
         # Stochastic Gradient Desent Implementation
@@ -678,7 +684,6 @@ def run_IOD_MPI(config):
         # normalize epochs (inputs)
         # epochs_nd_norm, c = pielm_sgd.epoch_normalization(colloc_points, z_range, config)
 
-
         # as a 2D tensor
         # epochs_nd_norm_reshaped_tensor = torch.tensor(epochs_nd_norm, dtype=torch.float32).unsqueeze(1)
 
@@ -694,6 +699,7 @@ def run_IOD_MPI(config):
         # raise NotImplementedError
 
     return
+
 
 ###########################
 # run sim
@@ -724,14 +730,13 @@ size = comm.Get_size()
 # Run parrallel sim to get IOD data using MPI
 ###################################
 
-# run_sim_runnumbers_MPI_getIOD_data_bychunk_geo(config)
+run_sim_runnumbers_MPI_getIOD_data_bychunk_geo(config)
 
 ###################################
 # Run IOD simulation in parallel
 ###################################
 
-run_IOD_MPI(config)
-
+# run_IOD_MPI(config)
 
 
 ###################################

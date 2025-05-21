@@ -19,6 +19,7 @@ spice.furnsh("de430.bsp")
 spice.furnsh('naif0012.tls')
 pd.options.mode.chained_assignment = None
 
+
 def viz(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, configs):
     # asteroid position
     asteroid_pos = minimoon.orbit.loc[:, ['Synodic x', 'Synodic y', 'Synodic z']].values
@@ -62,7 +63,7 @@ def viz(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, configs):
         ######################
         # For generation of spacecrafr fov with asteroid figure
         ###########################################
-        is_visible = visible[visible!=-1]
+        is_visible = visible[visible != -1]
 
         if len(is_visible) == 0:
             pass
@@ -81,7 +82,8 @@ def viz(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, configs):
             # Draw FOV projection as a polygon
             fov_poly = Poly3DCollection([fov_corners], color='cyan', alpha=0.3, edgecolor='k')
             ax.add_collection3d(fov_poly)
-            triad = [spacecraft_pos, spacecraft_pos - [0.001, 0, 0], spacecraft_pos - [0, 0.001, 0], spacecraft_pos + [0, 0, 0.001]]
+            triad = [spacecraft_pos, spacecraft_pos - [0.001, 0, 0], spacecraft_pos - [0, 0.001, 0],
+                     spacecraft_pos + [0, 0, 0.001]]
             x_axis = np.array([triad[0], triad[1]]).T
             y_axis = np.array([triad[0], triad[2]]).T
             z_axis = np.array([triad[0], triad[3]]).T
@@ -100,18 +102,14 @@ def viz(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, configs):
                            zorder=20, marker='^')
                 ax.scatter(*spacecraft_pos_j, s=20, color=colors[j], label='Detection instant sc ' + str(j), zorder=20)
 
-
-
-    ax.scatter(object_pos[0, 0], object_pos[1, 0], object_pos[2, 0], color=colors[-1], s=30, label='Integration start sc', zorder=19)
-    ax.plot(object_pos[0, :], object_pos[1, :], object_pos[2, :], color=colors[-1], linewidth=5, label='Integrated traj sc', zorder=14)
+    ax.scatter(object_pos[0, 0], object_pos[1, 0], object_pos[2, 0], color=colors[-1], s=30,
+               label='Integration start sc', zorder=19)
+    ax.plot(object_pos[0, :], object_pos[1, :], object_pos[2, :], color=colors[-1], linewidth=5,
+            label='Integrated traj sc', zorder=14)
     ax.scatter(-minimoon_pos[0, 0], -minimoon_pos[1, 0], minimoon_pos[2, 0], color=colors[-2], s=30,
                label='Integration start minimoon', zorder=19)
     ax.plot(-minimoon_pos[0, :], -minimoon_pos[1, :], minimoon_pos[2, :], color=colors[-2], linewidth=5,
             label='Integrated traj minimoon', zorder=14)
-
-
-
-
 
     ax.plot(sc_pos[:, 0], sc_pos[:, 1], sc_pos[:, 2], color='pink', label='Halo Orbit', zorder=5)
     ax.set_xlabel('X (au)')
@@ -125,6 +123,222 @@ def viz(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, configs):
     plt.show()
 
     return sc_visible
+
+
+def viz_geo_and_secr(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, minimoon_info, asteroid_geo,
+                     spacecraft_geo, configs):
+    """
+    Visualize both in geo and in sun-earth co-rotating frame the detection instant
+    :param object_pos:
+    :param minimoon_pos:
+    :param minimoon:
+    :param sc_formation:
+    :param ra_dec:
+    :param configs:
+    :return:
+    """
+    print(minimoon.id)
+    colors = ['red', 'blue', 'orange', 'green', 'grey', 'brown', 'black', 'purple', 'yellow', 'pink']
+
+    ############################
+    # SECR Visualization
+    ###########################
+
+    # asteroid trajectory - SECR
+    asteroid_pos = minimoon.orbit.loc[:, ['Synodic x', 'Synodic y', 'Synodic z']].values * (
+            configs['AU_TO_M'] / configs['KM_TO_M'])
+
+    # Moon trajecotry - SECR
+    moon_pos = minimoon.orbit.loc[:, ['Moon Synodic x', 'Moon Synodic y', 'Moon Synodic z']].values * (
+            configs['AU_TO_M'] / configs['KM_TO_M'])
+
+    # Create a sphere (Earth model)
+    theta = np.linspace(0, np.pi, 30)  # Latitude
+    phi = np.linspace(0, 2 * np.pi, 60)  # Longitude
+    theta, phi = np.meshgrid(theta, phi)
+    R = 6378  # Normalize radius # Earth radius (approx. in arbitrary units)
+    x = R * np.sin(theta) * np.cos(phi)  # km # Convert spherical to Cartesian coordinates
+    y = R * np.sin(theta) * np.sin(phi)
+    z = R * np.cos(theta)
+
+    fig = plt.figure()
+    ax = fig.add_subplot(projection='3d')
+    ax.plot(moon_pos[:, 0], moon_pos[:, 1], moon_pos[:, 2], label='Moon')  # plot moon traj
+    ax.plot(asteroid_pos[:, 0], asteroid_pos[:, 1], asteroid_pos[:, 2], label='Asteroid', color='green',
+            zorder=15)  # plot asteroid traj
+    ax.scatter(0.009, 0, 0, label='L_1', s=20)  # plot L_1
+    ax.plot_wireframe(x, y, z, color="blue", linewidth=0.5, alpha=0.7)  # Plot wireframe Earth
+
+    # start index is first instance asteroid is FOV of a sc, without occlusion from Earth or moon
+    # it is the index in the minimoon trajectory corresponding to this
+    for i, spacecraft in enumerate(sc_formation.spacecraft):
+
+        # index of detection
+        traj_index = int(minimoon_info['min_nonnegative'])
+
+        # if this spacecraft detected the minimoon
+        if i + 1 == int(minimoon_info.name[2]):
+
+            # positiion of spacecraft i at detection instant
+            spacecraft_pos = spacecraft.get_spacecraft_pos(traj_index) * (configs['AU_TO_M'] / configs['KM_TO_M'])
+
+            fov_corners = plot_fov_projection(spacecraft, minimoon, traj_index)
+            fov_corners = [fov_corner * (configs['AU_TO_M'] / configs['KM_TO_M']) for fov_corner in fov_corners]
+
+            # plot fov related things
+            ax.scatter(*minimoon.get_asteroid_pos(traj_index) * (configs['AU_TO_M'] / configs['KM_TO_M']), s=20,
+                       color='green',
+                       zorder=20)  # instant of detection on minimoon traj
+            # Plot dotted lines from spacecraft to FOV corners
+            for corner in fov_corners:
+                ax.plot([spacecraft_pos[0], corner[0]],
+                        [spacecraft_pos[1], corner[1]],
+                        [spacecraft_pos[2], corner[2]], 'k--', alpha=0.5)
+
+            # Draw FOV projection as a polygon
+            fov_poly = Poly3DCollection([fov_corners], color='cyan', alpha=0.3, edgecolor='k')
+            ax.add_collection3d(fov_poly)
+            triad = [spacecraft_pos, spacecraft_pos - [0.001, 0, 0], spacecraft_pos - [0, 0.001, 0],
+                     spacecraft_pos + [0, 0, 0.001]]
+            x_axis = np.array([triad[0], triad[1]]).T
+            y_axis = np.array([triad[0], triad[2]]).T
+            z_axis = np.array([triad[0], triad[3]]).T
+            ax.plot(*x_axis, color='black')
+            ax.plot(*y_axis, color='black')
+            ax.plot(*z_axis, color='black')
+
+            # print the obtained ra and dec
+            print(np.rad2deg(np.arcsin(ra_dec[0])))
+            print(np.rad2deg(np.arcsin(ra_dec[2])))
+
+        else:
+            # non-detecting spacecraft trajectory and position at detection
+            spacecraft_pos_j = spacecraft.get_spacecraft_pos(traj_index) * (configs['AU_TO_M'] / configs['KM_TO_M'])
+
+            sc_pos_j = spacecraft.matched_trajectory * (configs['AU_TO_M'] / configs['KM_TO_M'])
+
+            # plot trajectory up until detection instant
+            ax.plot(sc_pos_j[:traj_index, 0], sc_pos_j[:traj_index, 1], sc_pos_j[:traj_index, 2], color=colors[i],
+                    zorder=15)
+            ax.scatter(*spacecraft.get_spacecraft_pos(0) * (configs['AU_TO_M'] / configs['KM_TO_M']), s=20,
+                       color=colors[i], label='Initial pos sc' + str(i),
+                       zorder=20, marker='^')
+            ax.scatter(*spacecraft_pos_j, s=20, color=colors[i], label='Detection instant sc ' + str(i), zorder=20)
+
+    # plot integration results
+    ax.scatter(object_pos[0, 0], object_pos[1, 0], object_pos[2, 0], color=colors[-1], s=30,
+               label='Integration start sc', zorder=19)  # s/c integration trajectory and initial position
+    ax.plot(object_pos[0, :], object_pos[1, :], object_pos[2, :], color=colors[-1], linewidth=5,
+            label='Integrated traj sc', zorder=14)
+    ax.scatter(-minimoon_pos[0, 0], -minimoon_pos[1, 0], minimoon_pos[2, 0], color=colors[-2], s=30,
+               label='Integration start minimoon', zorder=19)  # minimoon integration trajectory and initial position
+    ax.plot(-minimoon_pos[0, :], -minimoon_pos[1, :], minimoon_pos[2, :], color=colors[-2], linewidth=5,
+            label='Integrated traj minimoon', zorder=14)
+
+    ax.set_xlabel('X (KM)')
+    ax.set_ylabel('Y (KM)')
+    ax.set_zlabel('Z (KM)')
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=4))  # Adjust nbins for number of ticks
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=4))  # Adjust nbins for number of ticks
+    ax.zaxis.set_major_locator(MaxNLocator(nbins=4))  # Adjust nbins for number of ticks
+    ax.legend()
+    ax.set_aspect('equal')
+    # plt.show()
+
+    ####################################
+    # GEO Visualization
+    ####################################
+
+    # asteroid trajectory - GEO
+    asteroid_pos = minimoon.orbit.loc[:, ["Geo x", "Geo y", "Geo z"]].values * (
+            configs['AU_TO_M'] / configs['KM_TO_M'])
+
+    # Moon trajecotry - SECR
+    moon_pos = (minimoon.orbit.loc[:, ["Moon x (Helio)",
+                                       "Moon y (Helio)", "Moon z (Helio)"]].values - minimoon.orbit.loc[:,
+                                                                                     ["Earth x (Helio)",
+                                                                                      "Earth y (Helio)",
+                                                                                      "Earth z (Helio)"]].values) * (
+                       configs['AU_TO_M'] / configs['KM_TO_M'])
+
+    # Create a sphere (Earth model)
+    theta = np.linspace(0, np.pi, 30)  # Latitude
+    phi = np.linspace(0, 2 * np.pi, 60)  # Longitude
+    theta, phi = np.meshgrid(theta, phi)
+    R = 6378  # Normalize radius # Earth radius (approx. in arbitrary units)
+    x = R * np.sin(theta) * np.cos(phi)  # km # Convert spherical to Cartesian coordinates
+    y = R * np.sin(theta) * np.sin(phi)
+    z = R * np.cos(theta)
+
+    fig = plt.figure()
+    ax = fig.add_subplot(projection='3d')
+    ax.plot(moon_pos[:, 0], moon_pos[:, 1], moon_pos[:, 2], label='Moon')  # plot moon traj
+    ax.plot(asteroid_pos[:, 0], asteroid_pos[:, 1], asteroid_pos[:, 2], label='Asteroid', color='green',
+            zorder=15)  # plot asteroid traj
+    ax.scatter(0.009, 0, 0, label='L_1', s=20)  # plot L_1
+    ax.plot_wireframe(x, y, z, color="blue", linewidth=0.5, alpha=0.7)  # Plot wireframe Earth
+
+    # start index is first instance asteroid is FOV of a sc, without occlusion from Earth or moon
+    # it is the index in the minimoon trajectory corresponding to this
+    for i, spacecraft in enumerate(sc_formation.spacecraft):
+
+        # index of detection
+        traj_index = int(minimoon_info['min_nonnegative'])
+
+        # if this spacecraft detected the minimoon
+        if i + 1 == int(minimoon_info.name[2]):
+
+            # positiion of spacecraft i at detection instant
+            spacecraft_pos = spacecraft_geo[:3, 0]
+
+            # Corotating frame state: shape (6, 1)
+            boresight_vec = np.array([[1, 0, 0, 0, 0, 0], [1, 0, 0, 0, 0, 0]]).T  # shape (6, 1)
+
+            # Earth state vector: already 1D (shape (6,))
+            earth_state = np.array([minimoon.orbit.loc[traj_index, [
+                "Earth x (Helio)", "Earth y (Helio)", "Earth z (Helio)",
+                "Earth vx (Helio)", "Earth vy (Helio)", "Earth vz (Helio)"
+            ]].values, minimoon.orbit.loc[traj_index, [
+                "Earth x (Helio)", "Earth y (Helio)", "Earth z (Helio)",
+                "Earth vx (Helio)", "Earth vy (Helio)", "Earth vz (Helio)"
+            ]].values]).T  # Reshape to (6, 1)
+
+            # Call the function with correctly shaped inputs
+            geo_boresight = sun_earth_corotating_to_geo_eclip_batch_full(boresight_vec, earth_state)
+
+            fov_corners = plot_fov_projection_geo(geo_boresight[:3], spacecraft_pos, asteroid_pos[traj_index, :],
+                                                  spacecraft.fov)
+            fov_corners = [fov_corner * (configs['AU_TO_M'] / configs['KM_TO_M']) for fov_corner in fov_corners]
+
+            # plot fov related things
+            ax.scatter(*minimoon.get_asteroid_pos(traj_index) * (configs['AU_TO_M'] / configs['KM_TO_M']), s=20,
+                       color='green',
+                       zorder=20)  # instant of detection on minimoon traj
+            # Plot dotted lines from spacecraft to FOV corners
+            for corner in fov_corners:
+                ax.plot([spacecraft_pos[0], corner[0]],
+                        [spacecraft_pos[1], corner[1]],
+                        [spacecraft_pos[2], corner[2]], 'k--', alpha=0.5)
+
+            # Draw FOV projection as a polygon
+            fov_poly = Poly3DCollection([fov_corners], color='cyan', alpha=0.3, edgecolor='k')
+            ax.add_collection3d(fov_poly)
+            triad = [spacecraft_pos, spacecraft_pos - [0.001, 0, 0], spacecraft_pos - [0, 0.001, 0],
+                     spacecraft_pos + [0, 0, 0.001]]
+            x_axis = np.array([triad[0], triad[1]]).T
+            y_axis = np.array([triad[0], triad[2]]).T
+            z_axis = np.array([triad[0], triad[3]]).T
+            ax.plot(*x_axis, color='black')
+            ax.plot(*y_axis, color='black')
+            ax.plot(*z_axis, color='black')
+
+            plt.show()
+
+            # print the obtained ra and dec
+            print(np.rad2deg(np.arcsin(ra_dec[0])))
+            print(np.rad2deg(np.arcsin(ra_dec[2])))
+
+    return
 
 
 # Define a converter function
@@ -195,7 +409,7 @@ def add_noise_to_angles(df, std_ra_deg=1.0, std_dec_deg=1.0):
 
     # Convert sin_dec to Dec in degrees
     dec_rad = np.arcsin(df['SIN_DEC'])  # range [-π/2, π/2]
-    dec_deg = np.degrees(dec_rad)       # range [-90, 90]
+    dec_deg = np.degrees(dec_rad)  # range [-90, 90]
 
     # Add Gaussian noise in degrees
     ra_noisy_deg = (ra_deg + np.random.normal(0, std_ra_deg, size=len(df))) % 360
@@ -252,7 +466,6 @@ def helio_eclip_to_sun_earth_corotating_batch_full(states, earth_states):
     h_omega[:, 2] = h_omega_mag  # Only z-component for ecliptic plane rotation
 
     states_corotating = np.zeros_like(states)
-
 
     h_r_O = states[:3, :].T  # (N, 3)
     h_v_O = states[3:, :].T  # (N, 3)
@@ -321,7 +534,6 @@ def sun_earth_corotating_to_helio_eclip_batch_full(states_corotating, earth_stat
     h_omega = np.zeros((N, 3))
     h_omega[:, 2] = h_omega_mag  # Only z-component for ecliptic plane rotation
 
-
     E_omega = np.einsum('nij,nj->ni', rotation_matrices, h_omega)
     v_rot = np.cross(E_omega, E_r_o_prime)  # correct: using rotated position
     v_rel_rot = E_v_o_prime + v_rot
@@ -347,6 +559,10 @@ def sun_earth_corotating_to_geo_eclip_batch_full(states_corotating, earth_states
     - states_geocentric: (6, N) array in geocentric ECLIPJ2000
     """
 
+    states_corotating = np.atleast_2d(states_corotating)
+    earth_states = np.atleast_2d(earth_states)
+
+
     _, N = states_corotating.shape
 
     # Earth's heliocentric position (used only for rotation)
@@ -358,6 +574,11 @@ def sun_earth_corotating_to_geo_eclip_batch_full(states_corotating, earth_states
     E_v_o_prime = states_corotating[3:, :].T  # (N, 3)
 
     # Compute rotation angles from Earth-Sun vector (negate for SECR to inertial)
+    print(type(np))
+    print(h_r_E.shape)
+    print(-h_r_E[:, 1], -h_r_E[:, 0])
+
+
     angles = np.arctan2(-h_r_E[:, 1], -h_r_E[:, 0])  # Shape: (N,)
 
     # Rotation matrices: from SECR to ECLIPJ2000
@@ -401,7 +622,6 @@ def get_sc_state_from_sc1_position(detected_pop, config):
     sc_epochs = []
 
     for kdx, detection in detected_pop.iterrows():
-
         # create a formation object, it has s/c s randomly placed
         formation = Formation(config)
 
@@ -438,7 +658,6 @@ def get_sc_state_from_sc1_position(detected_pop, config):
                                                             "GEO_EME_Vx_(km/s)", "GEO_EME_Vy_(km/s)",
                                                             "GEO_EME_Vz_(km/s)"]].to_numpy()
 
-
         # get the earth's state vector at detection instant
         sc_time = formation.orbit.loc[formation.orbit.index[closest_position_index], "Time"]
 
@@ -450,10 +669,11 @@ def get_sc_state_from_sc1_position(detected_pop, config):
 
     detected_pop.loc[:, 'detecting_sc_lpf_orbit_index'] = closest_indices
     detected_pop.loc[:, 'sc_epoch'] = sc_epochs
-    detected_pop.loc[:, ['GEO_ECLIP_X_(km)', 'GEO_ECLIP_Y_(km)', 'GEO_ECLIP_Z_(km)', 'GEO_ECLIP_Vx_(km/s)', 'GEO_ECLIP_Vy_(km/s)',
-                  'GEO_ECLIP_Vz_(km/s)']] = np.array(scs_helio)
+    detected_pop.loc[:,
+    ['GEO_ECLIP_X_(km)', 'GEO_ECLIP_Y_(km)', 'GEO_ECLIP_Z_(km)', 'GEO_ECLIP_Vx_(km/s)', 'GEO_ECLIP_Vy_(km/s)',
+     'GEO_ECLIP_Vz_(km/s)']] = np.array(scs_helio)
 
-    return  detected_pop
+    return detected_pop
 
 
 def ms_to_aud(states):
@@ -471,6 +691,47 @@ def ms_to_aud(states):
     state_out[3:] /= (config['AU_TO_M'] / config['SECONDS_PER_DAY'])
 
     return state_out
+
+
+def plot_fov_projection_geo(geo_boresight, spacecraft_pos, asteroid_pos, fov):
+    """
+    Visualizes the spacecraft's field of view (FOV) projection along the boresight at the asteroid's distance.
+
+    Parameters:
+        spacecraft: the spacecraft object
+        asteroid: the asteroid object
+            """
+    # Convert FOV from degrees to radians
+    fov_rad = np.radians(np.sqrt(fov))
+
+    # Compute distance to asteroid
+    sc_to_ast = np.array(asteroid_pos) - np.array(spacecraft_pos)
+    ast_distance = np.linalg.norm(sc_to_ast)
+
+    # Find the FOV projection center (along boresight at asteroid's distance)
+    fov_center = np.array(spacecraft_pos) + ast_distance * geo_boresight
+
+    # Define perpendicular vectors for FOV plane (orthogonal to boresight)
+    up = np.array([0, 0, 1]) if abs(geo_boresight[2]) < 0.9 else np.array([1, 0, 0])  # Avoid collinear vector
+    right = np.cross(geo_boresight, up)
+    new_right = right / np.linalg.norm(right)
+    up = np.cross(new_right, geo_boresight)  # Recompute true "up" vector
+
+    # Compute FOV half-width at this distance
+    fov_half_width = np.tan(fov_rad / 2) * ast_distance
+
+    # Compute the 4 corners of the FOV projection at the asteroid's distance
+    # order is [-1,-1], [1, -1], [-1, 1], [1, 1]
+    fov_corners = []
+    for dy in [-1, 1]:
+        for dx in [-1, 1]:
+            corner = fov_center + dx * fov_half_width * right + dy * fov_half_width * up
+            fov_corners.append(corner)
+
+    fov_corners[1], fov_corners[2], fov_corners[3] = fov_corners[2], fov_corners[3], fov_corners[1]
+    fov_corners.append(fov_corners[0])
+
+    return fov_corners
 
 
 def plot_fov_projection(spacecraft, asteroid, index):
@@ -775,7 +1036,7 @@ def eclip_to_sun_earth_corotating_batch_n_body_integrator_output(states, earth_s
     rotation_matrices[:, 1, 1] = cos_angles
     rotation_matrices[:, 2, 2] = 1  # No rotation in the Z direction
 
-    object_i_pos = states[:3, :].T  + earth_positions
+    object_i_pos = states[:3, :].T + earth_positions
 
     rotation_matrices = np.asarray(rotation_matrices, dtype=np.float64)
     relative_positions = np.asarray(object_i_pos, dtype=np.float64)
@@ -868,8 +1129,3 @@ def eclip_to_sun_earth_corotating_batch_full_original_asteroid(states, earth_sta
     positions_corotating = np.einsum("nij,nj->ni", rotation_matrices, h_r_o - h_r_E)
 
     return positions_corotating.T
-
-
-
-
-

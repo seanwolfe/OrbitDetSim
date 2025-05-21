@@ -60,7 +60,7 @@ def solve(true, epochs_nd_norm, observations, obs_incdices, spacecraft_position,
 
 
     c = normalization_constant  # normalization constant from z-domain
-    lambda_phys = 1e5 # physics weight (can be tuned)
+    lambda_phys = 1e6 # physics weight (can be tuned)
 
     # === Residual Function for Least Squares ===
     def residual_function(beta_flat):
@@ -190,7 +190,7 @@ def solve(true, epochs_nd_norm, observations, obs_incdices, spacecraft_position,
         jac=jacobian_np,
         verbose=2,
         method='lm',  # or 'trf', depending on structure
-        xtol=1e-10
+        xtol=1e-15
     )
 
     # === Final output weights ===
@@ -253,16 +253,12 @@ def solve(true, epochs_nd_norm, observations, obs_incdices, spacecraft_position,
 
     asteroid_int_geo = (asteroid_integrated_states[:3] - asteroid_earth_states[:3]) / config["KM_TO_M"]
 
-
-    n
-
-
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
 
     ax.plot(*final_pos_obs_km.cpu().detach().numpy().T, label='Heliocentric Pos')
-    # ax.plot(*spacecraft_position.T, label='Spacecraft Pos')
-    # ax.plot(*true.T, label='True')
+    ax.plot(*spacecraft_position.T, label='Spacecraft Pos')
+    ax.plot(*true.T, label='True')
     ax.plot(*asteroid_int_geo, label='Integrated', linestyle='--')
 
     ax.set_xlabel('X [KM]')
