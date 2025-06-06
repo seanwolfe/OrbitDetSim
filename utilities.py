@@ -126,7 +126,7 @@ def viz(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, configs):
 
 
 def viz_geo_and_secr(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, minimoon_info, asteroid_geo,
-                     spacecraft_geo, configs):
+                     spacecraft_geo, sc_eme_states_physically_sound, configs):
     """
     Visualize both in geo and in sun-earth co-rotating frame the detection instant
     :param object_pos:
@@ -358,6 +358,10 @@ def viz_geo_and_secr(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, m
                label='Integration start sc', zorder=19)  # s/c integration trajectory and initial position
     ax2.scatter(spacecraft_geo[0, :], spacecraft_geo[1, :], spacecraft_geo[2, :], color=colors[-1], linewidth=5,
             label='Integrated traj sc', zorder=14)
+    ax2.scatter(sc_eme_states_physically_sound[0, 0], sc_eme_states_physically_sound[1, 0], sc_eme_states_physically_sound[2, 0], color=colors[-3], s=50,
+                label='Physically sound start', zorder=18)  # s/c integration trajectory and initial position
+    ax2.plot(sc_eme_states_physically_sound[0, :], sc_eme_states_physically_sound[1, :], sc_eme_states_physically_sound[2, :], color=colors[-3], linewidth=5,
+                label='Physically sound', zorder=14)
     ax2.scatter(asteroid_geo[0, 0], asteroid_geo[1, 0], asteroid_geo[2, 0], color=colors[-2], s=30,
                label='Integration start minimoon', zorder=19)  # minimoon integration trajectory and initial position
     ax2.scatter(asteroid_geo[0, :], asteroid_geo[1, :], asteroid_geo[2, :], color=colors[-2], linewidth=5,
@@ -559,11 +563,10 @@ def sun_earth_corotating_to_geo_eclip_batch_full(states_corotating, earth_states
     - states_geocentric: (6, N) array in geocentric ECLIPJ2000
     """
 
-    states_corotating = np.atleast_2d(states_corotating)
-    earth_states = np.atleast_2d(earth_states)
-
 
     _, N = states_corotating.shape
+
+    print(states_corotating.shape)
 
     # Earth's heliocentric position (used only for rotation)
     h_r_E = earth_states[:3, :].T  # (N, 3)
@@ -575,6 +578,7 @@ def sun_earth_corotating_to_geo_eclip_batch_full(states_corotating, earth_states
 
     # Compute rotation angles from Earth-Sun vector (negate for SECR to inertial)
     angles = np.arctan2(-h_r_E[:, 1], -h_r_E[:, 0])  # Shape: (N,)
+
 
     # Rotation matrices: from SECR to ECLIPJ2000
     cos_angles = np.cos(angles)
@@ -1243,7 +1247,7 @@ def sun_earth_corotating_to_helio_eclip_batch_full(states_corotating, earth_stat
     h_omega = np.zeros((N, 3))
     h_omega[:, 2] = h_omega_mag  # Only z-component for ecliptic plane rotation
 
-    E_omega = np.einsum('nij,nj->ni', rotation_matrices, h_omega)
+    E_omega = np.einsum('nij,nj->ni', rotation_matrices.transpose(0, 2, 1), h_omega)
     v_rot = np.cross(E_omega, E_r_o_prime)  # correct: using rotated position
     v_rel_rot = E_v_o_prime + v_rot
     h_rel_v = np.einsum('nij,nj->ni', rotation_matrices, v_rel_rot)
@@ -1253,6 +1257,74 @@ def sun_earth_corotating_to_helio_eclip_batch_full(states_corotating, earth_stat
     states_heliocentric[3:, :] = h_v_o.T
 
     return states_heliocentric
+
+
+def sun_earth_corotating_to_helio_eclip_single(state_corotating, earth_state):
+    """
+    Converts a batch of position and velocity state vectors from the Earth-centered
+    Sun-Earth co-rotating frame (SECR) to heliocentric ECLIPJ2000, accounting for the Coriolis term.
+
+    Parameters:
+    - states_corotating: (1, N) array of states in the SECR frame, where M is the number of objects
+      and N is the number of timesteps. The first 3 rows represent positions, and the last 3 rows represent velocities.
+    - earth_states: (1, N) array of Earth state vectors in the heliocentric ECLIPJ2000 frame at each timestep.
+      The first 3 rows represent Earth's position, and the last 3 rows represent Earth's velocity.
+
+    Returns:
+    - states_heliocentric: (1, N) array of transformed states in heliocentric ECLIPJ2000 frame.
+      The first 3 rows represent positions, and the last 3 rows represent velocities.
+    """
+
+    # Extract Earth's position and velocity from heliocentric ECLIPJ2000
+    h_r_E = earth_state[:3] # ( 3)
+    h_v_E = earth_state[3:]  # (3)
+    E_r_o_prime = state_corotating[:3]
+    E_v_o_prime = state_corotating[3:]
+
+    # Compute Earth's orbital angle (angle in the ecliptic plane)
+    angle = np.arctan2(-h_r_E[1], -h_r_E[0])  # Shape: (N,)
+
+    # Compute cosines and sines of rotation angles
+    cos_angle = np.cos(angle)
+    sin_angle = np.sin(angle)
+
+    # Construct rotation matrices (shape: Nx3x3), Z axis is fixed along ecliptic north
+    rotation_matrix = np.zeros((3, 3))
+    rotation_matrix[0, 0] = cos_angle
+    rotation_matrix[0, 1] = -sin_angle
+    rotation_matrix[1, 0] = sin_angle
+    rotation_matrix[1, 1] = cos_angle
+    rotation_matrix[2, 2] = 1  # Z remains unchanged (ecliptic north)
+
+    state_heliocentric = np.zeros_like(state_corotating)
+
+    h_rel_o = rotation_matrix @ E_r_o_prime  # now co-rotating frame
+    h_r_o = h_rel_o + h_r_E
+
+    # Angular velocity vector assuming uniform circular motion in ecliptic plane
+    h_omega_mag = np.linalg.norm(np.cross(h_r_E, h_v_E)) / (np.linalg.norm(h_r_E) ** 2)  # (N,)
+    h_omega = np.zeros(3,)
+    h_omega[2] = h_omega_mag  # Only z-component for ecliptic plane rotation
+
+    E_omega = rotation_matrix.T @ h_omega
+    v_rot = np.cross(E_omega, E_r_o_prime)  # correct: using rotated position
+    v_rel_rot = E_v_o_prime + v_rot
+    h_rel_v = rotation_matrix @ v_rel_rot
+    h_v_o = h_rel_v + h_v_E
+
+    state_heliocentric[:3] = h_r_o
+    state_heliocentric[3:] = h_v_o
+
+    return state_heliocentric
+
+
+def helio_eclip_to_geo_eme_batch(states_helio_eclip, earth_helio_eclip):
+
+    # convert from helio eclip to geo eclip
+    states_geo_eclip = states_helio_eclip - earth_helio_eclip
+    print(states_geo_eclip.shape)
+    return ecliptic_to_eme_batch(states_geo_eclip)
+
 
 
 def helio_eclip_from_geo_eme(eme_vectors, earth_helio_state):

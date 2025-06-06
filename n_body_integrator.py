@@ -36,6 +36,9 @@ def integrate_n_body(object_state, epoch, end_time, time_interval, type):
     if type == "ASTEROID":
         epoch_et = spice.unitim(epoch, 'JDTDB', 'ET')  # initial epoch
         mass_array = np.array([masses[body] for body in bodies] + [masses["ASTEROID"]])
+    elif type == "SPACECRAFT-ASTEROIDTIME":
+        epoch_et = spice.unitim(epoch, 'JDTDB', 'ET')  # initial epoch
+        mass_array = np.array([masses[body] for body in bodies] + [masses["SPACECRAFT"]])
     else:
         epoch_et = spice.str2et(epoch)
         mass_array = np.array([masses[body] for body in bodies] + [masses["SPACECRAFT"]])

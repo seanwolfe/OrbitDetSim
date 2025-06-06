@@ -748,6 +748,27 @@ def run_sim_runnumbers_MPI_getIOD_data_bychunk_eme(config):
             file_path = (config['IOD_folder_path'] + '/' + file_name + '_' + file_i.split('/')[-1].split('.')[0] +
                          '.csv')
 
+            #################
+            # physically sound
+            #################
+
+            # grab initial spacecraft state in SECR
+            sc_secr_ini_state = spacecraft_state[:, 0]
+            earth_helio_ini_state = asteroid_earth_states[:, 0]
+
+            # convert to helio according to asteroid epoch system
+            sc_helio_ini_state = util.sun_earth_corotating_to_helio_eclip_single(sc_secr_ini_state, earth_helio_ini_state)
+
+            # integrate n-body
+            sc_helio_states, asteroid_earth_states_2 = nbody.integrate_n_body(sc_helio_ini_state, asteroid_epoch,
+                                   total_observation_window * config[
+                                       'SECONDS_PER_DAY'],
+                                   config['time_between_frames'], type="SPACECRAFT-ASTEROIDTIME")
+
+
+            # conver to eme
+            sc_eme_states = util.helio_eclip_to_geo_eme_batch(sc_helio_states, asteroid_earth_states)
+
             # make dataframe
             data = np.array([epochs, new_asteroid_state_geo_eme[0, :], new_asteroid_state_geo_eme[1, :],
                              new_asteroid_state_geo_eme[2, :], new_asteroid_state_geo_eme[3, :], new_asteroid_state_geo_eme[4, :],
@@ -771,16 +792,6 @@ def run_sim_runnumbers_MPI_getIOD_data_bychunk_eme(config):
                 df.to_parquet(base_path + '.parquet', index=False)
 
 
-            #################
-            # physically sound
-            #################
-
-            # grab initial spacecraft state in SECR
-
-            # convert to helio according to asteroid epoch system
-
-            # integrate n-body
-
             vis = True
             if vis:
                 #######################
@@ -803,7 +814,7 @@ def run_sim_runnumbers_MPI_getIOD_data_bychunk_eme(config):
                 # visualize it all
                 util.viz_geo_and_secr(spacecraft_state[:3, :], asteroid_state[:3, :], current_minimoon, formation,
                                       [sin_ra, cos_ra, sin_dec], detected_minimoon, new_asteroid_state_geo_eme,
-                                      new_spacecraft_state_geo_eme, config)
+                                      new_spacecraft_state_geo_eme, sc_eme_states, config)
                 ################
 
     return
