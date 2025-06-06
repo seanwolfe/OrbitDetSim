@@ -75,7 +75,7 @@ IOD_data_columns_geo: ["EPOCH(JDTDB)", "GEO_X(KM)", "GEO_Y(KM)", "GEO_Z(KM)", "G
 index_columns: ["run_number", "object_id", "spacecraft_number"]
 asteroid_mass: 1.0e+5
 spacecraft_mass: 1.0e+2
-number_of_frames: 100  # the number of measurements expected from detection technique
+number_of_frames: 4  # the number of measurements expected from detection technique
 time_between_frames: 86400 # the time between consecutive frames from detection technique, in seconds
 run_number: 2  # only file names with this run number identified will be processed for (multi-job mpi on cluster, othewise need to use utilities.get_all_files instead in orbit_det_sim.py)
 
