@@ -300,7 +300,7 @@ def viz_geo_and_secr(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, m
             spacecraft_pos = spacecraft_geo[:3, 0]
 
             # Corotating frame state: shape (6, 1)
-            boresight_vec = np.array([1, 0, 0])  # shape (6, 1)
+            boresight_vec = np.array([-1, 0, 0])  # shape (6, 1)
 
             # Earth state vector: already 1D (shape (6,))
             earth_state = minimoon.orbit.loc[traj_index, [
@@ -529,8 +529,6 @@ def helio_eclip_to_sun_earth_corotating_batch_full(states, earth_states):
     states_corotating = np.zeros_like(states)
 
     h_r_O = states[:3, :].T  # (N, 3)
-    print(states[:3, :].shape)
-    print(states[:3, :])
     h_v_O = states[3:, :].T  # (N, 3)
 
     h_rel_r = h_r_O - h_r_E  # position relative to Earth (in inertial)
@@ -546,67 +544,6 @@ def helio_eclip_to_sun_earth_corotating_batch_full(states, earth_states):
     states_corotating[3:, :] = E_v_o_prime.T
 
     return states_corotating
-
-
-def sun_earth_corotating_to_helio_eclip_batch_full(states_corotating, earth_states):
-    """
-    Converts a batch of position and velocity state vectors from the Earth-centered
-    Sun-Earth co-rotating frame (SECR) to heliocentric ECLIPJ2000, accounting for the Coriolis term.
-
-    Parameters:
-    - states_corotating: (6, N) array of states in the SECR frame, where M is the number of objects
-      and N is the number of timesteps. The first 3 rows represent positions, and the last 3 rows represent velocities.
-    - earth_states: (6, N) array of Earth state vectors in the heliocentric ECLIPJ2000 frame at each timestep.
-      The first 3 rows represent Earth's position, and the last 3 rows represent Earth's velocity.
-
-    Returns:
-    - states_heliocentric: (6, N) array of transformed states in heliocentric ECLIPJ2000 frame.
-      The first 3 rows represent positions, and the last 3 rows represent velocities.
-    """
-
-    _, N = states_corotating.shape
-
-    # Extract Earth's position and velocity from heliocentric ECLIPJ2000
-    h_r_E = earth_states[:3, :].T  # (N, 3)
-    h_v_E = earth_states[3:, :].T  # (N, 3)
-    E_r_o_prime = states_corotating[:3, :].T
-    E_v_o_prime = states_corotating[3:, :].T
-
-    # Compute Earth's orbital angle (angle in the ecliptic plane)
-    angles = np.arctan2(-h_r_E[:, 1], -h_r_E[:, 0])  # Shape: (N,)
-
-    # Compute cosines and sines of rotation angles
-    cos_angles = np.cos(angles)
-    sin_angles = np.sin(angles)
-
-    # Construct rotation matrices (shape: Nx3x3), Z axis is fixed along ecliptic north
-    rotation_matrices = np.zeros((N, 3, 3))
-    rotation_matrices[:, 0, 0] = cos_angles
-    rotation_matrices[:, 0, 1] = -sin_angles
-    rotation_matrices[:, 1, 0] = sin_angles
-    rotation_matrices[:, 1, 1] = cos_angles
-    rotation_matrices[:, 2, 2] = 1  # Z remains unchanged (ecliptic north)
-
-    states_heliocentric = np.zeros_like(states_corotating)
-
-    h_rel_o = np.einsum('nij,nj->ni', rotation_matrices, E_r_o_prime)  # now co-rotating frame
-    h_r_o = h_rel_o + h_r_E
-
-    # Angular velocity vector assuming uniform circular motion in ecliptic plane
-    h_omega_mag = np.linalg.norm(np.cross(h_r_E, h_v_E), axis=1) / (np.linalg.norm(h_r_E, axis=1) ** 2)  # (N,)
-    h_omega = np.zeros((N, 3))
-    h_omega[:, 2] = h_omega_mag  # Only z-component for ecliptic plane rotation
-
-    E_omega = np.einsum('nij,nj->ni', rotation_matrices, h_omega)
-    v_rot = np.cross(E_omega, E_r_o_prime)  # correct: using rotated position
-    v_rel_rot = E_v_o_prime + v_rot
-    h_rel_v = np.einsum('nij,nj->ni', rotation_matrices, v_rel_rot)
-    h_v_o = h_rel_v + h_v_E
-
-    states_heliocentric[:3, :] = h_r_o.T
-    states_heliocentric[3:, :] = h_v_o.T
-
-    return states_heliocentric
 
 
 def sun_earth_corotating_to_geo_eclip_batch_full(states_corotating, earth_states):
@@ -705,6 +642,41 @@ def sun_earth_corotating_to_geo_eclip_single(pos_corot, earth_state_helio):
     return pos_inertial
 
 
+def ecliptic_to_eme_batch(state_vectors_ecliptic):
+    """
+    Transforms a batch of full state vectors from Ecliptic J2000 to EME J2000.
+
+    Parameters:
+    - state_vectors_ecliptic (numpy array): 6xN array representing N state vectors
+      in Ecliptic J2000 (rows: [x, y, z, vx, vy, vz]).
+
+    Returns:
+    - numpy array: 6xN array representing N state vectors in EME J2000.
+    """
+
+    # Obliquity of the ecliptic at J2000 (in degrees)
+    epsilon = 23.439281
+    epsilon_rad = np.radians(epsilon)
+
+    # Rotation matrix about the x-axis (−epsilon for Ecliptic to EME)
+    R = np.array([
+        [1, 0, 0],
+        [0, np.cos(-epsilon_rad), np.sin(-epsilon_rad)],
+        [0, -np.sin(-epsilon_rad), np.cos(-epsilon_rad)]
+    ])
+
+    # Separate position and velocity (each 3xN)
+    pos = state_vectors_ecliptic[0:3, :]
+    vel = state_vectors_ecliptic[3:6, :]
+
+    # Apply rotation
+    pos_eme = R @ pos
+    vel_eme = R @ vel
+
+    # Stack back into 6xN
+    return np.vstack((pos_eme, vel_eme))
+
+
 def ecliptic_to_eme_single(state_vectors_ecliptic):
     """
     Transforms a batch of full state vectors from Ecliptic J2000 to EME J2000.
@@ -736,42 +708,6 @@ def ecliptic_to_eme_single(state_vectors_ecliptic):
     pos_eme = R @ pos
 
     return pos_eme
-
-
-def ecliptic_to_eme_single_posvel(state_vectors_ecliptic):
-    """
-    Transforms a batch of full state vectors from Ecliptic J2000 to EME J2000.
-
-    Parameters:
-    - state_vectors_ecliptic (numpy array): 6xN array representing N state vectors
-      in Ecliptic J2000 (rows: [x, y, z, vx, vy, vz]).
-
-    Returns:
-    - numpy array: 6xN array representing N state vectors in EME J2000.
-    """
-
-    # Obliquity of the ecliptic at J2000 (in degrees)
-    epsilon = 23.439281
-    epsilon_rad = np.radians(epsilon)
-
-    # Rotation matrix about the x-axis (−epsilon for Ecliptic to EME)
-    R = np.array([
-        [1, 0, 0],
-        [0, np.cos(-epsilon_rad), np.sin(-epsilon_rad)],
-        [0, -np.sin(-epsilon_rad), np.cos(-epsilon_rad)]
-    ])
-
-    # Separate position and velocity (each 3xN)
-    pos = state_vectors_ecliptic[0:3]
-    vel = state_vectors_ecliptic[3:6]
-
-    # Apply rotation
-    pos_eme = R @ pos
-    vel_eme = R @ vel
-
-    # Stack back into 6×N
-    state_vectors_eme = np.stack((pos_eme, vel_eme)).reshape(-1)
-    return state_vectors_eme
 
 
 def get_sc_state_from_sc1_position(detected_pop, config):
@@ -1097,74 +1033,6 @@ def get_files_per_folder(parent_folder, filetype):
     return all_files
 
 
-def helio_eclip_from_geo_eme(eme_vectors, earth_helio_state):
-    ###########################
-    # convert geo eme to geo elcip
-    ###########################
-
-    # Obliquity of the ecliptic at J2000 (in degrees)
-    epsilon = 23.439281  # Mean obliquity of the ecliptic at J2000 epoch
-
-    # Convert epsilon to radians
-    epsilon_rad = np.radians(epsilon)
-
-    # Rotation matrix for transformation about the x-axis
-    rotation_matrix = np.array([
-        [1, 0, 0],
-        [0, np.cos(epsilon_rad), np.sin(epsilon_rad)],
-        [0, -np.sin(epsilon_rad), np.cos(epsilon_rad)]
-    ])
-
-    # Apply the rotation to each vector using matrix multiplication
-    ecliptic_positions = np.dot(eme_vectors[:3], rotation_matrix.T)
-    ecliptic_velocities = np.dot(eme_vectors[3:], rotation_matrix.T)
-
-    ##############################
-    # convert geo eclip to helio
-    ##########################
-    helio_eclip_position = ecliptic_positions + earth_helio_state[:3]
-    helio_eclip_velocities = ecliptic_velocities + earth_helio_state[3:]
-
-    return np.hstack((helio_eclip_position, helio_eclip_velocities))
-
-
-def ecliptic_to_eme_batch(state_vectors_ecliptic):
-    """
-    Transforms a batch of full state vectors from Ecliptic J2000 to EME J2000.
-
-    Parameters:
-    - state_vectors_ecliptic (numpy array): 6xN array representing N state vectors
-      in Ecliptic J2000 (rows: [x, y, z, vx, vy, vz]).
-
-    Returns:
-    - numpy array: 6xN array representing N state vectors in EME J2000.
-    """
-
-    # Obliquity of the ecliptic at J2000 (in degrees)
-    epsilon = 23.439281
-    epsilon_rad = np.radians(epsilon)
-
-    # Rotation matrix about the x-axis (−epsilon for Ecliptic to EME)
-    R = np.array([
-        [1, 0, 0],
-        [0, np.cos(-epsilon_rad), np.sin(-epsilon_rad)],
-        [0, -np.sin(-epsilon_rad), np.cos(-epsilon_rad)]
-    ])
-
-    # Separate position and velocity (each 3xN)
-    pos = state_vectors_ecliptic[0:3, :]
-    vel = state_vectors_ecliptic[3:6, :]
-
-    # Apply rotation
-    pos_eme = R @ pos
-    vel_eme = R @ vel
-
-    # Stack back into 6xN
-    return np.vstack((pos_eme, vel_eme))
-
-
-
-
 def eme_to_ecliptic_batch(state_vectors_eme):
     """
     Transforms a batch of full state vectors from EME J2000 to Ecliptic J2000.
@@ -1324,3 +1192,131 @@ def eclip_to_sun_earth_corotating_batch_full_original_asteroid(states, earth_sta
     positions_corotating = np.einsum("nij,nj->ni", rotation_matrices, h_r_o - h_r_E)
 
     return positions_corotating.T
+
+
+def sun_earth_corotating_to_helio_eclip_batch_full(states_corotating, earth_states):
+    """
+    Converts a batch of position and velocity state vectors from the Earth-centered
+    Sun-Earth co-rotating frame (SECR) to heliocentric ECLIPJ2000, accounting for the Coriolis term.
+
+    Parameters:
+    - states_corotating: (6, N) array of states in the SECR frame, where M is the number of objects
+      and N is the number of timesteps. The first 3 rows represent positions, and the last 3 rows represent velocities.
+    - earth_states: (6, N) array of Earth state vectors in the heliocentric ECLIPJ2000 frame at each timestep.
+      The first 3 rows represent Earth's position, and the last 3 rows represent Earth's velocity.
+
+    Returns:
+    - states_heliocentric: (6, N) array of transformed states in heliocentric ECLIPJ2000 frame.
+      The first 3 rows represent positions, and the last 3 rows represent velocities.
+    """
+
+    _, N = states_corotating.shape
+
+    # Extract Earth's position and velocity from heliocentric ECLIPJ2000
+    h_r_E = earth_states[:3, :].T  # (N, 3)
+    h_v_E = earth_states[3:, :].T  # (N, 3)
+    E_r_o_prime = states_corotating[:3, :].T
+    E_v_o_prime = states_corotating[3:, :].T
+
+    # Compute Earth's orbital angle (angle in the ecliptic plane)
+    angles = np.arctan2(-h_r_E[:, 1], -h_r_E[:, 0])  # Shape: (N,)
+
+    # Compute cosines and sines of rotation angles
+    cos_angles = np.cos(angles)
+    sin_angles = np.sin(angles)
+
+    # Construct rotation matrices (shape: Nx3x3), Z axis is fixed along ecliptic north
+    rotation_matrices = np.zeros((N, 3, 3))
+    rotation_matrices[:, 0, 0] = cos_angles
+    rotation_matrices[:, 0, 1] = -sin_angles
+    rotation_matrices[:, 1, 0] = sin_angles
+    rotation_matrices[:, 1, 1] = cos_angles
+    rotation_matrices[:, 2, 2] = 1  # Z remains unchanged (ecliptic north)
+
+    states_heliocentric = np.zeros_like(states_corotating)
+
+    h_rel_o = np.einsum('nij,nj->ni', rotation_matrices, E_r_o_prime)  # now co-rotating frame
+    h_r_o = h_rel_o + h_r_E
+
+    # Angular velocity vector assuming uniform circular motion in ecliptic plane
+    h_omega_mag = np.linalg.norm(np.cross(h_r_E, h_v_E), axis=1) / (np.linalg.norm(h_r_E, axis=1) ** 2)  # (N,)
+    h_omega = np.zeros((N, 3))
+    h_omega[:, 2] = h_omega_mag  # Only z-component for ecliptic plane rotation
+
+    E_omega = np.einsum('nij,nj->ni', rotation_matrices, h_omega)
+    v_rot = np.cross(E_omega, E_r_o_prime)  # correct: using rotated position
+    v_rel_rot = E_v_o_prime + v_rot
+    h_rel_v = np.einsum('nij,nj->ni', rotation_matrices, v_rel_rot)
+    h_v_o = h_rel_v + h_v_E
+
+    states_heliocentric[:3, :] = h_r_o.T
+    states_heliocentric[3:, :] = h_v_o.T
+
+    return states_heliocentric
+
+
+def helio_eclip_from_geo_eme(eme_vectors, earth_helio_state):
+    ###########################
+    # convert geo eme to geo elcip
+    ###########################
+
+    # Obliquity of the ecliptic at J2000 (in degrees)
+    epsilon = 23.439281  # Mean obliquity of the ecliptic at J2000 epoch
+
+    # Convert epsilon to radians
+    epsilon_rad = np.radians(epsilon)
+
+    # Rotation matrix for transformation about the x-axis
+    rotation_matrix = np.array([
+        [1, 0, 0],
+        [0, np.cos(epsilon_rad), np.sin(epsilon_rad)],
+        [0, -np.sin(epsilon_rad), np.cos(epsilon_rad)]
+    ])
+
+    # Apply the rotation to each vector using matrix multiplication
+    ecliptic_positions = np.dot(eme_vectors[:3], rotation_matrix.T)
+    ecliptic_velocities = np.dot(eme_vectors[3:], rotation_matrix.T)
+
+    ##############################
+    # convert geo eclip to helio
+    ##########################
+    helio_eclip_position = ecliptic_positions + earth_helio_state[:3]
+    helio_eclip_velocities = ecliptic_velocities + earth_helio_state[3:]
+
+    return np.hstack((helio_eclip_position, helio_eclip_velocities))
+
+
+def ecliptic_to_eme_single_posvel(state_vectors_ecliptic):
+    """
+    Transforms a batch of full state vectors from Ecliptic J2000 to EME J2000.
+
+    Parameters:
+    - state_vectors_ecliptic (numpy array): 6xN array representing N state vectors
+      in Ecliptic J2000 (rows: [x, y, z, vx, vy, vz]).
+
+    Returns:
+    - numpy array: 6xN array representing N state vectors in EME J2000.
+    """
+
+    # Obliquity of the ecliptic at J2000 (in degrees)
+    epsilon = 23.439281
+    epsilon_rad = np.radians(epsilon)
+
+    # Rotation matrix about the x-axis (−epsilon for Ecliptic to EME)
+    R = np.array([
+        [1, 0, 0],
+        [0, np.cos(-epsilon_rad), np.sin(-epsilon_rad)],
+        [0, -np.sin(-epsilon_rad), np.cos(-epsilon_rad)]
+    ])
+
+    # Separate position and velocity (each 3xN)
+    pos = state_vectors_ecliptic[0:3]
+    vel = state_vectors_ecliptic[3:6]
+
+    # Apply rotation
+    pos_eme = R @ pos
+    vel_eme = R @ vel
+
+    # Stack back into 6×N
+    state_vectors_eme = np.stack((pos_eme, vel_eme)).reshape(-1)
+    return state_vectors_eme

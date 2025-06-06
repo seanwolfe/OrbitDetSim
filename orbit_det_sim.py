@@ -680,7 +680,6 @@ def run_sim_runnumbers_MPI_getIOD_data_bychunk_eme(config):
             epochs = np.arange(start_time, start_time + total_observation_window, step)
 
             # integrate s/c traj - output is km and km/s
-            print(asteroid_state_helio)
             asteroid_integrated_states, asteroid_earth_states = nbody.integrate_n_body(asteroid_state_helio,
                                                                                        asteroid_epoch,
                                                                                        total_observation_window *
@@ -689,7 +688,6 @@ def run_sim_runnumbers_MPI_getIOD_data_bychunk_eme(config):
                                                                                        type="ASTEROID")  # integrator takes seconds
 
             # km and km/s
-            print(asteroid_integrated_states[:, 0])
             asteroid_state = util.helio_eclip_to_sun_earth_corotating_batch_full(asteroid_integrated_states,
                                                                                  asteroid_earth_states)
             # directly from helio eclip j2000 to eme j2000
