@@ -48,8 +48,8 @@ def solve(true, epochs_nd_norm, observations, obs_incdices, spacecraft_position,
         H_prime = (1 - H ** 2) * W  # (H, d)
         H_double_prime = -2 * H * (1 - H ** 2) * (W ** 2)  # (H, d)
         return H.T, H_prime.T, H_double_prime.T  # shapes: (d, H)
-    weights = torch.randn(H_size, 1)
-    bias = torch.randn(H_size)
+    weights = 2 * torch.rand(H_size, 1) - 1
+    bias = 2 * torch.rand(H_size) - 1
     H_matrix, H_dot, H_ddot = compute_hidden_activations(epochs_nd_norm, weights, bias)
 
     # === PIELM Time normalization constants ===
@@ -60,7 +60,7 @@ def solve(true, epochs_nd_norm, observations, obs_incdices, spacecraft_position,
 
 
     c = normalization_constant  # normalization constant from z-domain
-    lambda_phys = 1e1 # physics weight (can be tuned)
+    lambda_phys = 0.5e2 # physics weight (can be tuned)
 
     # === Residual Function for Least Squares ===
     def residual_function(beta_flat):
@@ -89,8 +89,8 @@ def solve(true, epochs_nd_norm, observations, obs_incdices, spacecraft_position,
 
             # Convert to RA/DEC angular representation
             x, y, z = obs_to_target[:, 0], obs_to_target[:, 1], obs_to_target[:, 2]
-            r = torch.norm(obs_to_target, dim=1) + 1e-12  # Avoid division by 0
-            r_xy = torch.norm(obs_to_target[:, :2], dim=1) + 1e-12
+            r = torch.norm(obs_to_target, dim=1) # Avoid division by 0
+            r_xy = torch.norm(obs_to_target[:, :2], dim=1)
 
             sin_ra = y / r_xy
             cos_ra = x / r_xy
@@ -159,6 +159,7 @@ def solve(true, epochs_nd_norm, observations, obs_incdices, spacecraft_position,
             return (Y_ddot_pred - total_accel).reshape(-1)
         physics_residual = nbody_physics_residual(Y_predicted, Y_ddot_predicted, collocation_points_jdtdb, config)
 
+
         print("Obs res:", torch.norm(obs_residual).item(), "Phys res:", torch.norm(physics_residual).item())
         print(Y_predicted[obs_incdices][0].cpu().detach() * L)
 
@@ -181,7 +182,7 @@ def solve(true, epochs_nd_norm, observations, obs_incdices, spacecraft_position,
         return J.detach().numpy()
 
     # === Initial Guess ===
-    beta0 = np.random.randn(q * H_size)
+    beta0 = np.random.rand(q * H_size)
 
     # === Solve with SciPy ===
     res = least_squares(
@@ -205,6 +206,7 @@ def solve(true, epochs_nd_norm, observations, obs_incdices, spacecraft_position,
 
     # print(beta_opt)
     print(final_pos_obs_km)
+    print(final_vel_obs_kms)
 
     # Get observer positions in km
     spacecraft_pos_kms = torch.tensor(spacecraft_position, dtype=torch.float32)
@@ -256,15 +258,26 @@ def solve(true, epochs_nd_norm, observations, obs_incdices, spacecraft_position,
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
 
-    ax.plot(*final_pos_obs_km.cpu().detach().numpy().T, label='Heliocentric Pos')
+    ax.plot(*final_pos_obs_km.cpu().detach().numpy().T, label='Geo eme Pos')
     ax.plot(*spacecraft_position.T, label='Spacecraft Pos')
     ax.plot(*true.T, label='True')
-    ax.plot(*asteroid_int_geo, label='Integrated', linestyle='--')
+    # ax.plot(*asteroid_int_geo, label='Integrated', linestyle='--')
 
     ax.set_xlabel('X [KM]')
     ax.set_ylabel('Y [KM]')
     ax.set_zlabel('Z [KM]')
     ax.legend()
+
+    # fig2 = plt.figure()
+    # ax2 = fig2.add_subplot(111, projection='3d')
+    #
+    # ax2.plot(*final_pos_obs_km.cpu().detach().numpy().T, label='Heliocentric Pos')
+    # ax2.plot(*asteroid_int_geo, label='Integrated', linestyle='--')
+    #
+    # ax2.set_xlabel('X [KM]')
+    # ax2.set_ylabel('Y [KM]')
+    # ax2.set_zlabel('Z [KM]')
+    # ax2.legend()
     plt.show()
 
 

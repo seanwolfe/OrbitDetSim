@@ -52,8 +52,8 @@ class Spacecraft:
             occluded = (min_distance < body_radius) & (proj_length > 0) & (proj_length < np.linalg.norm(sc_to_ast, axis=1))
             return occluded
 
-        return (check_occlusion(earth_pos, configs['EARTH_RADIUS_AU'] / configs['AU_TO_M'])
-                | check_occlusion(moon_pos, configs['MOON_RADIUS_AU'] / configs['AU_TO_M']))
+        return (check_occlusion(earth_pos, configs['EARTH_RADIUS_KM'] * configs['KM_TO_M'] / configs['AU_TO_M'])
+                | check_occlusion(moon_pos, configs['MOON_RADIUS_KM'] * configs['KM_TO_M']  / configs['AU_TO_M']))
 
     def asteroid_in_fov_batch(self, asteroid_trajectory, spacecraft_position, earth_position, moon_position, configs):
         """

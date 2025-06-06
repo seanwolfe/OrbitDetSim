@@ -8,8 +8,14 @@ class Asteroid:
         self.id = id
         file_path = configs['minimoon_files_folder'] + id + '.csv'
         self.orbit = pd.read_csv(file_path, sep=' ', header=0, names=configs['minimoon_column_names'])
-        self.orbit['Synodic x'] *= -1  # old files used positive x away from sun, this simulation positive x is towards sun
-        self.orbit['Synodic y'] *= -1
+        temp_x = self.orbit['Synodic x']
+        temp_y = self.orbit['Synodic y']
+        moon_temp_x = self.orbit['Moon Synodic x']
+        moon_temp_y = self.orbit['Moon Synodic y']
+        self.orbit['Synodic x'] = temp_x
+        self.orbit['Synodic y'] = temp_y
+        self.orbit['Moon Synodic x'] = moon_temp_x
+        self.orbit['Moon Synodic y'] = moon_temp_y
         self.start_index = ini_index  # point of min apparant magnitude in traj
         self.position = np.array([self.orbit['Synodic x'].iloc[ini_index], self.orbit['Synodic y'].iloc[ini_index],
                                   self.orbit['Synodic z'].iloc[ini_index]])

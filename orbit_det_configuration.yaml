@@ -52,10 +52,10 @@ minimoon_column_names: [ "Object id", "Julian Date", "Distance", "Helio q", "Hel
 ######################################################
 # minimoon_master_file_path: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb/minimoon_master_new.csv'
 minimoon_master_file_path: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb_testset/minimoon_master_new_testset.csv'
-num_spacecraft: 1
-number_of_runs: 10  # number of runs per minimoon (the formation is reinitiallized each time)
+num_spacecraft: 3
+number_of_runs: 4  # number of runs per minimoon (the formation is reinitiallized each time)
 # number_of_process: 1  # number of processes to use when usen multiprocess for parallel implementation
-output_df_file_name: 'results/spacecraft_1/spacecraft_1_runs_10'
+output_df_file_name: 'results/spacecraft_3/spacecraft_3_runs_4'
 number_of_rows_per_part: 10000000
 save_format: 'csv' # csv or parquet, also needs to be specified when expecting to read files
 
@@ -75,8 +75,8 @@ IOD_data_columns_geo: ["EPOCH(JDTDB)", "GEO_X(KM)", "GEO_Y(KM)", "GEO_Z(KM)", "G
 index_columns: ["run_number", "object_id", "spacecraft_number"]
 asteroid_mass: 1.0e+5
 spacecraft_mass: 1.0e+2
-number_of_frames: 16  # the number of measurements expected from detection technique
-time_between_frames: 31.25  # the time between consecutive frames from detection technique, in seconds
+number_of_frames: 4  # the number of measurements expected from detection technique
+time_between_frames: 86400 # the time between consecutive frames from detection technique, in seconds
 run_number: 2  # only file names with this run number identified will be processed for (multi-job mpi on cluster, othewise need to use utilities.get_all_files instead in orbit_det_sim.py)
 
 
@@ -113,7 +113,7 @@ SECONDS_PER_DAY: 86400
 MAS_TO_DEGREE: 3600000
 EARTH_RADIUS_KM: 6378.1366
 EARTH_MASS_PARAMETER: 398600.1  # km^3/s^2
-# MOON_RADIUS_AU: 1737000
+MOON_RADIUS_KM: 1738.1
 SUN_MASS: 1.989E+30
 MERCURY_MASS: 0.33e+24  # KG
 VENUS_MASS: 4.87e+24

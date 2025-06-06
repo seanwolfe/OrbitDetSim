@@ -95,5 +95,4 @@ def integrate_n_body(object_state, epoch, end_time, time_interval, type):
     object_positions = sol.y[3 * object_idx: 3 * (object_idx + 1), :]
     object_velocities = sol.y[2 * 3 * object_idx + 3: 2 * 3 * object_idx + 6, :]
 
-    return np.vstack((object_positions, object_velocities)), np.vstack((earth_positions, earth_velocities))
-
+    return np.vstack((object_positions, object_velocities)) / config['KM_TO_M'], np.vstack((earth_positions, earth_velocities)) / config['KM_TO_M']

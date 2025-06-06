@@ -198,18 +198,13 @@ def viz_geo_and_secr(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, m
             # Draw FOV projection as a polygon
             fov_poly = Poly3DCollection([fov_corners], color='cyan', alpha=0.3, edgecolor='k')
             ax.add_collection3d(fov_poly)
-            triad = [spacecraft_pos, spacecraft_pos - [0.001, 0, 0], spacecraft_pos - [0, 0.001, 0],
-                     spacecraft_pos + [0, 0, 0.001]]
-            x_axis = np.array([triad[0], triad[1]]).T
-            y_axis = np.array([triad[0], triad[2]]).T
-            z_axis = np.array([triad[0], triad[3]]).T
-            ax.plot(*x_axis, color='black')
-            ax.plot(*y_axis, color='black')
-            ax.plot(*z_axis, color='black')
+
 
             # print the obtained ra and dec
-            print(np.rad2deg(np.arcsin(ra_dec[0])))
-            print(np.rad2deg(np.arcsin(ra_dec[2])))
+            ra = np.arctan2(ra_dec[0], ra_dec[1])  # returns radians in [-pi, pi]
+            ra_deg = np.degrees(ra) % 360
+            # print(ra_deg)
+            # print(np.rad2deg(np.arcsin(ra_dec[2])))
 
         else:
             # non-detecting spacecraft trajectory and position at detection
@@ -226,14 +221,17 @@ def viz_geo_and_secr(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, m
             ax.scatter(*spacecraft_pos_j, s=20, color=colors[i], label='Detection instant sc ' + str(i), zorder=20)
 
     # plot integration results
-    ax.scatter(-object_pos[0, 0], -object_pos[1, 0], object_pos[2, 0], color=colors[-1], s=30,
+    ax.scatter(object_pos[0, 0], object_pos[1, 0], object_pos[2, 0], color=colors[-1], s=30,
                label='Integration start sc', zorder=19)  # s/c integration trajectory and initial position
-    ax.plot(-object_pos[0, :], -object_pos[1, :], object_pos[2, :], color=colors[-1], linewidth=5,
+    ax.plot(object_pos[0, :], object_pos[1, :], object_pos[2, :], color=colors[-1], linewidth=5,
             label='Integrated traj sc', zorder=14)
-    ax.scatter(-minimoon_pos[0, 0], -minimoon_pos[1, 0], minimoon_pos[2, 0], color=colors[-2], s=30,
+    ax.scatter(minimoon_pos[0, 0], minimoon_pos[1, 0], minimoon_pos[2, 0], color=colors[-2], s=30,
                label='Integration start minimoon', zorder=19)  # minimoon integration trajectory and initial position
-    ax.plot(-minimoon_pos[0, :], -minimoon_pos[1, :], minimoon_pos[2, :], color=colors[-2], linewidth=5,
+    ax.plot(minimoon_pos[0, :], minimoon_pos[1, :], minimoon_pos[2, :], color=colors[-2], linewidth=5,
             label='Integrated traj minimoon', zorder=14)
+
+
+
 
     ax.set_xlabel('X (KM)')
     ax.set_ylabel('Y (KM)')
@@ -250,16 +248,27 @@ def viz_geo_and_secr(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, m
     ####################################
 
     # asteroid trajectory - GEO
-    asteroid_pos = minimoon.orbit.loc[:, ["Geo x", "Geo y", "Geo z"]].values * (
-            configs['AU_TO_M'] / configs['KM_TO_M'])
+    asteroid_pos = minimoon.orbit.loc[:, ["Geo x", "Geo y", "Geo z", "Geo vx", "Geo vy", "Geo vz"]].values
+    asteroid_pos[:, :3] *= configs['AU_TO_M'] / configs['KM_TO_M']
+    asteroid_pos[:, 3:] *= (configs['AU_TO_M'] / configs['KM_TO_M'] / configs['SECONDS_PER_DAY'])
 
     # Moon trajecotry - SECR
     moon_pos = (minimoon.orbit.loc[:, ["Moon x (Helio)",
-                                       "Moon y (Helio)", "Moon z (Helio)"]].values - minimoon.orbit.loc[:,
+                                       "Moon y (Helio)", "Moon z (Helio)", "Moon vx (Helio)",
+                                       "Moon vy (Helio)", "Moon vz (Helio)"]].values - minimoon.orbit.loc[:,
                                                                                      ["Earth x (Helio)",
                                                                                       "Earth y (Helio)",
-                                                                                      "Earth z (Helio)"]].values) * (
-                       configs['AU_TO_M'] / configs['KM_TO_M'])
+                                                                                      "Earth z (Helio)", "Earth vx (Helio)",
+                                                                                      "Earth vy (Helio)",
+                                                                                      "Earth vz (Helio)"]].values)
+    moon_pos[:, :3] *= configs['AU_TO_M'] / configs['KM_TO_M']
+    moon_pos[:, 3:] *= (configs['AU_TO_M'] / configs['KM_TO_M'] / configs['SECONDS_PER_DAY'])
+
+
+    asteroid_pos_eme = ecliptic_to_eme_batch(asteroid_pos.T).T
+    moon_pos_eme = ecliptic_to_eme_batch(moon_pos.T).T
+    asteroid_pos_eme = asteroid_pos_eme[:, :3]
+    moon_pos_eme = moon_pos_eme[:, :3]
 
     # Create a sphere (Earth model)
     theta = np.linspace(0, np.pi, 30)  # Latitude
@@ -272,8 +281,8 @@ def viz_geo_and_secr(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, m
 
     fig2 = plt.figure()
     ax2 = fig2.add_subplot(projection='3d')
-    ax2.plot(moon_pos[:, 0], moon_pos[:, 1], moon_pos[:, 2], label='Moon')  # plot moon traj
-    ax2.plot(asteroid_pos[:, 0], asteroid_pos[:, 1], asteroid_pos[:, 2], label='Asteroid', color='green',
+    ax2.plot(moon_pos_eme[:, 0], moon_pos_eme[:, 1], moon_pos_eme[:, 2], label='Moon')  # plot moon traj
+    ax2.plot(asteroid_pos_eme[:, 0], asteroid_pos_eme[:, 1], asteroid_pos_eme[:, 2], label='Asteroid', color='green',
             zorder=15)  # plot asteroid traj
     ax2.plot_wireframe(x, y, z, color="blue", linewidth=0.5, alpha=0.7)  # Plot wireframe Earth
 
@@ -301,13 +310,14 @@ def viz_geo_and_secr(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, m
 
             # Call the function with correctly shaped inputs
             geo_boresight = sun_earth_corotating_to_geo_eclip_single(boresight_vec, earth_state)
+            geo_eme_boresight = ecliptic_to_eme_single(geo_boresight)
 
-            fov_corners = plot_fov_projection_geo(geo_boresight[:3], spacecraft_pos, asteroid_pos[traj_index, :],
+            fov_corners = plot_fov_projection_geo(geo_eme_boresight[:3], spacecraft_pos, asteroid_pos_eme[traj_index, :],
                                                   spacecraft.fov)
             # fov_corners = [fov_corner * (configs['AU_TO_M'] / configs['KM_TO_M']) for fov_corner in fov_corners]
 
             # plot fov related things
-            ax2.scatter(*asteroid_pos[traj_index, :], s=20,
+            ax2.scatter(*asteroid_pos_eme[traj_index, :], s=20,
                        color='green',
                        zorder=20)  # instant of detection on minimoon traj
             # Plot dotted lines from spacecraft to FOV corners
@@ -346,12 +356,38 @@ def viz_geo_and_secr(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, m
     # plot integration results
     ax2.scatter(spacecraft_geo[0, 0], spacecraft_geo[1, 0], spacecraft_geo[2, 0], color=colors[-1], s=30,
                label='Integration start sc', zorder=19)  # s/c integration trajectory and initial position
-    ax2.plot(spacecraft_geo[0, :], spacecraft_geo[1, :], spacecraft_geo[2, :], color=colors[-1], linewidth=5,
+    ax2.scatter(spacecraft_geo[0, :], spacecraft_geo[1, :], spacecraft_geo[2, :], color=colors[-1], linewidth=5,
             label='Integrated traj sc', zorder=14)
     ax2.scatter(asteroid_geo[0, 0], asteroid_geo[1, 0], asteroid_geo[2, 0], color=colors[-2], s=30,
                label='Integration start minimoon', zorder=19)  # minimoon integration trajectory and initial position
-    ax2.plot(asteroid_geo[0, :], asteroid_geo[1, :], asteroid_geo[2, :], color=colors[-2], linewidth=5,
+    ax2.scatter(asteroid_geo[0, :], asteroid_geo[1, :], asteroid_geo[2, :], color=colors[-2], linewidth=5,
             label='Integrated traj minimoon', zorder=14)
+
+    # plot ra and dec lines
+    cos_dec = np.sqrt(1 - ra_dec[2] ** 2)
+    r_xy = np.sqrt(ra_dec[0] ** 2 + ra_dec[1] ** 2)
+
+    x = ra_dec[1] / r_xy * cos_dec  # cos(RA) * cos(DEC)
+    y = ra_dec[0] / r_xy * cos_dec  # sin(RA) * cos(DEC)
+    z = ra_dec[2]
+    dir_unit = np.stack([x, y, z], axis=0)  # shape (3, N)
+
+    # Step 2: Compute distances to asteroid
+    dist = np.linalg.norm(asteroid_geo - spacecraft_geo, axis=0)  # shape (N,)
+
+    # Step 3: Scale directions
+    scale = 1.5 * dist  # shape (N,)
+    vecs = dir_unit * scale  # shape (3, N)
+
+    # Plot line-of-sight vectors
+    for i in range(spacecraft_geo.shape[1]):
+        ax2.plot(
+            [spacecraft_geo[0, i], spacecraft_geo[0, i] + vecs[0, i]],
+            [spacecraft_geo[1, i], spacecraft_geo[1, i] + vecs[1, i]],
+            [spacecraft_geo[2, i], spacecraft_geo[2, i] + vecs[2, i]],
+            color='blue',
+            alpha=0.6
+        )
 
     ax2.set_xlabel('X (KM)')
     ax2.set_ylabel('Y (KM)')
@@ -493,6 +529,8 @@ def helio_eclip_to_sun_earth_corotating_batch_full(states, earth_states):
     states_corotating = np.zeros_like(states)
 
     h_r_O = states[:3, :].T  # (N, 3)
+    print(states[:3, :].shape)
+    print(states[:3, :])
     h_v_O = states[3:, :].T  # (N, 3)
 
     h_rel_r = h_r_O - h_r_E  # position relative to Earth (in inertial)
@@ -665,6 +703,75 @@ def sun_earth_corotating_to_geo_eclip_single(pos_corot, earth_state_helio):
     pos_inertial = R @ pos_corot
 
     return pos_inertial
+
+
+def ecliptic_to_eme_single(state_vectors_ecliptic):
+    """
+    Transforms a batch of full state vectors from Ecliptic J2000 to EME J2000.
+
+    Parameters:
+    - state_vectors_ecliptic (numpy array): 6xN array representing N state vectors
+      in Ecliptic J2000 (rows: [x, y, z, vx, vy, vz]).
+
+    Returns:
+    - numpy array: 6xN array representing N state vectors in EME J2000.
+    """
+
+    # Obliquity of the ecliptic at J2000 (in degrees)
+    epsilon = 23.439281
+    epsilon_rad = np.radians(epsilon)
+
+    # Rotation matrix about the x-axis (−epsilon for Ecliptic to EME)
+    R = np.array([
+        [1, 0, 0],
+        [0, np.cos(-epsilon_rad), np.sin(-epsilon_rad)],
+        [0, -np.sin(-epsilon_rad), np.cos(-epsilon_rad)]
+    ])
+
+    # Separate position and velocity (each 3xN)
+    pos = state_vectors_ecliptic[0:3]
+    vel = state_vectors_ecliptic[3:6]
+
+    # Apply rotation
+    pos_eme = R @ pos
+
+    return pos_eme
+
+
+def ecliptic_to_eme_single_posvel(state_vectors_ecliptic):
+    """
+    Transforms a batch of full state vectors from Ecliptic J2000 to EME J2000.
+
+    Parameters:
+    - state_vectors_ecliptic (numpy array): 6xN array representing N state vectors
+      in Ecliptic J2000 (rows: [x, y, z, vx, vy, vz]).
+
+    Returns:
+    - numpy array: 6xN array representing N state vectors in EME J2000.
+    """
+
+    # Obliquity of the ecliptic at J2000 (in degrees)
+    epsilon = 23.439281
+    epsilon_rad = np.radians(epsilon)
+
+    # Rotation matrix about the x-axis (−epsilon for Ecliptic to EME)
+    R = np.array([
+        [1, 0, 0],
+        [0, np.cos(-epsilon_rad), np.sin(-epsilon_rad)],
+        [0, -np.sin(-epsilon_rad), np.cos(-epsilon_rad)]
+    ])
+
+    # Separate position and velocity (each 3xN)
+    pos = state_vectors_ecliptic[0:3]
+    vel = state_vectors_ecliptic[3:6]
+
+    # Apply rotation
+    pos_eme = R @ pos
+    vel_eme = R @ vel
+
+    # Stack back into 6×N
+    state_vectors_eme = np.stack((pos_eme, vel_eme)).reshape(-1)
+    return state_vectors_eme
 
 
 def get_sc_state_from_sc1_position(detected_pop, config):
@@ -1021,12 +1128,49 @@ def helio_eclip_from_geo_eme(eme_vectors, earth_helio_state):
     return np.hstack((helio_eclip_position, helio_eclip_velocities))
 
 
+def ecliptic_to_eme_batch(state_vectors_ecliptic):
+    """
+    Transforms a batch of full state vectors from Ecliptic J2000 to EME J2000.
+
+    Parameters:
+    - state_vectors_ecliptic (numpy array): 6xN array representing N state vectors
+      in Ecliptic J2000 (rows: [x, y, z, vx, vy, vz]).
+
+    Returns:
+    - numpy array: 6xN array representing N state vectors in EME J2000.
+    """
+
+    # Obliquity of the ecliptic at J2000 (in degrees)
+    epsilon = 23.439281
+    epsilon_rad = np.radians(epsilon)
+
+    # Rotation matrix about the x-axis (−epsilon for Ecliptic to EME)
+    R = np.array([
+        [1, 0, 0],
+        [0, np.cos(-epsilon_rad), np.sin(-epsilon_rad)],
+        [0, -np.sin(-epsilon_rad), np.cos(-epsilon_rad)]
+    ])
+
+    # Separate position and velocity (each 3xN)
+    pos = state_vectors_ecliptic[0:3, :]
+    vel = state_vectors_ecliptic[3:6, :]
+
+    # Apply rotation
+    pos_eme = R @ pos
+    vel_eme = R @ vel
+
+    # Stack back into 6xN
+    return np.vstack((pos_eme, vel_eme))
+
+
+
+
 def eme_to_ecliptic_batch(state_vectors_eme):
     """
     Transforms a batch of full state vectors from EME J2000 to Ecliptic J2000.
 
     Parameters:
-    - state_vectors_eme (numpy array): Nx6 array representing N state vectors
+    - state_vectors_eme (numpy array): 6 x N array representing N state vectors
       in EME J2000 (each row: [x, y, z, vx, vy, vz]).
 
     Returns:

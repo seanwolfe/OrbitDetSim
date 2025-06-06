@@ -72,7 +72,7 @@ class Formation:
             original_timestamp = self.orbit.iloc[start_index]['Time']
 
             # Resample spacecraft data at hourly intervals (matching asteroid)
-            spacecraft_resampled = self.orbit.set_index('Time').resample('1H').nearest().reset_index()
+            spacecraft_resampled = self.orbit.set_index('Time').resample('h').nearest().reset_index()
 
             # Find the closest timestamp in the resampled data
             try:
