@@ -31,7 +31,7 @@ def viz(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, configs):
     ax = fig.add_subplot(projection='3d')
     ax.plot(moon_pos[:, 0], moon_pos[:, 1], moon_pos[:, 2], label='Moon')
     ax.plot(asteroid_pos[:, 0], asteroid_pos[:, 1], asteroid_pos[:, 2], label='Asteroid', color='green', zorder=15)
-    ax.scatter(0.009, 0, 0, label='L_1', s=20)
+    ax.scatter(1.5e6, 0, 0, label='L_1', s=20)
     # Create a sphere (Earth model)
     theta = np.linspace(0, np.pi, 30)  # Latitude
     phi = np.linspace(0, 2 * np.pi, 60)  # Longitude
@@ -461,7 +461,7 @@ def read_IOD_data_geo(file, configuration):
             file,
             sep=',',
             header=0,
-            names=configuration['IOD_data_columns_geo']
+            names=configuration['IOD_data_columns_geo_and_phys']
         )
     elif file_ext == '.parquet':
         return pd.read_parquet(file)
@@ -566,7 +566,6 @@ def sun_earth_corotating_to_geo_eclip_batch_full(states_corotating, earth_states
 
     _, N = states_corotating.shape
 
-    print(states_corotating.shape)
 
     # Earth's heliocentric position (used only for rotation)
     h_r_E = earth_states[:3, :].T  # (N, 3)
@@ -1322,7 +1321,6 @@ def helio_eclip_to_geo_eme_batch(states_helio_eclip, earth_helio_eclip):
 
     # convert from helio eclip to geo eclip
     states_geo_eclip = states_helio_eclip - earth_helio_eclip
-    print(states_geo_eclip.shape)
     return ecliptic_to_eme_batch(states_geo_eclip)
 
 

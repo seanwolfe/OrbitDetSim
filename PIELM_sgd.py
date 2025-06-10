@@ -16,6 +16,7 @@ from mpl_toolkits.mplot3d import Axes3D  # Needed for 3D projection
 spice.furnsh("de430.bsp")
 spice.furnsh('naif0012.tls')
 
+
 class ELM(nn.Module):
     def __init__(self, hidden_dim, q=3, activation=torch.tanh, c_normalization=1.0):
         """
@@ -59,13 +60,16 @@ class ELM(nn.Module):
         return Y.T, Y_dot.T, Y_dot_dot.T
 
 
-def nbody_physics_loss(Y_pred, Y_ddot_pred, epochs, configuration):
+def nbody_physics_residual(Y_pred, Y_ddot_pred, epochs, configuration):
     """
     Y_pred: (N, 3) — nondimensional predicted geocentric positions of asteroid
     Y_ddot_pred: (N, 3) — nondimensional predicted accelerations
     epochs: (N,) — JDTDB times
     configuration: dict with physical constants and body masses
     """
+    L = configuration['normalization_ratio'] * configuration['EARTH_RADIUS_KM']  # Length scale in km
+    mu_E = configuration['EARTH_MASS_PARAMETER']
+    T = np.sqrt(L ** 3 / mu_E)
 
     def get_nbody_positions(epoch, config):
         """
@@ -86,30 +90,19 @@ def nbody_physics_loss(Y_pred, Y_ddot_pred, epochs, configuration):
 
         for i, et in enumerate(epoch_ets):
             for j, body in enumerate(bodies):
-                state, _ = spice.spkgeo(targ=body, et=et, ref='ECLIPJ2000', obs=399)  # observer is Earth
+                state, _ = spice.spkgeo(targ=body, et=et, ref='J2000', obs=399)  # observer is Earth
                 positions[i, j, :] = state[:3]  # km
 
         return torch.tensor(positions, dtype=torch.float32), torch.tensor(masses, dtype=torch.float32)
 
     positions, masses = get_nbody_positions(epochs, configuration)
 
-    # === Constants and scales ===
-    RH_km = configuration['EARTH_HILL_RADIUS_KM']
-    L = configuration['normalization_ratio'] * RH_km  # Length scale in km
-    M = configuration['EARTH_MASS']  # Mass scale in kg
-    T = np.sqrt(L ** 3 / (configuration['GRAVITATIONAL_CONSTANT'] / configuration['KM_TO_M'] ** 3 * M))
-
-    # Y_pred /= L
-    # Y_ddot_pred /= (L / T ** 2)
-
     # Nondimensionalize positions (geocentric)
     positions_nd = positions / L  # Now unitless
 
-    # Convert masses to nondimensional (mass / M)
-    masses_nd = masses / M  # (n,)
-
-    # The graviational constant is non-dimensionlized
-    G_nd = (configuration['GRAVITATIONAL_CONSTANT'] / configuration['KM_TO_M'] ** 3) *  T ** 2 * M / L ** 3
+    G_km = (configuration['GRAVITATIONAL_CONSTANT'] / configuration['KM_TO_M'] ** 3)
+    mus = G_km * masses
+    mus_nd = mus / mu_E
 
     N, n, _ = positions_nd.shape
     Y_expanded = Y_pred[:, None, :]  # (N, 1, 3)
@@ -117,32 +110,30 @@ def nbody_physics_loss(Y_pred, Y_ddot_pred, epochs, configuration):
     r_vecs = positions_nd - Y_expanded  # (N, n, 3)
     r_norms = torch.norm(r_vecs, dim=-1, keepdim=True)  # (N, n, 1)
 
-    accel_terms = G_nd * masses_nd[None, :, None] * r_vecs / (r_norms ** 3 + 1e-9)  # (N, n, 3)  # in km
+    accel_terms = mus_nd[None, :, None] * r_vecs / (r_norms ** 3)  # (N, n, 3)
 
     total_accel = accel_terms.sum(dim=1)  # (N, 3)
 
     return torch.mean((Y_ddot_pred - total_accel) ** 2)
 
 
-def ra_dec_observation_loss(Y_pred, Y_obs, spacecraft_pos, epochs, configuration):
+def ra_dec_observation_residual(Y_pred, Y_obs, spacecraft_pos, config):
     """
     Computes the MSE between observed and predicted [sin(RA), cos(RA), sin(DEC)].
 
     :param Y_pred: (N, 3) geocentric non-dim predicted positions [x, y, z] in units of 3 Earth Hill Radii
     :param Y_obs: (N, 3) observations as [sin(RA), cos(RA), sin(DEC)]
     :param spacecraft_pos: (N, 3) spacecraft geo positions (KM) - used to get observer-to-target vector
-    :param epochs: (N,) JDTDB times
-    :param configuration: dict with keys:
-        - 'EHILL_KM'
-        - 'AU_KM'
-    :return: scalar MSE loss between predicted and observed angular vectors
+    :return: residual between predicted and observed angular vectors
     """
+
+    L = config['normalization_ratio'] * config['EARTH_RADIUS_KM']  # Length scale in km
+    mu_E = config['EARTH_MASS_PARAMETER']
+
     Y_obs = torch.tensor(Y_obs, dtype=torch.float32)
 
-    EHILL_KM = configuration['EARTH_HILL_RADIUS_KM']
-
     # Convert predicted positions to km (geocentric)
-    Y_pred_km = Y_pred * (configuration['normalization_ratio'] * EHILL_KM)  # (N, 3)
+    Y_pred_km = Y_pred * L  # (N, 3)
 
     # Get observer positions in km
     spacecraft_pos_km = torch.tensor(spacecraft_pos, dtype=torch.float32)
@@ -152,14 +143,15 @@ def ra_dec_observation_loss(Y_pred, Y_obs, spacecraft_pos, epochs, configuration
 
     # Convert to RA/DEC angular representation
     x, y, z = obs_to_target[:, 0], obs_to_target[:, 1], obs_to_target[:, 2]
-    r = torch.norm(obs_to_target, dim=1) + 1e-12  # Avoid division by 0
-    r_xy = torch.norm(obs_to_target[:, :2], dim=1) + 1e-12
+    r = torch.norm(obs_to_target, dim=1)  # Avoid division by 0
+    r_xy = torch.norm(obs_to_target[:, :2], dim=1)
 
     sin_ra = y / r_xy
     cos_ra = x / r_xy
     sin_dec = z / r
 
     Y_pred_ang = torch.stack([sin_ra, cos_ra, sin_dec], dim=1)
+
 
     # Compute MSE between predicted and observed [sin RA, cos RA, sin DEC]
     loss = torch.mean((Y_pred_ang - Y_obs) ** 2)
@@ -175,7 +167,7 @@ def sample_time_points(
     mean: float = None,
     std: float = None,
     layer_ratios: List[Tuple[float, float]] = None,  # Only used for lhs and random_uniform
-    config: dict = {},
+        config=None,
     seed: Union[int, None] = None
 ) -> np.ndarray:
     """
@@ -196,6 +188,8 @@ def sample_time_points(
     Returns:
         np.ndarray of sampled time points, including observation_epochs.
     """
+    if config is None:
+        config = {}
     rng = np.random.default_rng(config["seed"])
     t0, tN = observation_epochs[0], observation_epochs[-1]
     domain_start = t0 - delta
@@ -265,6 +259,7 @@ def sample_time_points(
     combined = np.concatenate([observation_epochs, additional_samples])
     return np.sort(combined)
 
+
 def epoch_normalization(epoch, z_range, configuration):
     """
     Normalize JDTDB epochs to a specified z_range after non-dimensionalizing.
@@ -284,24 +279,17 @@ def epoch_normalization(epoch, z_range, configuration):
     """
 
     # === Constants and scales ===
-    RH_km = configuration['EARTH_HILL_RADIUS_KM']
-    L = configuration['normalization_ratio'] * RH_km  # km
-    M = configuration['EARTH_MASS']  # kg
-    G = configuration['GRAVITATIONAL_CONSTANT']  # m^3 / kg / s^2
-    KM_TO_M = configuration['KM_TO_M']
+    L = configuration['normalization_ratio'] * configuration['EARTH_RADIUS_KM']  # Length scale in km
+    mu_E = configuration['EARTH_MASS_PARAMETER']
+    T = np.sqrt(L ** 3 / mu_E)
 
-    # Convert G to km^3 / kg / s^2
-    G_km3 = G / KM_TO_M**3
-
-    # Time scale (in seconds)
-    T_scale = np.sqrt(L**3 / (G_km3 * M))
 
     # === Convert JDTDB to seconds since first epoch ===
     SECONDS_PER_DAY = 86400.0
     t_seconds = (epoch - epoch[0]) * SECONDS_PER_DAY
 
     # === Nondimensionalize ===
-    t_nondim = t_seconds / T_scale
+    t_nondim = t_seconds / T
     t0, tf = t_nondim[0], t_nondim[-1]
 
     # === Normalize to z_range ===
@@ -320,12 +308,11 @@ def train(true, model, z_data, y_obs, y_obs_index, spacecraft_pos, obs_epochs_jd
 
         # Forward pass with derivatives
         Y_pred, Y_dot_pred, Y_ddot_pred = model.forward_with_derivatives(z_data)
-
         Y_pred_obs = Y_pred[y_obs_index]
 
         # Compute losses
-        data_loss = ra_dec_observation_loss(Y_pred_obs, y_obs, spacecraft_pos, obs_epochs_jdtdb, configuration)
-        phys_loss = nbody_physics_loss(Y_pred, Y_ddot_pred, colloc_epochs_jdtdb, configuration)
+        data_loss = ra_dec_observation_residual(Y_pred_obs, y_obs, spacecraft_pos, configuration)
+        phys_loss = nbody_physics_residual(Y_pred, Y_ddot_pred, colloc_epochs_jdtdb, configuration)
 
         # Total loss
         loss = data_loss + lambda_phys * phys_loss
@@ -334,23 +321,6 @@ def train(true, model, z_data, y_obs, y_obs_index, spacecraft_pos, obs_epochs_jd
 
         if epoch % 100 == 0:
             print(f"Epoch {epoch}: Data Loss = {data_loss.item():.4e}, Physics Loss = {phys_loss.item():.4e}")
-
-
-    L = configuration['normalization_ratio'] * configuration['EARTH_HILL_RADIUS_KM']  # km
-    geo_pos_km = Y_pred[y_obs_index] * L
-    print(geo_pos_km.detach().numpy() - true)
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
-
-    ax.plot(*geo_pos_km.detach().numpy().T, label='Heliocentric Pos')
-    ax.plot(*spacecraft_pos.T, label='Spacecraft Pos')
-    ax.plot(*true.T, label='True')
-
-    ax.set_xlabel('X [KM]')
-    ax.set_ylabel('Y [KM]')
-    ax.set_zlabel('Z [KM]')
-    ax.legend()
-    plt.show()
 
 # Argument parser to get the config file path
 parser = argparse.ArgumentParser(description="Run the spacecraft simulation")

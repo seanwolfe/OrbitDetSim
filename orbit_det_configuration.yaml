@@ -36,7 +36,8 @@ quasi_halo_end: 350500 # 355000  # practically  # esthetically 350500  # index n
 # Asteroid parameters
 #####################################################
 # minimoon_files_folder: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb/'
-minimoon_files_folder: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb_testset/'
+# minimoon_files_folder: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb_testset/'
+minimoon_files_folder: 'minimoon_files_oorb_testset/'
 minimoon_column_names: [ "Object id", "Julian Date", "Distance", "Helio q", "Helio e", "Helio i", "Helio Omega",
                          "Helio omega", "Helio M", "Helio x", "Helio y", "Helio z", "Helio vx", "Helio vy", "Helio vz",
                          "Geo x", "Geo y", "Geo z", "Geo vx", "Geo vy", "Geo vz", "Geo q", "Geo e", "Geo i",
@@ -51,7 +52,8 @@ minimoon_column_names: [ "Object id", "Julian Date", "Distance", "Helio q", "Hel
 # Visible simulation parameters
 ######################################################
 # minimoon_master_file_path: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb/minimoon_master_new.csv'
-minimoon_master_file_path: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb_testset/minimoon_master_new_testset.csv'
+# minimoon_master_file_path: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb_testset/minimoon_master_new_testset.csv'
+minimoon_master_file_path: 'minimoon_files_oorb_testset/minimoon_master_new_testset.csv'
 num_spacecraft: 3
 number_of_runs: 4  # number of runs per minimoon (the formation is reinitiallized each time)
 # number_of_process: 1  # number of processes to use when usen multiprocess for parallel implementation
@@ -65,18 +67,23 @@ save_format: 'csv' # csv or parquet, also needs to be specified when expecting t
 ####################################################
 visible_files_folder: "results"
 visible_file_columns: ['values', "total_length", 'spacecraft_1_ini_pos']
-IOD_folder_path: "/media/aeromec/Seagate Desktop Drive/data_IOD"
+IOD_folder_path: "data_IOD"
 IOD_data_columns: ["EPOCH(JDTDB)", "HELIO_X(AU)", "HELIO_Y(AU)", "HELIO_Z(AU)", "HELIO_VX(AU/D)", "HELIO_VY(AU/D)",
                    "HELIO_VZ(AU/D)", "SC_HELIO_X(AU)", "SC_HELIO_Y(AU)", "SC_HELIO_Z(AU)", "SC_HELIO_VX(AU/D)",
                    "SC_HELIO_VY(AU/D)", "SC_HELIO_VZ(AU/D)", 'SIN_RA', 'COS_RA', 'SIN_DEC']
 IOD_data_columns_geo: ["EPOCH(JDTDB)", "GEO_X(KM)", "GEO_Y(KM)", "GEO_Z(KM)", "GEO_VX(KM/S)", "GEO_VY(KM/S)",
                    "GEO_VZ(KM/S)", "SC_GEO_X(KM)", "SC_GEO_Y(KM)", "SC_GEO_Z(KM)", "SC_GEO_VX(KM/S)",
                    "SC_GEO_VY(KM/S)", "SC_GEO_VZ(KM/S)", 'SIN_RA', 'COS_RA', 'SIN_DEC']
+IOD_data_columns_geo_and_phys: ["EPOCH(JDTDB)", "GEO_X(KM)", "GEO_Y(KM)", "GEO_Z(KM)", "GEO_VX(KM/S)", "GEO_VY(KM/S)",
+                   "GEO_VZ(KM/S)", "SC_GEO_X(KM)", "SC_GEO_Y(KM)", "SC_GEO_Z(KM)", "SC_GEO_VX(KM/S)",
+                   "SC_GEO_VY(KM/S)", "SC_GEO_VZ(KM/S)", 'SIN_RA', 'COS_RA', 'SIN_DEC', "SC_GEO_X(KM)_PHYS",
+                                "SC_GEO_Y(KM)_PHYS", "SC_GEO_Z(KM)_PHYS", "SC_GEO_VX(KM/S)_PHYS",
+                   "SC_GEO_VY(KM/S)_PHYS", "SC_GEO_VZ(KM/S)_PHYS", 'SIN_RA_PHYS', 'COS_RA_PHYS', 'SIN_DEC_PHYS']
 index_columns: ["run_number", "object_id", "spacecraft_number"]
 asteroid_mass: 1.0e+5
 spacecraft_mass: 1.0e+2
-number_of_frames: 4  # the number of measurements expected from detection technique
-time_between_frames: 86400 # the time between consecutive frames from detection technique, in seconds
+number_of_frames: 20  # the number of measurements expected from detection technique
+time_between_frames: 60 # the time between consecutive frames from detection technique, in seconds
 run_number: 2  # only file names with this run number identified will be processed for (multi-job mpi on cluster, othewise need to use utilities.get_all_files instead in orbit_det_sim.py)
 
 

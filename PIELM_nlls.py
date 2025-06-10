@@ -9,6 +9,9 @@ import spiceypy as spice
 import numpy as np
 import yaml
 import argparse
+
+from sympy.printing.pretty.pretty_symbology import line_width
+
 import utilities as util
 from typing import Callable, List, Literal, Tuple, Union
 import matplotlib.pyplot as plt
@@ -60,10 +63,10 @@ def solve(true, epochs_nd_norm, observations, obs_incdices, spacecraft_position,
 
 
     c = normalization_constant  # normalization constant from z-domain
-    lambda_phys = 0.5e2 # physics weight (can be tuned)
+    lambda_phys = 1000 # physics weight (can be tuned)
 
     # === Residual Function for Least Squares ===
-    def residual_function(beta_flat):
+    def residual_function(beta_flat, return_debug=False):
         beta_tensor = beta_flat.view(q, H_size)
 
         Y_predicted = H_matrix @ beta_tensor.T  # (N, q)
@@ -132,7 +135,7 @@ def solve(true, epochs_nd_norm, observations, obs_incdices, spacecraft_position,
 
                 for i, et in enumerate(epoch_ets):
                     for j, body in enumerate(bodies):
-                        state, _ = spice.spkgeo(targ=body, et=et, ref='ECLIPJ2000', obs=399)  # observer is Earth
+                        state, _ = spice.spkgeo(targ=body, et=et, ref='J2000', obs=399)  # observer is Earth
                         positions[i, j, :] = state[:3]  # km
 
                 return torch.tensor(positions, dtype=torch.float32), torch.tensor(masses, dtype=torch.float32)
@@ -152,7 +155,7 @@ def solve(true, epochs_nd_norm, observations, obs_incdices, spacecraft_position,
             r_vecs = positions_nd - Y_expanded  # (N, n, 3)
             r_norms = torch.norm(r_vecs, dim=-1, keepdim=True)  # (N, n, 1)
 
-            accel_terms = mus_nd[None, :, None] * r_vecs / (r_norms ** 3)  # (N, n, 3)  # in km
+            accel_terms = mus_nd[None, :, None] * r_vecs / (r_norms ** 3)  # (N, n, 3)
 
             total_accel = accel_terms.sum(dim=1)  # (N, 3)
 
@@ -163,8 +166,16 @@ def solve(true, epochs_nd_norm, observations, obs_incdices, spacecraft_position,
         print("Obs res:", torch.norm(obs_residual).item(), "Phys res:", torch.norm(physics_residual).item())
         print(Y_predicted[obs_incdices][0].cpu().detach() * L)
 
-        return torch.cat([obs_residual, lambda_phys * physics_residual])  # total residual vector
+        if return_debug:
+            return {
+                "obs_residual": obs_residual,
+                "physics_residual": physics_residual,
+                "Y_predicted": Y_predicted.detach(),
+                "Y_dot_predicted": (c * (H_dot @ beta_tensor.T)).detach()
+            }
 
+        return torch.cat([obs_residual, lambda_phys * physics_residual])  # total residual vector
+        # return physics_residual  # total residual vector
 
     # === Autograd version of residual and Jacobian ===
     def residual_np(beta_flat_np):
@@ -181,6 +192,24 @@ def solve(true, epochs_nd_norm, observations, obs_incdices, spacecraft_position,
         J = jacobian(wrapped, beta_flat)  # shape: (n_residuals, n_params)
         return J.detach().numpy()
 
+    loss_history = []
+    state_history = []
+    def optimization_callback(beta_flat_np):
+        with torch.no_grad():
+            beta_flat = torch.tensor(beta_flat_np, dtype=torch.float32)
+            debug = residual_function(beta_flat, return_debug=True)
+
+            obs_loss = torch.norm(debug['obs_residual']).item()
+            phys_loss = torch.norm(debug['physics_residual']).item()
+            total_loss = obs_loss + lambda_phys * phys_loss
+
+            loss_history.append((total_loss, obs_loss, lambda_phys * phys_loss))
+
+            # Save predicted trajectory (in km)
+            Y_predicted_km = debug['Y_predicted'] * L
+            Y_dot_predicted_km = debug['Y_dot_predicted'] * L / T
+            state_history.append((Y_predicted_km.cpu().numpy(), Y_dot_predicted_km))
+
     # === Initial Guess ===
     beta0 = np.random.rand(q * H_size)
 
@@ -190,9 +219,10 @@ def solve(true, epochs_nd_norm, observations, obs_incdices, spacecraft_position,
         x0=beta0,
         jac=jacobian_np,
         verbose=2,
-        method='lm',  # or 'trf', depending on structure
-        xtol=1e-15
+        method='trf',  # or 'trf', depending on structure
+        xtol=5e-16,
     )
+
 
     # === Final output weights ===
     beta_opt = torch.tensor(res.x, dtype=torch.float32).view(q, H_size)
@@ -243,7 +273,7 @@ def solve(true, epochs_nd_norm, observations, obs_incdices, spacecraft_position,
     asteroid_ini_pos_geo = final_pos_obs_km[0].cpu().detach().numpy()
     asteroid_ini_vel_geo = final_vel_obs_kms[0].cpu().detach().numpy()
     asteroid_state_geo = np.concatenate([asteroid_ini_pos_geo, asteroid_ini_vel_geo])
-    asteroid_state_helio = asteroid_state_geo + earth_state
+    asteroid_state_helio = util.eme_to_ecliptic_batch(asteroid_state_geo) + earth_state
 
     # integrate s/c traj
     asteroid_integrated_states, asteroid_earth_states = nbody.integrate_n_body(asteroid_state_helio,
@@ -253,7 +283,8 @@ def solve(true, epochs_nd_norm, observations, obs_incdices, spacecraft_position,
                                                                                config['time_between_frames'],
                                                                                type="ASTEROID")  # integrator takes seconds
 
-    asteroid_int_geo = (asteroid_integrated_states[:3] - asteroid_earth_states[:3]) / config["KM_TO_M"]
+    asteroid_int_geo = (asteroid_integrated_states - asteroid_earth_states)
+    asteroid_eme = util.ecliptic_to_eme_batch(asteroid_int_geo)
 
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
@@ -268,17 +299,20 @@ def solve(true, epochs_nd_norm, observations, obs_incdices, spacecraft_position,
     ax.set_zlabel('Z [KM]')
     ax.legend()
 
-    # fig2 = plt.figure()
-    # ax2 = fig2.add_subplot(111, projection='3d')
-    #
-    # ax2.plot(*final_pos_obs_km.cpu().detach().numpy().T, label='Heliocentric Pos')
-    # ax2.plot(*asteroid_int_geo, label='Integrated', linestyle='--')
-    #
-    # ax2.set_xlabel('X [KM]')
-    # ax2.set_ylabel('Y [KM]')
-    # ax2.set_zlabel('Z [KM]')
-    # ax2.legend()
+    fig2 = plt.figure()
+    ax2 = fig2.add_subplot(111, projection='3d')
+
+    ax2.plot(*final_pos_obs_km.cpu().detach().numpy().T, label='EME Pos')
+    ax2.plot(*asteroid_eme[:3, :], label='Integrated', linestyle='--', linewidth=3)
+
+    ax2.set_xlabel('X [KM]')
+    ax2.set_ylabel('Y [KM]')
+    ax2.set_zlabel('Z [KM]')
+    ax2.legend()
     plt.show()
+
+
+    print(loss_history)
 
 
     return
