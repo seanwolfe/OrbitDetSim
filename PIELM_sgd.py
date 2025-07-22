@@ -18,7 +18,7 @@ spice.furnsh('naif0012.tls')
 
 
 class ELM(nn.Module):
-    def __init__(self, hidden_dim, q=3, activation=torch.tanh, c_normalization=1.0):
+    def __init__(self, hidden_dim, q=3, activation=torch.tanh, c_normalization=1.0, initial_nd_positions=None, z_s=None):
         """
         :param input_dim: Dimensionality of each input vector (e.g., 1 for time).
         :param hidden_dim: Number of hidden neurons (N_star).
@@ -27,10 +27,16 @@ class ELM(nn.Module):
         """
         super().__init__()
         input_dim= 1
-        self.input_weights = nn.Parameter(torch.randn(hidden_dim, input_dim), requires_grad=False)  # (H x 1)
-        self.bias = nn.Parameter(torch.randn(hidden_dim), requires_grad=False)  # (H,)
+        self.input_weights = nn.Parameter(2 * torch.rand(hidden_dim, input_dim) - 1, requires_grad=False)  # (H x 1)
+        self.bias = nn.Parameter(2 * torch.rand(hidden_dim) - 1, requires_grad=False)  # (H,)
         self.activation = activation
-        self.output_weights = nn.Parameter(torch.randn(q, hidden_dim))  # (q x H)
+        if initial_nd_positions is None:
+            self.output_weights = nn.Parameter(torch.rand(q, hidden_dim))  # (q x H) random initializtion
+        else:
+            H = torch.tanh(self.input_weights @ z_s.T + self.bias[:, None])
+            H_inv = torch.linalg.pinv(H)
+            self.output_weights = nn.Parameter(initial_nd_positions @ H_inv )
+            print(self.output_weights @ H * 6378.1366)
         self.c_normalization = c_normalization
 
     def forward(self, z):
@@ -300,8 +306,17 @@ def epoch_normalization(epoch, z_range, configuration):
     return normalized_epoch, scale
 
 
-def train(true, model, z_data, y_obs, y_obs_index, spacecraft_pos, obs_epochs_jdtdb, colloc_epochs_jdtdb, configuration, epochs=2000, lr=1e-1, lambda_phys=1):
+def train(model, z_data, y_obs, y_obs_index, spacecraft_pos, obs_epochs_jdtdb, colloc_epochs_jdtdb, configuration, epochs=5000, lr=1e-1, lambda_phys=100):
     optimizer = torch.optim.Adam([model.output_weights], lr=lr)
+
+    L = configuration['normalization_ratio'] * configuration['EARTH_RADIUS_KM']  # Length scale in km
+    mu_E = configuration['EARTH_MASS_PARAMETER']
+    T = np.sqrt(L ** 3 / mu_E)
+
+    data_losses = []
+    physics_losses = []
+    positions = []
+    velocities = []
 
     for epoch in range(epochs):
         optimizer.zero_grad()
@@ -309,10 +324,18 @@ def train(true, model, z_data, y_obs, y_obs_index, spacecraft_pos, obs_epochs_jd
         # Forward pass with derivatives
         Y_pred, Y_dot_pred, Y_ddot_pred = model.forward_with_derivatives(z_data)
         Y_pred_obs = Y_pred[y_obs_index]
+        Y_pred_obs_km = Y_pred_obs * L
+        Y_dot_pred_obs = Y_dot_pred[y_obs_index] * L / T
+
+        positions.append(Y_pred_obs_km.detach().cpu().detach())
+        velocities.append(Y_dot_pred_obs.detach().cpu().detach())
 
         # Compute losses
         data_loss = ra_dec_observation_residual(Y_pred_obs, y_obs, spacecraft_pos, configuration)
         phys_loss = nbody_physics_residual(Y_pred, Y_ddot_pred, colloc_epochs_jdtdb, configuration)
+
+        data_losses.append(data_loss.item())
+        physics_losses.append(lambda_phys * phys_loss.item())
 
         # Total loss
         loss = data_loss + lambda_phys * phys_loss
@@ -322,14 +345,22 @@ def train(true, model, z_data, y_obs, y_obs_index, spacecraft_pos, obs_epochs_jd
         if epoch % 100 == 0:
             print(f"Epoch {epoch}: Data Loss = {data_loss.item():.4e}, Physics Loss = {phys_loss.item():.4e}")
 
+
+    epochss = np.arange(epochs)
+
+    data = {"TRAINING_EPOCH": epochss, "DATA_LOSS": data_losses, "PHYSICS_LOSS": physics_losses}
+
+    return pd.DataFrame(data), positions, velocities
+
+
 # Argument parser to get the config file path
-parser = argparse.ArgumentParser(description="Run the spacecraft simulation")
-parser.add_argument('--config', type=str, required=True, help="Path to the config file")
-args = parser.parse_args()
+# parser = argparse.ArgumentParser(description="Run the spacecraft simulation")
+# parser.add_argument('--config', type=str, required=True, help="Path to the config file")
+# args = parser.parse_args()
 
 # Load the config file
-with open(args.config, 'r') as file:
-    config = yaml.safe_load(file)
+# with open(args.config, 'r') as file:
+#     config = yaml.safe_load(file)
 
 # elm class test
 # elm = ELM(hidden_dim=50, q=3)

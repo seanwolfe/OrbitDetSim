@@ -13,12 +13,284 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import ast
 import spiceypy as spice
 import argparse
+from matplotlib.collections import LineCollection
+import n_body_integrator as nbody
+from astropy.time import Time
+from scipy.integrate import odeint
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
 spice.furnsh("de430.bsp")
 spice.furnsh('naif0012.tls')
 pd.options.mode.chained_assignment = None
 
+
+def iod_viz(iod_data, results, pred_positions, pred_velocities, pred_global_pos, config):
+    fig = plt.figure(figsize=(18, 12))
+
+    total_length = len(results['TRAINING_EPOCH'])
+    n = int(total_length / 20)
+    indices = list(range(0, total_length, n))
+    indices.append(-1)
+
+    positions_filtered = [pred_positions[i] for i in indices]  # shape: (E, len(indices), 3)
+    x_vals = [pos[:, 0] for pos in positions_filtered]  # (E, len(indices))
+    y_vals = [pos[:, 1] for pos in positions_filtered]
+    z_vals = [pos[:, 2] for pos in positions_filtered]
+    epoch_vals = results['TRAINING_EPOCH'].iloc[indices]
+    observation_epochs = iod_data["EPOCH(JDTDB)"].values
+    true_positions = iod_data.loc[:, ["GEO_X(KM)", "GEO_Y(KM)", "GEO_Z(KM)"]].values
+    true_velocities = iod_data.loc[:, ["GEO_VX(KM/S)", "GEO_VY(KM/S)", "GEO_VZ(KM/S)"]].values
+
+    ### x ###
+    lines = []
+    colors = []
+    for epoch_val, x_val in zip(epoch_vals, x_vals):
+        line = np.vstack((observation_epochs, x_val)).T
+        lines.append(line)
+        colors.append(epoch_val)
+
+    lc = LineCollection(lines, cmap='viridis', array=np.array(colors), linewidth=2)
+    ax = fig.add_subplot(3, 3, 1)  # 3D subplot
+    ax.plot(observation_epochs, true_positions[:, 0], linestyle='--', color='black', zorder=15)
+    ax.add_collection(lc)
+    ax.autoscale()  # Auto scale limits to lines
+    ax.set_xlabel('Time ' + str(config['lambda']))
+    ax.set_ylabel('X position')
+
+    cbar = fig.colorbar(lc, ax=ax)
+    cbar.set_label('Training epoch')
+
+    ### y ###
+    lines = []
+    colors = []
+    for epoch_val, y_val in zip(epoch_vals, y_vals):
+        line = np.vstack((observation_epochs, y_val)).T
+        lines.append(line)
+        colors.append(epoch_val)
+
+    lc2 = LineCollection(lines, cmap='viridis', array=np.array(colors), linewidth=2)
+    ax2 = fig.add_subplot(3, 3, 2)  # 3D subplot
+    ax2.plot(observation_epochs, true_positions[:, 1], linestyle='--', color='black', zorder=15)
+    ax2.add_collection(lc2)
+    ax2.autoscale()  # Auto scale limits to lines
+    ax2.set_xlabel('Time')
+    ax2.set_ylabel('Y position')
+
+    cbar2 = fig.colorbar(lc2, ax=ax2)
+    cbar2.set_label('Training epoch')
+
+    ### z ###
+    lines = []
+    colors = []
+    for epoch_val, z_val in zip(epoch_vals, z_vals):
+        line = np.vstack((observation_epochs, z_val)).T
+        lines.append(line)
+        colors.append(epoch_val)
+
+    lc3 = LineCollection(lines, cmap='viridis', array=np.array(colors), linewidth=2)
+    ax3 = fig.add_subplot(3, 3, 3)  # 3D subplot
+    ax3.plot(observation_epochs, true_positions[:, 2], linestyle='--', color='black', zorder=15)
+    ax3.add_collection(lc3)
+    ax3.autoscale()  # Auto scale limits to lines
+    ax3.set_xlabel('Time')
+    ax3.set_ylabel('Z position')
+
+    cbar3 = fig.colorbar(lc3, ax=ax3)
+    cbar3.set_label('Training epoch')
+
+
+    ###### physics loss ###
+    num = 1
+    points = np.vstack((results['TRAINING_EPOCH'].values, results['PHYSICS_LOSS'].values)).T
+    points = points[::num]
+    epoch_points = results['TRAINING_EPOCH'].values
+    epoch_points = epoch_points[::num]
+    segments = np.array([points[:-1], points[1:]]).transpose(1, 0, 2)
+    lc4 = LineCollection(segments, cmap='viridis', array=epoch_points, linewidth=2)
+    ax4 = fig.add_subplot(3, 3, 4)  # 3D subplot
+    ax4.add_collection(lc4)
+    ax4.autoscale()  # Auto scale limits to lines
+    ax4.set_xlabel('Training Epoch')
+    ax4.set_ylabel('Weigthed Physics Loss')
+    ax4.set_yscale('log')
+    cbar4 = fig.colorbar(lc4, ax=ax4)
+    cbar4.set_label('Training epoch')
+
+    ###### data loss ###
+    points = np.vstack((results['TRAINING_EPOCH'].values, results['DATA_LOSS'].values)).T
+    points = points[::num]
+    segments = np.array([points[:-1], points[1:]]).transpose(1, 0, 2)
+    lc5 = LineCollection(segments, cmap='viridis', array=epoch_points, linewidth=2)
+    ax5 = fig.add_subplot(3, 3, 5)  # 3D subplot
+    ax5.add_collection(lc5)
+    ax5.autoscale()  # Auto scale limits to lines
+    ax5.set_xlabel('Training Epoch')
+    ax5.set_ylabel('Data Loss')
+    ax5.set_yscale('log')
+    cbar5 = fig.colorbar(lc5, ax=ax5)
+    cbar5.set_label('Training epoch')
+
+    ax6 = fig.add_subplot(3, 3, 6, projection='3d')
+    ax6.plot(*pred_positions[-1].T, label='Geo eme Pos')
+    ax6.scatter(*iod_data.loc[:, ["SC_GEO_X(KM)_PHYS", "SC_GEO_Y(KM)_PHYS", "SC_GEO_Z(KM)_PHYS"]].values.T, label='Spacecraft Pos')
+    ax6.plot(*true_positions.T, label='True')
+    # ax.plot(*asteroid_int_geo, label='Integrated', linestyle='--')
+    for i, pos in enumerate(pred_global_pos):
+        ax6.plot(*pos.T)
+    ax6.set_xlabel('X [KM]')
+    ax6.set_ylabel('Y [KM]')
+    ax6.set_zlabel('Z [KM]')
+    ax6.set_aspect('equal')
+    ax6.legend()
+
+    ax7 = fig.add_subplot(3, 3, 7, projection='3d')
+    if config['dynamics'] == 'CR3BP':  # i.e. consistently non-dim
+        mu = config['SYSTEM_MASS_PARAMETER']
+        asteroid_ini_pos = pred_positions[-1][0, :]
+        asteroid_ini_vel = pred_velocities[-1][0, :]
+        ini_state = np.concatenate([asteroid_ini_pos, asteroid_ini_vel])
+        phi_0 = np.eye(6)  # initial Phi (state transition matrix)
+        state = np.hstack((np.array(ini_state), phi_0.ravel()))
+        res = odeint(nbody.cr3bp, state, observation_epochs, args=(mu,))
+        asteroid_cr3bp_position = np.array(res[:, :3])
+        ax7.plot(*pred_positions[-1].T, label='Predicted Pos')
+        ax7.plot(*asteroid_cr3bp_position.T, label='CR3BP Integrated', linestyle='--', linewidth=3)
+    else:
+        # calc epochs
+        num_frames = config['number_of_frames']
+        asteroid_epoch = observation_epochs[0]
+        step = config['time_between_frames'] / config['SECONDS_PER_DAY']
+        total_observation_window = num_frames * step  # epoch is in jd
+
+        # Function to get state vectors (position, velocity) in km & km/s
+        epoch_et = spice.unitim(asteroid_epoch, 'JDTDB', 'ET')  # initial epoch
+
+        def get_state(body, reference=10):
+            state, _ = spice.spkgeo(body, epoch_et, "ECLIPJ2000", reference)
+            return np.array(state)
+
+        earth_state = get_state(399)
+
+        asteroid_ini_pos_geo = pred_positions[-1][0, :]
+        asteroid_ini_vel_geo = pred_velocities[-1][0, :]
+        asteroid_state_geo = np.concatenate([asteroid_ini_pos_geo, asteroid_ini_vel_geo])
+        asteroid_state_helio = eme_to_ecliptic_batch(asteroid_state_geo) + earth_state
+
+        # integrate s/c traj
+        asteroid_integrated_states, asteroid_earth_states = nbody.integrate_n_body(asteroid_state_helio,
+                                                                                   asteroid_epoch,
+                                                                                   total_observation_window *
+                                                                                   config['SECONDS_PER_DAY'],
+                                                                                   config['time_between_frames'],
+                                                                                   type="ASTEROID")  # integrator takes seconds
+
+        asteroid_int_geo = (asteroid_integrated_states - asteroid_earth_states)
+        asteroid_eme = ecliptic_to_eme_batch(asteroid_int_geo)
+        ast_epoch = Time(observation_epochs[0], format='jd', scale='tdb')
+        asteroid_2bd_position, asteroid_2bd_velocity, asteroid_2bd_times = nbody.two_body_integrator(
+            asteroid_ini_pos_geo,
+            asteroid_ini_vel_geo,
+            ast_epoch,
+            config['time_between_frames'],
+            num_frames)
+        ax7.plot(*pred_positions[-1].T, label='Predicted Pos')
+        ax7.plot(*asteroid_eme[:3, :], label='N-body Integrated', linestyle='--', linewidth=3)
+        # ax7.plot(*asteroid_2bd_position.T, label='2-body Integrated', linestyle='--', linewidth=3)
+
+    ax7.set_xlabel('X [KM]')
+    ax7.set_ylabel('Y [KM]')
+    ax7.set_zlabel('Z [KM]')
+    ax7.set_aspect('equal')
+    ax7.legend()
+
+
+
+    errors_xyz = np.abs(pred_positions[-1] - true_positions).numpy()
+    x = errors_xyz[:, 0]
+    y = errors_xyz[:, 1]
+    z = errors_xyz[:, 2]
+
+    errors_vxyz = np.abs(pred_velocities[-1] - true_velocities).numpy()
+    vx = errors_vxyz[:, 0]
+    vy = errors_vxyz[:, 1]
+    vz = errors_vxyz[:, 2]
+
+
+    bins = 10
+
+    # Compute histograms for positions
+    all_data = np.concatenate([x, y, z])
+    counts_x, bin_edges = np.histogram(x, bins=bins, range=(all_data.min(), all_data.max()))
+    counts_y, _ = np.histogram(y, bins=bin_edges)
+    counts_z, _ = np.histogram(z, bins=bin_edges)
+
+    # Compute histograms for velocities
+    all_data_v = np.concatenate([vx, vy, vz])
+    counts_vx, bin_edges_v = np.histogram(vx, bins=bins, range=(all_data_v.min(), all_data_v.max()))
+    counts_vy, _ = np.histogram(vy, bins=bin_edges_v)
+    counts_vz, _ = np.histogram(vz, bins=bin_edges_v)
+
+    # Width of each bar
+    width = (bin_edges[1] - bin_edges[0]) / 4
+
+    # Subplot 2: Grouped bar chart for positions
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+
+    ax8 = fig.add_subplot(3, 3, 8)
+    ax8.bar(bin_centers - width, counts_x, width=width, label='x', color='r')
+    ax8.bar(bin_centers, counts_y, width=width, label='y', color='g')
+    ax8.bar(bin_centers + width, counts_z, width=width, label='z', color='b')
+
+    # Add markers for the first element of each component
+    first_errors = [x[0], y[0], z[0]]
+    colors = ['r', 'g', 'b']
+    labels = ['x[0]', 'y[0]', 'z[0]']
+    marker_height = max(counts_x.max(), counts_y.max(), counts_z.max()) * 1.05
+
+    for val, c, lbl in zip(first_errors, colors, labels):
+        ax8.scatter(val, marker_height, color=c, marker='o', s=50, edgecolors='k', zorder=5, label=f'{lbl} marker')
+
+    # To avoid duplicate legend labels, combine and deduplicate
+    handles, labels = ax8.get_legend_handles_labels()
+    unique = dict(zip(labels, handles))
+    ax8.legend(unique.values(), unique.keys())
+
+    ax8.set_title('Histogram of Positions (Grouped Bars)')
+    ax8.legend()
+    ax8.grid(True)
+
+    # Subplot 3: Grouped bar chart for velocities
+    # Width of each bar
+    width_v = (bin_edges_v[1] - bin_edges_v[0]) / 4
+    bin_centers_v = (bin_edges_v[:-1] + bin_edges_v[1:]) / 2
+    ax9 = fig.add_subplot(3, 3, 9)
+    ax9.bar(bin_centers_v - width_v, counts_vx, width=width_v, label='vx', color='r')
+    ax9.bar(bin_centers_v, counts_vy, width=width_v, label='vy', color='g')
+    ax9.bar(bin_centers_v + width_v, counts_vz, width=width_v, label='vz', color='b')
+
+    # Add markers for the first element of each component
+    first_errors = [vx[0], vy[0], vz[0]]
+    colors = ['r', 'g', 'b']
+    labels = ['vx[0]', 'vy[0]', 'vz[0]']
+    marker_height = max(counts_vx.max(), counts_vy.max(), counts_vz.max()) * 1.05
+
+    for val, c, lbl in zip(first_errors, colors, labels):
+        ax9.scatter(val, marker_height, color=c, marker='o', s=50, edgecolors='k', zorder=5, label=f'{lbl} marker')
+
+    # To avoid duplicate legend labels, combine and deduplicate
+    handles, labels = ax9.get_legend_handles_labels()
+    unique = dict(zip(labels, handles))
+    ax9.legend(unique.values(), unique.keys())
+
+    ax9.set_title('Histogram of Velocities (Grouped Bars)')
+    ax9.legend()
+    ax9.grid(True)
+
+    plt.tight_layout()
+    plt.show()
+
+    return
 
 def viz(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, configs):
     # asteroid position

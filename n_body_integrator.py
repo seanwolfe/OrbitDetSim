@@ -5,6 +5,10 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import yaml
 import argparse
+from astropy import units as u
+from astropy.time import Time
+from poliastro.bodies import Earth
+from poliastro.twobody import Orbit
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
 spice.furnsh("de430.bsp")
@@ -99,3 +103,129 @@ def integrate_n_body(object_state, epoch, end_time, time_interval, type):
     object_velocities = sol.y[2 * 3 * object_idx + 3: 2 * 3 * object_idx + 6, :]
 
     return np.vstack((object_positions, object_velocities)) / config['KM_TO_M'], np.vstack((earth_positions, earth_velocities)) / config['KM_TO_M']
+
+
+import numpy as np
+from astropy.time import Time, TimeDelta
+from astropy import units as u
+from poliastro.bodies import Earth
+from poliastro.twobody import Orbit
+from poliastro.constants import GM_earth
+
+def two_body_integrator(r0_km, v0_kms, epoch, timestep_sec, num_frames):
+    """
+    Propagate a state under two-body dynamics.
+
+    Parameters:
+    ----------
+    r0_km : array_like
+        Initial position vector [x, y, z] in km.
+    v0_kms : array_like
+        Initial velocity vector [vx, vy, vz] in km/s.
+    epoch : astropy.time.Time
+        Initial epoch of the orbit.
+    timestep_sec : float
+        Time step between frames in seconds.
+    num_frames : int
+        Number of frames to propagate.
+
+    Returns:
+    -------
+    positions : np.ndarray
+        Array of propagated positions of shape (num_frames, 3) in km.
+    velocities : np.ndarray
+        Array of propagated velocities of shape (num_frames, 3) in km/s.
+    epochs : list of astropy.time.Time
+        List of epochs corresponding to each frame.
+    """
+    # Create initial orbit
+    r0 = np.array(r0_km, dtype=np.float64) * u.km
+    v0 = np.array(v0_kms, dtype=np.float64) * u.km / u.s
+    orbit = Orbit.from_vectors(Earth, r0, v0, epoch)
+
+    # Time steps
+    epochs = [epoch + TimeDelta(i * timestep_sec, format='sec') for i in range(num_frames)]
+
+    # Propagate and collect
+    positions = []
+    velocities = []
+
+    for t in epochs:
+        propagated = orbit.propagate(t - epoch)
+        positions.append(propagated.r.to_value(u.km))
+        velocities.append(propagated.v.to_value(u.km / u.s))
+
+    return np.array(positions), np.array(velocities), epochs
+
+
+# to be used with odeint
+def cr3bp(state, time, mu=0.01215):
+    # Define the dynamics of the system
+    # state: current state vector
+    # time: current time
+    # return: derivative of the state vector
+
+    x, y, z, vx, vy, vz = state[:6]  # position and velocity
+    phi = np.reshape(state[6:], (6, 6))
+
+    dUdx = -(mu * (mu + x - 1))/np.power(((mu + x - 1)**2 + y**2 + z**2), (3/2)) - \
+           ((1 - mu) * (mu + x))/np.power(((mu + x)**2 + y**2 + z**2),(3/2)) + x
+    dUdy = - (mu * y)/np.power(((mu + x - 1)**2 + y**2 + z**2), (3/2)) - \
+           ((1 - mu) * y)/np.power(((mu + x)**2 + y**2 + z**2), (3/2)) + y
+    dUdz = - (mu * z)/np.power(((mu + x - 1)**2 + y**2 + z**2), (3/2)) - \
+           ((1 - mu) * z)/np.power(((mu + x)**2 + y**2 + z**2), (3/2))
+
+    dxdt = vx  # derivative of position is velocity
+    dydt = vy
+    dzdt = vz
+    dvxdt = dUdx + 2*dydt  # derivative of velocity is acceleration
+    dvydt = dUdy - 2*dxdt
+    dvzdt = dUdz
+
+    dXdt = np.array([dxdt, dydt, dzdt, dvxdt, dvydt, dvzdt])
+
+    def gen_F_matrix(x, y, z, mu):
+        """
+
+        :param x: current x
+        :param y: current y
+        :param z: current z
+        :param mu: gravitional parameter
+        :return: the F matrix from Howells method, to update the state transition matrix
+        """
+
+        F = np.zeros((6, 6))
+        F[0:3, 3:6] = np.eye(3)
+        F[3:6, 3:6] = np.array([[0, 2, 0], [-2, 0, 0], [0, 0, 0]])
+
+        # Second order partials
+        U_xx = (mu - 1) / ((mu + x) ** 2 + y ** 2 + z ** 2) ** 1.5000 - mu / (
+                    (mu + x - 1) ** 2 + y ** 2 + z ** 2) ** 1.5000 + \
+               (0.7500 * mu * (2 * x + 2 * mu - 2) ** 2) / ((mu + x - 1) ** 2 + y ** 2 + z ** 2) ** 2.5000 - \
+               (0.7500 * (2 * x + 2 * mu) ** 2 * (mu - 1)) / ((mu + x) ** 2 + y ** 2 + z ** 2) ** 2.5000 + 1
+        U_yy = (mu - 1) / ((mu + x) ** 2 + y ** 2 + z ** 2) ** 1.5000 - mu / (
+                    (mu + x - 1) ** 2 + y ** 2 + z ** 2) ** 1.5000 + \
+               (3 * mu * y ** 2) / ((mu + x - 1) ** 2 + y ** 2 + z ** 2) ** 2.5000 - \
+               (3 * y ** 2 * (mu - 1)) / ((mu + x) ** 2 + y ** 2 + z ** 2) ** 2.5000 + 1
+        U_zz = (mu - 1) / ((mu + x) ** 2 + y ** 2 + z ** 2) ** 1.5000 - mu / (
+                    (mu + x - 1) ** 2 + y ** 2 + z ** 2) ** 1.5000 + \
+               (3 * mu * z ** 2) / ((mu + x - 1) ** 2 + y ** 2 + z ** 2) ** 2.5000 - (3 * z ** 2 * (mu - 1)) / (
+                           (mu + x) ** 2 + y ** 2 + z ** 2) ** 2.5000
+        U_xy = (1.5000 * mu * y * (2 * x + 2 * mu - 2)) / ((mu + x - 1) ** 2 + y ** 2 + z ** 2) ** 2.5000 - \
+               (1.5000 * y * (2 * x + 2 * mu) * (mu - 1)) / ((mu + x) ** 2 + y ** 2 + z ** 2) ** 2.5000
+        U_xz = (1.5000 * mu * z * (2 * x + 2 * mu - 2)) / ((mu + x - 1) ** 2 + y ** 2 + z ** 2) ** 2.5000 - \
+               (1.5000 * z * (2 * x + 2 * mu) * (mu - 1)) / ((mu + x) ** 2 + y ** 2 + z ** 2) ** 2.5000
+        U_yz = (3 * mu * y * z) / ((mu + x - 1) ** 2 + y ** 2 + z ** 2) ** 2.5000 - \
+               (3 * y * z * (mu - 1)) / ((mu + x) ** 2 + y ** 2 + z ** 2) ** 2.5000
+        U_yx = U_xy
+        U_zx = U_xz
+        U_zy = U_yz
+
+        F[3:6, 0:3] = np.array([[U_xx, U_xy, U_xz], [U_yx, U_yy, U_zy], [U_zx, U_zy, U_zz]])
+
+        return F
+    F = gen_F_matrix(x, y, z, mu)
+
+    dphidt = np.matmul(F, phi)
+
+    return np.hstack((np.array(dXdt), dphidt.ravel()))
