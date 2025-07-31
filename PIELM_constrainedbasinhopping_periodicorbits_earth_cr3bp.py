@@ -1,6 +1,5 @@
 from astropy import units as u
 from astropy.time import Time, TimeDelta
-from duplicity.diffdir import log_delta_path
 from poliastro.bodies import Earth
 from poliastro.twobody import Orbit
 from poliastro.plotting.static import StaticOrbitPlotter
@@ -10,11 +9,9 @@ import numpy as np
 from astropy.coordinates import EarthLocation, AltAz, ITRS, GCRS, SkyCoord, Angle
 from typing import Callable, List, Literal, Tuple, Union
 import torch
-from sympy.abc import epsilon
 from torch.autograd.functional import jacobian
 from scipy.optimize import least_squares
 from scipy.optimize import basinhopping
-from triton.language import dtype
 import pandas as pd
 import spiceypy as spice
 import n_body_integrator as nbody
@@ -522,8 +519,7 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
 
             # stack and solve
             H_stacked = torch.cat([H_pos, H_vel], dim=0)  # (2N_obs, H_size)
-            rv_stacked = torch.cat([r_obs, v_obs], dim=0)  # (2N_obs, 3)
-            rv_stacked_tensor = torch.tensor(rv_stacked, dtype=torch.float32)
+            rv_stacked_tensor = torch.cat([r_obs, v_obs], dim=0).float()  # (2N_obs, 3)
 
             beta_best = torch.linalg.pinv(H_stacked) @ rv_stacked_tensor  # (H_size, 3)
 
@@ -784,8 +780,9 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
 
         Y_pred_obs = Y_pred[obs_indices]
         Y_dot_pred_obs = Y_dot_pred[obs_indices]
-        positions.append(Y_pred_obs.detach().cpu().detach() + observer_positions)  # undo scaling and move to original cr3bp frame
-        velocities.append(Y_dot_pred_obs.detach().cpu().detach())
+        positions.append(
+            (Y_pred_obs + observer_positions).detach().cpu().numpy())  # undo scaling and move to original CR3BP frame
+        velocities.append(Y_dot_pred_obs.detach().cpu().numpy())
 
         def ra_dec_observation_residual():
             """
@@ -961,7 +958,7 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
         # print(f"Global iteration {global_its[0]} complete: accepted={accept}, epsilon={epsilon[0]}")
         global_its[0] += 1
 
-
+    print("Starting")
     # Run basin hopping
     res = basinhopping(func, beta0, minimizer_kwargs=minimizer_kwargs, niter=parameters['NUMBER_OF_ITERATIONS'],
                        stepsize=parameters['STEPSIZE'], T=parameters['TEMPERATURE'], callback=callback, take_step=mystep, disp=True)
@@ -972,8 +969,8 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
 
     Y_pred_obs = Y_pred[obs_indices]
     Y_dot_pred_obs = Y_dot_pred[obs_indices]
-    positions[-1] = (Y_pred_obs.detach().cpu().detach() + observer_positions)
-    velocities[-1] = Y_dot_pred_obs.detach().cpu().detach()
+    positions[-1] = ((Y_pred_obs + observer_positions).detach().cpu().numpy())
+    velocities[-1] = Y_dot_pred_obs.detach().cpu().numpy()
     # print(res.x)
     epochss = np.arange(total_its[0])
     data = {"TRAINING_EPOCH": epochss, "DATA_LOSS": data_losses, "PHYSICS_LOSS": physics_losses, "RANGE_LOSS": range_losses}

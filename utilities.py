@@ -297,12 +297,12 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, config):
 
 
 
-    errors_xyz = np.abs(pred_positions[-1] - true_positions).numpy()
+    errors_xyz = np.abs(pred_positions[-1] - true_positions)
     x = errors_xyz[:, 0]
     y = errors_xyz[:, 1]
     z = errors_xyz[:, 2]
 
-    errors_vxyz = np.abs(pred_velocities[-1] - true_velocities).numpy()
+    errors_vxyz = np.abs(pred_velocities[-1] - true_velocities)
     vx = errors_vxyz[:, 0]
     vy = errors_vxyz[:, 1]
     vz = errors_vxyz[:, 2]

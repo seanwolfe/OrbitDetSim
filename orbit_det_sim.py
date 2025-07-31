@@ -3,7 +3,7 @@ import yaml
 import sys
 import os
 import pandas as pd
-from triton.language import dtype
+
 
 from Asteroid import Asteroid
 from Formation import Formation
@@ -22,9 +22,6 @@ import spiceypy as sp
 import utilities as util
 import n_body_integrator as nbody
 import argparse
-import PIELM_sgd as pielm_sgd
-from PIELM_sgd import ELM
-import PIELM_nlls as pielm_nlls
 
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
@@ -1268,7 +1265,7 @@ def run_IOD_testing(config):
                 results, positions, velocities = pielm_nstbn.run(data, config, parameters)
 
             elif dynamics == 'CR3BP' and observer == 'GROUND' and optimizer == 'CONSTRAINED_BASIN_HOPPING':
-                import  PIELM_constrainedbasinhopping_periodicorbits_earth_cr3bp as pielm_cgcb
+                import PIELM_constrainedbasinhopping_periodicorbits_earth_cr3bp as pielm_cgcb
                 parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5,
                               'TIME_DELTA': 0.3 * u.day,
                               'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
