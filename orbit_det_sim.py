@@ -1270,19 +1270,20 @@ def run_IOD_testing(config):
             elif dynamics == 'CR3BP' and observer == 'GROUND' and optimizer == 'CONSTRAINED_BASIN_HOPPING':
                 import  PIELM_constrainedbasinhopping_periodicorbits_earth_cr3bp as pielm_cgcb
                 parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5,
-                              'TIME_DELTA': 0.05 * u.day,
+                              'TIME_DELTA': 0.3 * u.day,
                               'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
                               'LAYER_RATIOS': [(0., 1 / 4), (1 / 4, 3 / 4), (3 / 4, 1.)], 'INPUT_RANGE': (-1, 1),
-                              'HIDDEN_DIMENSION': 10, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': np.power(10, float(-4)), 'STEPSIZE': np.power(10, float(1)),
-                              'NUMBER_OF_ITERATIONS': 1000, 'TEMPERATURE': np.power(10, float(-6)),
+                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
+                              'PHYSICS_WEIGHT': np.power(10, float(0)), 'STEPSIZE': np.power(10, float(1)),
+                              'NUMBER_OF_ITERATIONS': 100, 'TEMPERATURE': np.power(10, float(0)),
                               'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000,
                               'MAX_ITERATiONS': 20000, 'TARGET_ACCEPT_RATE': 0.5, 'STEPWISE_FACTOR': 0.9,
                               'G_TOLERANCE': 1e-15,
                               'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 90,
-                              'MIN_RHO': 1e-2, 'MAX_RHO': 3e-2, 'MIN_RHO_DOT': -1e-2, 'MAX_RHO_DOT': 1e-2, 'DELTA_RHO': 1e-4,
-                              'DELTA_RHO_DOT': 1e-6, 'INITIAL_TRAJECTORIES':3}
+                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 90 - run_idx,
+                              'MIN_RHO': 1e-4, 'MAX_RHO': 5e-2, 'MIN_RHO_DOT': -1e-2, 'MAX_RHO_DOT': 1e-2, 'DELTA_RHO': 0.,
+                              'DELTA_RHO_STEP':1e-1, 'SCALE_FACTOR':1,
+                              'DELTA_RHO_DOT': 0., 'INITIAL_TRAJECTORIES':1000}
                 config['lambda'] = parameters['STEPSIZE']
                 config['run_idx'] = run_idx
                 if config['orbit'] == 'Horizontal Lyapunov Orbits':
@@ -1294,6 +1295,35 @@ def run_IOD_testing(config):
                     parameters['ORBIT_TYPE'] = 'Vertical Lyapunov Orbits'
                     data = pielm_cgcb.generate_data(config, parameters)
                 results, positions, velocities, global_positions = pielm_cgcb.run(data, config, parameters)
+
+            elif dynamics == 'CR3BP' and observer == 'GROUND' and optimizer == 'CONSTRAINED_NLLS':
+                import  PIELM_constrainedbasinhoppingnlls_periodicorbits_earth_cr3bp as pielm_cgcnb
+                parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5,
+                              'TIME_DELTA': 0.3 * u.day,
+                              'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
+                              'LAYER_RATIOS': [(0., 1 / 4), (1 / 4, 3 / 4), (3 / 4, 1.)], 'INPUT_RANGE': (-1, 1),
+                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
+                              'PHYSICS_WEIGHT': np.power(10, float(0)), 'STEPSIZE': np.power(10, float(1)),
+                              'NUMBER_OF_ITERATIONS': 10, 'TEMPERATURE': np.power(10, float(0)),
+                              'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000, 'MAX_NFEV':100,
+                              'MAX_ITERATiONS': 20000, 'TARGET_ACCEPT_RATE': 0.5, 'STEPWISE_FACTOR': 0.9,
+                              'G_TOLERANCE': 1e-15,
+                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
+                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 90 - run_idx,
+                              'MIN_RHO': 1e-4, 'MAX_RHO': 5e-2, 'MIN_RHO_DOT': -1e-2, 'MAX_RHO_DOT': 1e-2, 'DELTA_RHO': 0.,
+                              'DELTA_RHO_STEP':1e-2, 'SCALE_FACTOR':1,
+                              'DELTA_RHO_DOT': 0., 'INITIAL_TRAJECTORIES':1000}
+                config['lambda'] = parameters['STEPSIZE']
+                config['run_idx'] = run_idx
+                if config['orbit'] == 'Horizontal Lyapunov Orbits':
+                    data = pielm_cgcnb.generate_data(config, parameters)
+                elif config['orbit'] == 'Halo Orbits':
+                    parameters['ORBIT_TYPE'] = 'Halo Orbits'
+                    data = pielm_cgcnb.generate_data(config, parameters)
+                else:
+                    parameters['ORBIT_TYPE'] = 'Vertical Lyapunov Orbits'
+                    data = pielm_cgcnb.generate_data(config, parameters)
+                results, positions, velocities = pielm_cgcnb.run(data, config, parameters)
 
             else:
                 print("Error specifying")
@@ -1321,7 +1351,7 @@ def run_IOD_testing(config):
                            "SC_GEO_VZ(KM/S)_PHYS": np.zeros_like(data[1][:, 1]), 'SIN_RA_PHYS': data[0][0],
                            'COS_RA_PHYS': data[0][1], 'SIN_DEC_PHYS': data[0][2]}
             df = pd.DataFrame(data_for_df)
-            util.iod_viz(df, results, positions, velocities, global_positions, config)
+            util.iod_viz(df, results, positions, velocities, config)
 
     return
 

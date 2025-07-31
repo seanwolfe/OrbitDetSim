@@ -123,209 +123,6 @@ def generate_data(config, parameters):
 ####
 # PIELM
 ####
-
-class MyStep:
-    """
-     Structured basin-hopping step proposal constrained by the admissible region.
-
-     This class implements a physics-informed proposal mechanism for basin-hopping
-     in orbit determination problems. It perturbs the current solution `beta` by sampling
-     line-of-sight range (`rho`) and range-rate (`rho_dot`) uniformly within user-specified bounds
-     at each observation epoch. The resulting state vectors remain consistent with the
-     observed right ascension (`alpha`) and declination (`delta`) and their best-fit angular rates.
-
-     The step is constructed in the admissible region defined by the current observations and
-     projected back into the parameter space via the pseudoinverse of the design matrix.
-
-     Attributes:
-         q (int): Dimension of position/velocity vectors (typically 3 for Cartesian space).
-         H_size (int): Size of the basis vector `beta`.
-         observations (torch.Tensor): Observations at each epoch, shape (N, 4), containing:
-             [sin(alpha), cos(alpha), sin(delta), cos(delta)] per row.
-         pos_step (float): Default positional step size scale (not currently used directly).
-         vel_step (float): Default velocity step size scale (not currently used directly).
-         H (torch.Tensor): Design matrix for position at each epoch, shape (N, H_size).
-         cH_dot (torch.Tensor): Design matrix for velocity at each epoch, shape (N, H_size).
-         rho_range (tuple): (min_rho, max_rho), uniform sampling range for line-of-sight distance.
-         rho_dot_range (tuple): (min_rho_dot, max_rho_dot), uniform sampling range for line-of-sight rate.
-         observer_positions (torch.Tensor): Observer position vectors at each epoch, shape (N, 3).
-         observer_velocities (torch.Tensor): Observer velocity vectors at each epoch, shape (N, 3).
-         obs_indices (torch.Tensor or list): Indices of observations in `H`/`cH_dot`.
-         obs_epochs (torch.Tensor): Times of each observation epoch, shape (N,).
-
-     Methods:
-         __call__(x: torch.Tensor) -> torch.Tensor:
-             Delegates to `take_step(x)`.
-
-         take_step(beta: torch.Tensor) -> torch.Tensor:
-             Propose a new `beta` vector by perturbing the current state in the admissible region.
-
-             Args:
-                 beta (torch.Tensor): Current parameter vector, shape (q * H_size,).
-
-             Returns:
-                 beta_new (torch.Tensor): Proposed parameter vector after admissible perturbation,
-                     shape (q * H_size,).
-     """
-
-    def __init__(self, q=3, H_size=10, observations=None, pos_step=1e-2, vel_step=1e-4, H=None, cH_dot=None,
-                 rho_range=None, rho_dot_range=None, observer_positions=None, observer_velocities=None, obs_indices=None, obs_epochs=None):
-        """
-           Initialize a structured basin-hopping stepper constrained by the admissible region.
-
-           This constructor sets up the parameters, observation data, and matrices needed to
-           propose admissible steps in the solution space of an orbit determination problem.
-
-           Args:
-               q (int, optional): Dimensionality of position/velocity vectors (default: 3).
-               H_size (int, optional): Basis vector size in the parameter space (default: 10).
-               observations (torch.Tensor, optional): Observation matrix of shape (N,4), with
-                   columns [sin(alpha), cos(alpha), sin(delta), cos(delta)] for each epoch.
-               pos_step (float, optional): Position step size scale (not directly used here).
-               vel_step (float, optional): Velocity step size scale (not directly used here).
-               H (torch.Tensor, optional): Design matrix mapping beta to position (shape: [N, H_size]).
-               cH_dot (torch.Tensor, optional): Design matrix mapping beta to velocity (shape: [N, H_size]).
-               rho_range (tuple, optional): Tuple (rho_min, rho_max) defining uniform sampling range
-                   for line-of-sight distance perturbations.
-               rho_dot_range (tuple, optional): Tuple (rho_dot_min, rho_dot_max) defining uniform sampling range
-                   for line-of-sight rate perturbations.
-               observer_positions (torch.Tensor, optional): Observer positions at each epoch (shape: [N,3]).
-               observer_velocities (torch.Tensor, optional): Observer velocities at each epoch (shape: [N,3]).
-               obs_indices (torch.Tensor or list, optional): Indices of epochs to extract from H/cH_dot.
-               obs_epochs (torch.Tensor, optional): Times of observations (shape: [N]).
-           """
-
-        self.rstep = pos_step
-        self.vstep = vel_step
-        self.obs = observations
-        self.q = q
-        self.H_size = H_size
-        self.H = H
-        self.cH_dot = cH_dot
-        self.rho_range = rho_range
-        self.rho_dot_range = rho_dot_range
-        self.observer_positions = observer_positions
-        self.observer_velocities = observer_velocities
-        self.obs_indices = obs_indices
-        self.obs_epochs = obs_epochs
-
-    def __call__(self, x):
-        """
-            Callable interface for proposing a new admissible step.
-
-            This method allows instances of the class to be called like a function,
-            and simply delegates to `take_step()`.
-
-            Args:
-                x (torch.Tensor): Current parameter vector `beta`, shape (q * H_size,).
-
-            Returns:
-                torch.Tensor: Proposed new parameter vector `beta_new`, shape (q * H_size,).
-            """
-        return self.take_step(x)
-
-    def take_step(self, beta: torch.Tensor) -> torch.Tensor:
-        """
-        Propose a new admissible step in the solution space.
-
-        This method perturbs the current parameter vector `beta` by sampling
-        line-of-sight distance (`rho`) and rate (`rho_dot`) uniformly at each epoch
-        within the specified admissible ranges. It computes the resulting position and
-        velocity vectors consistent with the observed right ascension (`alpha`) and declination (`delta`),
-        plus their best-fit angular rates, and projects the perturbed state back into
-        the parameter space via the pseudoinverse of the design matrix.
-
-        Args:
-            beta (torch.Tensor): Current parameter vector, shape (q * H_size,).
-
-        Returns:
-            torch.Tensor: Proposed parameter vector after admissible perturbation,
-                shape (q * H_size,).
-        """
-
-        # transform beta to current r and v
-        beta_tensor = beta.view(self.q, self.H_size)
-        r = (self.H @ beta_tensor.T)[self.obs_indices]  # (N, q)
-        v = (self.cH_dot @ beta_tensor.T)[self.obs_indices]  # (N, q)
-
-        n_obs = len(self.obs)  # N
-
-        # sample uniformly in rho and rho_dot
-        delta_rho = torch.empty(n_obs, 1).uniform_(*self.rho_range)  # (N,1)
-        delta_rho_dot = torch.empty(n_obs, 1).uniform_(*self.rho_dot_range)  # (N,1)
-
-        # extract unwrapped alpha and delta
-        sin_ra = self.obs[:, 0]
-        cos_ra = self.obs[:, 1]
-        sin_dec = self.obs[:, 2]
-        cos_dec = self.obs[:, 3]
-
-        alpha = torch.atan2(sin_ra, cos_ra)
-        alpha = torch.unwrap(alpha, dim=0)  # PyTorch >=2.0 supports unwrap
-        delta = torch.atan2(sin_dec, cos_dec)
-
-        # compute basis vectors, shape (N,3)
-        l = torch.stack([
-            cos_ra * cos_dec,
-            sin_ra * cos_dec,
-            sin_dec
-        ], dim=-1)
-
-        l_alpha = torch.stack([
-            -sin_ra * cos_dec,
-            cos_ra * cos_dec,
-            torch.zeros_like(cos_dec)
-        ], dim=-1)
-
-        l_delta = torch.stack([
-            -cos_ra * sin_dec,
-            -sin_ra * sin_dec,
-            cos_dec
-        ], dim=-1)
-
-        # fit angular rates using least squares
-        def fit_angular_rates(t, alpha, delta):
-            t0 = t.mean()
-            dt = t - t0
-
-            alpha_mean = alpha.mean()
-            delta_mean = delta.mean()
-
-            dalpha = ((alpha - alpha_mean) * dt).sum() / (dt * dt).sum()
-            ddelta = ((delta - delta_mean) * dt).sum() / (dt * dt).sum()
-
-            return dalpha, ddelta
-
-        alpha_dot, delta_dot = fit_angular_rates(self.obs_epochs, alpha, delta)
-
-        # observer positions & velocities (N,3)
-        observer_pos = self.observer_positions
-        observer_vel = self.observer_velocities
-
-        # perturbations in Cartesian space
-        delta_r = observer_pos + delta_rho * l
-        delta_v = (
-                observer_vel +
-                delta_rho_dot * l +
-                delta_rho * alpha_dot * l_alpha +
-                delta_rho * delta_dot * l_delta
-        )
-
-        # new r and v
-        r_new = r + delta_r
-        v_new = v + delta_v
-
-        # transform back to beta
-        r_and_v_new = torch.cat([r_new, v_new], dim=-1)  # (N,6)
-        all_H = torch.cat([self.H, self.cH_dot], dim=1)  # (N, 2*H_size)
-
-        # pseudo-inverse (Moore-Penrose)
-        all_H_pinv = torch.linalg.pinv(all_H)
-        beta_new = (all_H_pinv @ r_and_v_new).view(-1)
-
-        return beta_new
-
-
 def sample_time_points(
         method: Literal["lhs", "uniform", "gaussian"],
         observation_epochs: np.ndarray,
@@ -491,6 +288,7 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
 
     data_losses = []
     physics_losses = []
+    range_losses = []
     positions = []
     velocities = []
     total_its = [0]
@@ -542,9 +340,9 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
                          shape (q * H_size,).
          """
 
-        def __init__(self, q=3, H_size=10, observations=None, pos_step=1e-2, vel_step=1e-4, H=None, cH_dot=None,
+        def __init__(self, q=3, H_size=10, observations=None, H=None, cH_dot=None,
                      rho_range=None, rho_dot_range=None, observer_positions=None, observer_velocities=None,
-                     obs_indices=None, obs_epochs=None, delta_rho=None, delta_rho_dot=None):
+                     obs_indices=None, obs_epochs=None, delta_rho=None, delta_rho_dot=None, delta_rho_step=None):
             """
                Initialize a structured basin-hopping stepper constrained by the admissible region.
 
@@ -570,8 +368,6 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
                    obs_epochs (torch.Tensor, optional): Times of observations (shape: [N]).
                """
 
-            self.rstep = pos_step
-            self.vstep = vel_step
             self.obs = observations
             self.q = q
             self.H_size = H_size
@@ -585,6 +381,7 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
             self.obs_epochs = obs_epochs
             self.delta_rho = delta_rho
             self.delta_rho_dot = delta_rho_dot
+            self.delta_rho_step = delta_rho_step
 
         def __call__(self, x):
             """
@@ -601,7 +398,7 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
                 """
             return self.take_step(x)
 
-        def take_step(self, beta: torch.Tensor) -> torch.Tensor:
+        def take_step(self, beta):
             """
             Propose a new admissible step in the solution space.
 
@@ -621,15 +418,9 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
             """
 
             # transform beta to current r and v
-            beta_tensor = beta.view(self.q, self.H_size)
+            beta_tensor = beta.reshape(self.q, self.H_size)
             r = (self.H @ beta_tensor.T)[self.obs_indices]  # (N_obs, q)
             v = (self.cH_dot @ beta_tensor.T)[self.obs_indices]  # (N_obs, q)
-
-            n_obs = len(self.obs)  # N
-
-            # sample uniformly in rho and rho_dot
-            delta_rho = torch.empty(n_obs, 1).uniform_(*self.rho_range)  # (N,1)
-            delta_rho_dot = torch.empty(n_obs, 1).uniform_(*self.rho_dot_range)  # (N,1)
 
             # unpack obs
             sin_ra = self.obs[0]
@@ -638,12 +429,14 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
             cos_dec = self.obs[3]
 
             alpha = torch.atan2(sin_ra, cos_ra)
+
             def torch_unwrap(p, discont=np.pi, dim=-1):
                 diff = torch.diff(p, dim=dim)
                 diff_mod = (diff + np.pi) % (2 * np.pi) - np.pi
                 diff_mod = torch.where((diff_mod == -np.pi) & (diff > 0), np.pi, diff_mod)
                 p0 = torch.index_select(p, dim, torch.tensor([0], device=p.device))
                 return torch.cat([p0, p0 + torch.cumsum(diff_mod, dim=dim)], dim=dim)
+
             alpha = torch_unwrap(alpha, dim=0)
             delta = torch.atan2(sin_dec, cos_dec)
 
@@ -685,31 +478,56 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
             observer_pos = self.observer_positions
             observer_vel = self.observer_velocities
 
+            # sample n_init central candidates: (1,)
+            rho_0_central = 0
+            while rho_0_central < self.rho_range[0] or rho_0_central > self.rho_range[1]:
+                rho_0_central = (
+                        torch.rand(()) * 2 * self.delta_rho_step - self.delta_rho_step
+                )  # (1,)
+
+            rho_dot_0_central = (
+                    torch.rand(()) * (self.rho_dot_range[1] - self.rho_dot_range[0]) + self.rho_dot_range[0]
+            )  # (1,)
+
+            # expand to (N,1) with perturbations
+            N = l.shape[0]
+            delta_rho = self.delta_rho
+            delta_rho_dot = self.delta_rho_dot  # adjust to your preferred delta
+
+            delta_rho = rho_0_central + (
+                    torch.rand(N, 1) * 2 * delta_rho - delta_rho
+            )  # random in [central-delta, central+delta]
+
+            delta_rho_dot = rho_dot_0_central + (
+                    torch.rand(N, 1) * 2 * delta_rho_dot - delta_rho_dot
+            )
+
             # perturbations in Cartesian space
-            delta_r = observer_pos + delta_rho * l
+            delta_r = delta_rho * l
             delta_v = (
-                    observer_vel +
                     delta_rho_dot * l +
                     delta_rho * alpha_dot * l_alpha +
                     delta_rho * delta_dot * l_delta
             )
 
             # new r and v
-            r_new = r + delta_r
-            v_new = v + delta_v
+            r_obs = r + delta_r
+            v_obs = v + delta_v
 
-            # transform back to beta
-            r_and_v_new = torch.cat([r_new, v_new], dim=-1)  # (N,6)
-            all_H = torch.cat([self.H, self.cH_dot], dim=1)  # (N, 2*H_size)
+            all_H = torch.cat([self.H, self.cH_dot], dim=1)  # (N,2H_size)
+            H_obs = all_H[self.obs_indices]  # (N_obs, 2H_size)
 
-            # pseudo-inverse (Moore-Penrose)
-            all_H_pinv = torch.linalg.pinv(all_H)
-            beta_new = (all_H_pinv @ r_and_v_new).view(-1)
+            H_pos = H_obs[:, :self.H_size]  # (N_obs, H_size)
+            H_vel = H_obs[:, self.H_size:]  # (N_obs, H_size)
 
-            # find way to store initial guesses to see where the trajes lie
-            global_positions.append(r_new)
+            # stack and solve
+            H_stacked = torch.cat([H_pos, H_vel], dim=0)  # (2N_obs, H_size)
+            rv_stacked = torch.cat([r_obs, v_obs], dim=0)  # (2N_obs, 3)
+            rv_stacked_tensor = torch.tensor(rv_stacked, dtype=torch.float32)
 
-            return beta_new
+            beta_best = torch.linalg.pinv(H_stacked) @ rv_stacked_tensor  # (H_size, 3)
+
+            return beta_best.view(-1)
 
         def take_initial_step(self, n_init=10):
             """
@@ -724,12 +542,14 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
             cos_dec = self.obs[3]
 
             alpha = torch.atan2(sin_ra, cos_ra)
+
             def torch_unwrap(p, discont=np.pi, dim=-1):
                 diff = torch.diff(p, dim=dim)
                 diff_mod = (diff + np.pi) % (2 * np.pi) - np.pi
                 diff_mod = torch.where((diff_mod == -np.pi) & (diff > 0), np.pi, diff_mod)
                 p0 = torch.index_select(p, dim, torch.tensor([0], device=p.device))
                 return torch.cat([p0, p0 + torch.cumsum(diff_mod, dim=dim)], dim=dim)
+
             alpha = torch_unwrap(alpha, dim=0)
             delta = torch.atan2(sin_dec, cos_dec)
 
@@ -778,12 +598,11 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
             # expand to (n_init,N,1) with perturbations
             N = l.shape[0]
             delta_rho = self.delta_rho
-            delta_rho_dot = self.delta_rho_dot # adjust to your preferred delta
+            delta_rho_dot = self.delta_rho_dot  # adjust to your preferred delta
 
             rho_0 = rho_0_central[:, None, :] + (
                     torch.rand(n_init, N, 1) * 2 * delta_rho - delta_rho
             )  # random in [central-delta, central+delta]
-
 
             rho_dot_0 = rho_dot_0_central[:, None, :] + (
                     torch.rand(n_init, N, 1) * 2 * delta_rho_dot - delta_rho_dot
@@ -822,6 +641,7 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
                 omega = 0.5 * (x ** 2 + y ** 2) + (1 - mu) / r_1 + mu / r_2
                 energy = 2 * omega - (vx ** 2 + vy ** 2 + vz ** 2)
                 return energy
+
             jacobi = compute_jacobi(r_0, v_0)
 
             # variance of Jacobi over timesteps, per candidate
@@ -847,7 +667,96 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
 
             beta_best = torch.linalg.pinv(H_stacked) @ rv_stacked  # (H_size, 3)
 
+            global_positions.append(r_best)
+
             return beta_best.view(-1)
+
+        def get_bounds(self, scale_factor=1):
+            # unpack obs
+            sin_ra = self.obs[0]
+            cos_ra = self.obs[1]
+            sin_dec = self.obs[2]
+            cos_dec = self.obs[3]
+
+            alpha = torch.atan2(sin_ra, cos_ra)
+
+            def torch_unwrap(p, discont=np.pi, dim=-1):
+                diff = torch.diff(p, dim=dim)
+                diff_mod = (diff + np.pi) % (2 * np.pi) - np.pi
+                diff_mod = torch.where((diff_mod == -np.pi) & (diff > 0), np.pi, diff_mod)
+                p0 = torch.index_select(p, dim, torch.tensor([0], device=p.device))
+                return torch.cat([p0, p0 + torch.cumsum(diff_mod, dim=dim)], dim=dim)
+
+            alpha = torch_unwrap(alpha, dim=0)
+            delta = torch.atan2(sin_dec, cos_dec)
+
+            # compute basis vectors, shape (N,3)
+            l = torch.stack([
+                cos_ra * cos_dec,
+                sin_ra * cos_dec,
+                sin_dec
+            ], dim=-1)
+
+            l_alpha = torch.stack([
+                -sin_ra * cos_dec,
+                cos_ra * cos_dec,
+                torch.zeros_like(cos_dec)
+            ], dim=-1)
+
+            l_delta = torch.stack([
+                -cos_ra * sin_dec,
+                -sin_ra * sin_dec,
+                cos_dec
+            ], dim=-1)
+
+            # fit angular rates using least squares
+            def fit_angular_rates(t, alpha, delta):
+                t0 = t.mean()
+                dt = t - t0
+
+                alpha_mean = alpha.mean()
+                delta_mean = delta.mean()
+
+                dalpha = ((alpha - alpha_mean) * dt).sum() / (dt * dt).sum()
+                ddelta = ((delta - delta_mean) * dt).sum() / (dt * dt).sum()
+
+                return dalpha, ddelta
+
+            alpha_dot, delta_dot = fit_angular_rates(self.obs_epochs, alpha, delta)
+
+            H_pos = self.H[self.obs_indices]
+            H_vel = self.cH_dot[self.obs_indices]  # (N_obs, H_size)
+
+            # stack and solve
+            H_stacked = torch.cat([H_pos, H_vel], dim=0)  # (2N_obs, H_size)
+
+            # lower bound
+            rho_min = self.rho_range[0]
+            rhod_min = self.rho_dot_range[0]
+            r_min = rho_min * l
+            v_min = (
+                    rhod_min * l +
+                    rho_min * alpha_dot * l_alpha +
+                    rho_min * delta_dot * l_delta
+            )
+            rv_stacked_min = torch.cat([r_min, v_min], dim=0)  # (2N_obs, 3)
+            rv_stacked_min_tensor = torch.tensor(rv_stacked_min, dtype=torch.float32)
+            beta_min = torch.linalg.pinv(H_stacked) @ rv_stacked_min_tensor  # (H_size, 3)
+
+            # upper bound
+            rho_max = self.rho_range[1]
+            rhod_max = self.rho_dot_range[1]
+            r_max = rho_max * l
+            v_max = (
+                    rhod_max * l +
+                    rho_max * alpha_dot * l_alpha +
+                    rho_max * delta_dot * l_delta
+            )
+            rv_stacked_max = torch.cat([r_max, v_max], dim=0)  # (2N_obs, 3)
+            rv_stacked_max_tensor = torch.tensor(rv_stacked_max, dtype=torch.float32)
+            beta_max = torch.linalg.pinv(H_stacked) @ rv_stacked_max_tensor  # (H_size, 3)
+
+            return beta_min.reshape(-1) / scale_factor, beta_max.reshape(-1) * scale_factor
 
     def compute_hidden_activations():
         """
@@ -858,7 +767,7 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
         :return: H, H_prime, H_double_prime
         """
         z_proj = W @ epochs_nd_norm_reshaped_tensor.T + b[:, None]  # (H, d)
-        H = torch.tanh(z_proj)
+        H = torch.sin(z_proj)
         H_prime = (1 - H ** 2) * W  # (H, d)
         H_double_prime = -2 * H * (1 - H ** 2) * (W ** 2)  # (H, d)
 
@@ -875,10 +784,8 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
 
         Y_pred_obs = Y_pred[obs_indices]
         Y_dot_pred_obs = Y_dot_pred[obs_indices]
-        s = configuration['CR3BP_SCALE_FACTOR']
-        positions.append((
-                                     Y_pred_obs.detach().cpu().detach() + observer_positions * s) / s)  # undo scaling and move to original cr3bp frame
-        velocities.append(Y_dot_pred_obs.detach().cpu().detach() / s)
+        positions.append(Y_pred_obs.detach().cpu().detach() + observer_positions)  # undo scaling and move to original cr3bp frame
+        velocities.append(Y_dot_pred_obs.detach().cpu().detach())
 
         def ra_dec_observation_residual():
             """
@@ -902,7 +809,7 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
                     dec_pred: (N,) DEC in degrees
                 """
 
-                topocentric_los_vec = Y_pred_obs  # (N, 3), predict observer centered at origin
+                topocentric_los_vec = Y_pred_obs  # (N, 3), predict observer centered at earth
 
                 # Normalize
                 los_unit_topo = topocentric_los_vec / torch.norm(topocentric_los_vec, dim=1, keepdim=True)
@@ -954,17 +861,13 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
                 Flattened residuals between the predicted accelerations and the CR3BP model accelerations.
             """
             mu = configuration['SYSTEM_MASS_PARAMETER']
-            s = configuration['CR3BP_SCALE_FACTOR']
-            observer_position = torch.tensor([1. - mu, 0., 0.], dtype=Y_predicted.dtype) * s
+            observer_position = torch.tensor([1. - mu, 0., 0.], dtype=Y_predicted.dtype)
             observer_positions = observer_position.unsqueeze(0).repeat(Y_predicted.shape[0], 1)
 
-            Y_predicted += observer_positions  # move back to original
-            Y_predicted /= s
-            Y_dot_predicted /= s
-            Y_ddot_predicted /= s
-            x = Y_predicted[:, 0]
-            y = Y_predicted[:, 1]
-            z = Y_predicted[:, 2]
+            Y_predict = Y_predicted + observer_positions  # move back to original
+            x = Y_predict[:, 0]
+            y = Y_predict[:, 1]
+            z = Y_predict[:, 2]
             vx = Y_dot_predicted[:, 0]
             vy = Y_dot_predicted[:, 1]
             vz = Y_dot_predicted[:, 2]
@@ -999,37 +902,20 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
 
         physics_residual = cr3bp_physics_residual(Y_pred, Y_dot_pred, Y_ddot_pred, configuration)
 
-        def energy_regularization(Y_predicted, Y_dot_predicted, configuration):
-            mu = configuration['SYSTEM_MASS_PARAMETER']
-            s = configuration['CR3BP_SCALE_FACTOR']
-            observer_position = torch.tensor([1. - mu, 0., 0.], dtype=Y_predicted.dtype) * s
-            observer_positions = observer_position.unsqueeze(0).repeat(Y_predicted.shape[0], 1)
+        def distance_penalty(Y_predicted):
+            return torch.mean(torch.sum(Y_predicted ** 2, dim=1))
 
-            Y_bary = Y_predicted + observer_positions  # move back to original
-            Y_bary /= s
-            Y_dot_bary = Y_dot_predicted / s
-            x = Y_bary[:, 0]
-            y = Y_bary[:, 1]
-            z = Y_bary[:, 2]
-            vx = Y_dot_bary[:, 0]
-            vy = Y_dot_bary[:, 1]
-            vz = Y_dot_bary[:, 2]
-            r_2 = torch.sqrt((mu + x - 1) ** 2 + y ** 2 + z ** 2)
-            r_1 = torch.sqrt((mu + x) ** 2 + y ** 2 + z ** 2)
-            omega = 0.5 * (x ** 2 + y ** 2) + (1 - mu) / r_1 + mu / r_2
-            energy = 2 * omega - (vx ** 2 + vy ** 2 + vz ** 2)
-            diff_energy = torch.diff(energy)
-            return torch.mean(diff_energy ** 2)
-
-        # energy_reg = energy_regularization(Y_pred, Y_dot_pred, configuration)
+        lambda_dis = 1e0
+        weighted_dist_res = lambda_dis * distance_penalty(Y_pred)
 
         data_losses.append(obs_residual.item())
         physics_losses.append(lambda_phys * physics_residual.item())
+        range_losses.append(weighted_dist_res.item())
 
         # print("Obs res:", obs_residual.item(), "Phys res:", physics_residual.item())
         # print(Y_pred[obs_indices][0].cpu().detach())
-        lambda_energy = 1e-1 * lambda_phys
-        return obs_residual + lambda_phys * physics_residual  # + lambda_energy * energy_reg
+
+        return obs_residual + lambda_phys * physics_residual + weighted_dist_res
 
     def func(beta_flat):
         total_its[0] += 1
@@ -1039,16 +925,15 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
         loss = loss_function(beta_tensor)
         loss.backward()
         grad = beta_tensor.grad.detach().numpy().astype(np.float64).reshape(-1)
+
         return loss.item(), grad
 
     # === Initial Guess ===
     # Instantiate your MyStep
     mystep = MyStep(
         q=3,
-        H_size=10,
+        H_size=parameters['HIDDEN_DIMENSION'],
         observations=y_obs,
-        pos_step=1e-2,
-        vel_step=1e-4,
         H=H_matrix,
         cH_dot=c * H_dot,
         rho_range=(parameters['MIN_RHO'], parameters['MAX_RHO']),
@@ -1058,11 +943,13 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
         obs_indices=obs_indices,
         obs_epochs=colloc_epochs[obs_indices],
         delta_rho=parameters['DELTA_RHO'],
-        delta_rho_dot=parameters['DELTA_RHO_DOT']
+        delta_rho_dot=parameters['DELTA_RHO_DOT'],
+        delta_rho_step=parameters['DELTA_RHO_STEP']
     )
 
 
     beta0 = mystep.take_initial_step(n_init=parameters['INITIAL_TRAJECTORIES'])
+
 
     # Basin hopping configuration
     options = {"ftol": parameters['F_TOLERANCE'], "gtol": parameters['G_TOLERANCE'],
@@ -1085,11 +972,10 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
 
     Y_pred_obs = Y_pred[obs_indices]
     Y_dot_pred_obs = Y_dot_pred[obs_indices]
-    s = configuration['CR3BP_SCALE_FACTOR']
-    positions[-1] = (Y_pred_obs.detach().cpu().detach() + observer_positions * s) / s
-    velocities[-1] = Y_dot_pred_obs.detach().cpu().detach() / s
+    positions[-1] = (Y_pred_obs.detach().cpu().detach() + observer_positions)
+    velocities[-1] = Y_dot_pred_obs.detach().cpu().detach()
     # print(res.x)
     epochss = np.arange(total_its[0])
-    data = {"TRAINING_EPOCH": epochss, "DATA_LOSS": data_losses, "PHYSICS_LOSS": physics_losses}
+    data = {"TRAINING_EPOCH": epochss, "DATA_LOSS": data_losses, "PHYSICS_LOSS": physics_losses, "RANGE_LOSS": range_losses}
 
     return pd.DataFrame(data), positions, velocities, global_positions

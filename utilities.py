@@ -24,9 +24,10 @@ spice.furnsh('naif0012.tls')
 pd.options.mode.chained_assignment = None
 
 
-def iod_viz(iod_data, results, pred_positions, pred_velocities, pred_global_pos, config):
+def iod_viz(iod_data, results, pred_positions, pred_velocities, config):
     fig = plt.figure(figsize=(18, 12))
 
+    # for plotting optimization progress in x, y, z
     total_length = len(results['TRAINING_EPOCH'])
     n = int(total_length / 20)
     indices = list(range(0, total_length, n))
@@ -98,6 +99,79 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, pred_global_pos,
     cbar3 = fig.colorbar(lc3, ax=ax3)
     cbar3.set_label('Training epoch')
 
+    """
+    # plotting basin hops in x, y, z
+    total_length = len(pred_global_pos)
+    n = 1
+    indices = list(range(0, total_length, n))
+    indices.append(-1)
+
+    positions_filtered = [pred_global_pos[i] for i in indices]  # shape: (E, len(indices), 3)
+    x_vals = [pos[:, 0] for pos in positions_filtered]  # (E, len(indices))
+    y_vals = [pos[:, 1] for pos in positions_filtered]
+    z_vals = [pos[:, 2] for pos in positions_filtered]
+    epoch_vals = results['TRAINING_EPOCH'].iloc[indices]
+    observation_epochs = iod_data["EPOCH(JDTDB)"].values
+    true_positions = iod_data.loc[:, ["GEO_X(KM)", "GEO_Y(KM)", "GEO_Z(KM)"]].values
+    true_velocities = iod_data.loc[:, ["GEO_VX(KM/S)", "GEO_VY(KM/S)", "GEO_VZ(KM/S)"]].values
+
+    ### x ###
+    lines = []
+    colors = []
+    for idx, x_val in zip(indices, x_vals):
+        line = np.vstack((observation_epochs, x_val)).T
+        lines.append(line)
+        colors.append(idx)
+
+    lc = LineCollection(lines, cmap='viridis', array=np.array(colors), linewidth=2)
+    ax = fig.add_subplot(3, 3, 1)  # 3D subplot
+    ax.plot(observation_epochs, true_positions[:, 0], linestyle='--', color='black', zorder=15)
+    ax.add_collection(lc)
+    ax.autoscale()  # Auto scale limits to lines
+    ax.set_xlabel('Time ' + str(config['lambda']))
+    ax.set_ylabel('X position')
+
+    cbar = fig.colorbar(lc, ax=ax)
+    cbar.set_label('Training epoch')
+
+    ### y ###
+    lines = []
+    colors = []
+    for idx,y_val in zip(indices, y_vals):
+        line = np.vstack((observation_epochs, y_val)).T
+        lines.append(line)
+        colors.append(idx)
+
+    lc2 = LineCollection(lines, cmap='viridis', array=np.array(colors), linewidth=2)
+    ax2 = fig.add_subplot(3, 3, 2)  # 3D subplot
+    ax2.plot(observation_epochs, true_positions[:, 1], linestyle='--', color='black', zorder=15)
+    ax2.add_collection(lc2)
+    ax2.autoscale()  # Auto scale limits to lines
+    ax2.set_xlabel('Time ' + str(config['lambda']))
+    ax2.set_ylabel('Y position')
+
+    cbar2 = fig.colorbar(lc2, ax=ax2)
+    cbar2.set_label('Training epoch')
+
+    ### z ###
+    lines = []
+    colors = []
+    for idx, z_val in zip(indices, z_vals):
+        line = np.vstack((observation_epochs, z_val)).T
+        lines.append(line)
+        colors.append(idx)
+
+    lc3 = LineCollection(lines, cmap='viridis', array=np.array(colors), linewidth=2)
+    ax3 = fig.add_subplot(3, 3, 3)  # 3D subplot
+    ax3.plot(observation_epochs, true_positions[:, 2], linestyle='--', color='black', zorder=15)
+    ax3.add_collection(lc3)
+    ax3.autoscale()  # Auto scale limits to lines
+    ax3.set_xlabel('Time ' + str(config['lambda']))
+    ax3.set_ylabel('Z position')
+
+    cbar3 = fig.colorbar(lc3, ax=ax3)
+    cbar3.set_label('Training epoch')
+    """
 
     ###### physics loss ###
     num = 1
@@ -130,18 +204,36 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, pred_global_pos,
     cbar5 = fig.colorbar(lc5, ax=ax5)
     cbar5.set_label('Training epoch')
 
-    ax6 = fig.add_subplot(3, 3, 6, projection='3d')
-    ax6.plot(*pred_positions[-1].T, label='Geo eme Pos')
-    ax6.scatter(*iod_data.loc[:, ["SC_GEO_X(KM)_PHYS", "SC_GEO_Y(KM)_PHYS", "SC_GEO_Z(KM)_PHYS"]].values.T, label='Spacecraft Pos')
-    ax6.plot(*true_positions.T, label='True')
-    # ax.plot(*asteroid_int_geo, label='Integrated', linestyle='--')
-    for i, pos in enumerate(pred_global_pos):
-        ax6.plot(*pos.T)
-    ax6.set_xlabel('X [KM]')
-    ax6.set_ylabel('Y [KM]')
-    ax6.set_zlabel('Z [KM]')
-    ax6.set_aspect('equal')
-    ax6.legend()
+    ###### data loss ###
+    points = np.vstack((results['TRAINING_EPOCH'].values, results['RANGE_LOSS'].values)).T
+    points = points[::num]
+    segments = np.array([points[:-1], points[1:]]).transpose(1, 0, 2)
+    lc6 = LineCollection(segments, cmap='viridis', array=epoch_points, linewidth=2)
+    ax6 = fig.add_subplot(3, 3, 6)  # 3D subplot
+    ax6.add_collection(lc6)
+    ax6.autoscale()  # Auto scale limits to lines
+    ax6.set_xlabel('Training Epoch')
+    ax6.set_ylabel('Data Loss')
+    ax6.set_yscale('log')
+    cbar6 = fig.colorbar(lc6, ax=ax6)
+    cbar6.set_label('Training epoch')
+
+    fig2 = plt.figure()
+    ax21 = fig2.add_subplot(projection='3d')
+    ax21.plot(*pred_positions[-1].T, label='Geo eme Pos')
+    ax21.scatter(*iod_data.loc[:, ["SC_GEO_X(KM)_PHYS", "SC_GEO_Y(KM)_PHYS", "SC_GEO_Z(KM)_PHYS"]].values.T, label='Spacecraft Pos')
+    ax21.plot(*true_positions.T, label='True')
+    # ax21.plot(*asteroid_int_geo, label='Integrated', linestyle='--')
+    # ax21.plot(*pred_global_pos[0].T, label="Initial")
+    # ax21.plot(*pred_global_pos[-1].T, label='Final')
+
+    # for i, pos in enumerate(pred_global_pos):
+    #     ax6.plot(*pos.T, label=f"{i}")
+    ax21.set_xlabel('X [KM]')
+    ax21.set_ylabel('Y [KM]')
+    ax21.set_zlabel('Z [KM]')
+    ax21.set_aspect('equal')
+    ax21.legend()
 
     ax7 = fig.add_subplot(3, 3, 7, projection='3d')
     if config['dynamics'] == 'CR3BP':  # i.e. consistently non-dim
