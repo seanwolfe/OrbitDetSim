@@ -109,7 +109,7 @@ gaussian_std_scale: 10
 ###############################################
 # Running the PIELM IOD simulation - Testing ground
 ##############################################
-n_runs_test: 12
+n_runs_test: 54
 dynamics: 'CR3BP'
 orbit: 'Horizontal Lyapunov Orbits'
 observer: 'GROUND'

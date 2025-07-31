@@ -24,7 +24,7 @@ spice.furnsh('naif0012.tls')
 pd.options.mode.chained_assignment = None
 
 
-def iod_viz(iod_data, results, pred_positions, pred_velocities, config):
+def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, config):
     fig = plt.figure(figsize=(18, 12))
 
     # for plotting optimization progress in x, y, z
@@ -183,6 +183,7 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, config):
     lc4 = LineCollection(segments, cmap='viridis', array=epoch_points, linewidth=2)
     ax4 = fig.add_subplot(3, 3, 4)  # 3D subplot
     ax4.add_collection(lc4)
+    ax4.scatter(results['TRAINING_EPOCH'].iloc[nlls_start], results['PHYSICS_LOSS'].iloc[nlls_start])
     ax4.autoscale()  # Auto scale limits to lines
     ax4.set_xlabel('Training Epoch')
     ax4.set_ylabel('Weigthed Physics Loss')
@@ -197,6 +198,7 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, config):
     lc5 = LineCollection(segments, cmap='viridis', array=epoch_points, linewidth=2)
     ax5 = fig.add_subplot(3, 3, 5)  # 3D subplot
     ax5.add_collection(lc5)
+    ax5.scatter(results['TRAINING_EPOCH'].iloc[nlls_start], results['DATA_LOSS'].iloc[nlls_start])
     ax5.autoscale()  # Auto scale limits to lines
     ax5.set_xlabel('Training Epoch')
     ax5.set_ylabel('Data Loss')
@@ -211,6 +213,7 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, config):
     lc6 = LineCollection(segments, cmap='viridis', array=epoch_points, linewidth=2)
     ax6 = fig.add_subplot(3, 3, 6)  # 3D subplot
     ax6.add_collection(lc6)
+    ax6.scatter(results['TRAINING_EPOCH'].iloc[nlls_start], results['RANGE_LOSS'].iloc[nlls_start])
     ax6.autoscale()  # Auto scale limits to lines
     ax6.set_xlabel('Training Epoch')
     ax6.set_ylabel('Data Loss')
@@ -220,7 +223,8 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, config):
 
     fig2 = plt.figure()
     ax21 = fig2.add_subplot(projection='3d')
-    ax21.plot(*pred_positions[-1].T, label='Geo eme Pos')
+    ax21.plot(*pred_positions[-1].T, label='NLLS')
+    ax21.plot(*pred_positions[-2].T, label='Basin Hopping')
     ax21.scatter(*iod_data.loc[:, ["SC_GEO_X(KM)_PHYS", "SC_GEO_Y(KM)_PHYS", "SC_GEO_Z(KM)_PHYS"]].values.T, label='Spacecraft Pos')
     ax21.plot(*true_positions.T, label='True')
     # ax21.plot(*asteroid_int_geo, label='Integrated', linestyle='--')
