@@ -111,15 +111,16 @@ gaussian_std_scale: 10
 ###############################################
 # Running the PIELM IOD simulation - Testing ground
 ##############################################
-n_runs_test: 54
-dynamics: 'NBD'
+n_runs_test: 4
+dynamics: 'CR3BP'
 orbit: 'Horizontal Lyapunov Orbits'
-observer: 'SPACE'
+observer: 'GROUND'
 optimizer: 'CONSTRAINED_BASIN_HOPPING'
 SYSTEM_MASS_PARAMETER: 3.0404e-6
 CR3BP_SCALE_FACTOR: 1.0e+0
 WEIGHT_SCALE_FACTOR: 1.0e-1
 ADD_NOISE: 0
+error_file_dir: 'Error_files'
 
 
 

@@ -24,7 +24,23 @@ spice.furnsh('naif0012.tls')
 pd.options.mode.chained_assignment = None
 
 
-def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, config):
+def generate_iod_file(file_path, final_pos, final_vel, true_pos, true_vel, epochs):
+    fx, fy, fz = final_pos[0][1:-1, 0], final_pos[0][1:-1, 1], final_pos[0][1:-1, 2]
+    fvx, fvy, fvz = final_vel[0][1:-1, 0], final_vel[0][1:-1, 1], final_vel[0][1:-1, 2]
+    fxn, fyn, fzn = final_pos[1][1:-1, 0], final_pos[1][1:-1, 1], final_pos[1][1:-1, 2]
+    fvxn, fvyn, fvzn = final_vel[1][1:-1, 0], final_vel[1][1:-1, 1], final_vel[1][1:-1, 2]
+    tx, ty, tz = true_pos[:, 0], true_pos[:, 1], true_pos[:, 2]
+    tvx, tvy, tvz = true_vel[:, 0], true_vel[:, 1], true_vel[:, 2]
+    data = {"EPOCHS":epochs, "IOD_X": fx, "IOD_Y": fy, "IOD_Z": fz, "IOD_VX": fvx, "IOD_VY": fvy,
+            "IOD_VZ": fvz, "IOD_X_NLLS": fxn, "IOD_Y_NLLS": fyn, "IOD_Z_NLLS": fzn, "IOD_VX_NLLS": fvxn,
+            "IOD_VY_NLLS": fvyn, "IOD_VZ_NLLS": fvzn, "TRUE_X": tx, "TRUE_Y": ty, "TRUE_Z": tz,
+            "TRUE_VX": tvx, "TRUE_VY": tvy, "TRUE_VZ": tvz}
+    df = pd.DataFrame(data)
+    df.to_csv(file_path, index=False)
+    return df
+
+
+def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, config, rmse_df):
     fig = plt.figure(figsize=(18, 12))
 
     # for plotting optimization progress in x, y, z
@@ -227,6 +243,15 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
     ax21.plot(*pred_positions[-2].T, label='Basin Hopping')
     ax21.scatter(*iod_data.loc[:, ["SC_GEO_X(KM)_PHYS", "SC_GEO_Y(KM)_PHYS", "SC_GEO_Z(KM)_PHYS"]].values.T, label='Spacecraft Pos')
     ax21.plot(*true_positions.T, label='True')
+
+    true_rmse = rmse_df.loc[:, ['TRUE_X', 'TRUE_Y', 'TRUE_Z']].values
+    bh_pos_rmse = rmse_df.loc[:, ['IOD_X', 'IOD_Y', 'IOD_Z']].values
+    nlls_pos_rmse = rmse_df.loc[:, ['IOD_X_NLLS', 'IOD_Y_NLLS', 'IOD_Z_NLLS']].values
+
+    ax21.plot(*true_rmse.T, linestyle='--', label='RMSE True')
+    ax21.plot(*bh_pos_rmse.T, linestyle='--', label='RMSE BH')
+    ax21.plot(*nlls_pos_rmse.T, linestyle='--', label='RMSE NLLS')
+
     # ax21.plot(*asteroid_int_geo, label='Integrated', linestyle='--')
     # ax21.plot(*pred_global_pos[0].T, label="Initial")
     # ax21.plot(*pred_global_pos[-1].T, label='Final')

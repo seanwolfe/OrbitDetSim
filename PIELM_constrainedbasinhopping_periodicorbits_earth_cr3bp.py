@@ -17,6 +17,7 @@ import spiceypy as spice
 import n_body_integrator as nbody
 from utilities import eme_to_ecliptic_batch, ecliptic_to_eme_batch
 import os
+from scipy.integrate import odeint
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
 spice.furnsh("de430.bsp")
@@ -54,7 +55,7 @@ def generate_data(config, parameters):
     def sample_equally_spaced(df, n):
         if n >= len(df) / 2:
             return df.copy()
-        indices = np.linspace(1 * len(df) / 4, 3 * len(df) / 8 - 1, n, dtype=int)
+        indices = np.linspace(0 * len(df) / 4, 1 * len(df) / 8 - 1, n, dtype=int)
         return df.iloc[indices]
 
     trajectory = sample_equally_spaced(data, num_obs)
@@ -159,7 +160,7 @@ def generate_data(config, parameters):
     sin_ra_meas, cos_ra_meas, sin_dec_meas, cos_dec_meas = torch.sin(ra_m), torch.cos(ra_m), torch.sin(dec_m), torch.cos(dec_m)
 
     return ([sin_ra_meas, cos_ra_meas, sin_dec_meas, cos_dec_meas], torch.tensor(observer_positions, dtype=torch.float32),
-            observation_epochs, positions, velocities, ra, dec, sigma_ra_deg, sigma_dec_deg)
+            observation_epochs, positions, velocities, ra, dec, sigma_ra_deg, sigma_dec_deg, file)
 
 
 ####
@@ -312,7 +313,22 @@ def run(data, config, parameters):
     obs_mask = np.isin(colloc_points, data[2])
     obs_indices = np.where(obs_mask)[0]
 
-    return solve(epochs_nd_norm_reshaped_tensor, data[0], obs_indices, data[1], colloc_points, c, config, parameters)
+    data_df, positions, velocities, nlls_start, final_positions, final_velocities = solve(epochs_nd_norm_reshaped_tensor, data[0], obs_indices, data[1], colloc_points, c, config, parameters)
+
+    # true positions
+    mu = config['SYSTEM_MASS_PARAMETER']
+    asteroid_ini_pos = data[3][0, :]
+    asteroid_ini_vel = data[4][0, :]
+    ini_state = np.concatenate([asteroid_ini_pos, asteroid_ini_vel])
+    phi_0 = np.eye(6)  # initial Phi (state transition matrix)
+    state = np.hstack((np.array(ini_state), phi_0.ravel()))
+    num_points = 1000
+    epochs = np.linspace(data[2][0], data[2][-1], num_points)
+    res = odeint(nbody.cr3bp, state, epochs, args=(mu,))
+    asteroid_cr3bp_position = np.array(res[:, :3])
+    asteroid_cr3bp_velocity = np.array(res[:, 3:])
+
+    return data_df, positions, velocities, nlls_start, final_positions, final_velocities, asteroid_cr3bp_position, asteroid_cr3bp_velocity, epochs
 
 
 def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions, colloc_epochs, c, configuration,
@@ -792,7 +808,7 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
 
             return beta_min.reshape(-1) / scale_factor, beta_max.reshape(-1) * scale_factor
 
-    def compute_hidden_activations():
+    def compute_hidden_activations(input_z):
         """
         :param activation:
         :param z: shape (d, 1)
@@ -800,14 +816,14 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
         :param b: shape (H,)
         :return: H, H_prime, H_double_prime
         """
-        z_proj = W @ epochs_nd_norm_reshaped_tensor.T + b[:, None]  # (H, d)
+        z_proj = W @ input_z.T + b[:, None]  # (H, d)
         H = torch.tanh(z_proj)
         H_prime = (1 - H ** 2) * W  # (H, d)
         H_double_prime = -2 * H * (1 - H ** 2) * (W ** 2)  # (H, d)
 
         return H.T, H_prime.T, H_double_prime.T  # shapes: (d, H)
 
-    H_matrix, H_dot, H_ddot = compute_hidden_activations()
+    H_matrix, H_dot, H_ddot = compute_hidden_activations(epochs_nd_norm_reshaped_tensor)
 
     # === Residual Function for Least Squares ===
     def loss_function(beta_flat):
@@ -1212,18 +1228,49 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
     positions[-1] = ((Y_pred_obs_nlls + observer_positions).detach().cpu().numpy())
     velocities[-1] = Y_dot_pred_obs_nlls.detach().cpu().numpy()
     # print(res.x)
-    """
 
-    beta_tensor_bh = np.asarray(res.x).reshape(q, H_size)
-    Y_pred_bh = H_matrix @ beta_tensor_bh.T  # (N, q)
-    Y_dot_pred_bh = c * H_dot @ beta_tensor_bh.T
+    # for error measurement purposes
+    initial_colloc_epoch = colloc_epochs[0]
+    final_colloc_epoch = colloc_epochs[-1]
 
-    Y_pred_obs_bh = Y_pred_bh[obs_indices]
-    Y_dot_pred_obs_bh = Y_dot_pred_bh[obs_indices]
-    positions[-1] = ((Y_pred_obs_bh + observer_positions).detach().cpu().numpy())
-    velocities[-1] = Y_dot_pred_obs_bh.detach().cpu().numpy()
-    """
+    initial_obs_epoch = colloc_epochs[obs_indices][0]
+    final_obs_epoch = colloc_epochs[obs_indices][-1]
+
+    num_points = 1000
+    test_epochs = np.linspace(initial_obs_epoch, final_obs_epoch, num_points)
+
+    # Combine, ensuring the start and end colloc epochs are at the edges
+    total_test_epochs = np.concatenate((
+        [initial_colloc_epoch],
+        test_epochs,
+        [final_colloc_epoch]
+    ))
+
+    # normalize epochs (inputs)
+    test_epochs_nd_norm, c_test = epoch_normalization(total_test_epochs, parameters['INPUT_RANGE'], configuration)
+    tests_epochs_nd_norm_reshaped_tensor = torch.tensor(test_epochs_nd_norm, dtype=torch.float32).unsqueeze(1)
+
+    H_test, H_dot_test, H_ddot_test = compute_hidden_activations(tests_epochs_nd_norm_reshaped_tensor)
+
+    test_Y_pred_bh = H_test @ beta_tensor_bh.T  # (N, q)
+    test_Y_dot_pred_bh = c_test * H_dot_test @ beta_tensor_bh.T
+
+    test_Y_pred_nlls = H_test @ beta_tensor_nlls.T  # (N, q)
+    test_Y_dot_pred_nlls = c_test * H_dot_test @ beta_tensor_nlls.T
+
+    mu = configuration['SYSTEM_MASS_PARAMETER']
+    observer_position_final = torch.tensor([1. - mu, 0., 0.], dtype=test_Y_pred_nlls.dtype)
+    observer_positions_final = observer_position_final.unsqueeze(0).repeat(test_Y_pred_nlls.shape[0], 1)
+
+    final_positions_all_nlls = (test_Y_pred_nlls + observer_positions_final).detach().cpu().numpy()
+    final_velocities_all_nlls = (test_Y_dot_pred_nlls + observer_positions_final).detach().cpu().numpy()
+    final_positions_all_bh = (test_Y_pred_bh + observer_positions_final).detach().cpu().numpy()
+    final_velocities_all_bh = (test_Y_dot_pred_bh + observer_positions_final).detach().cpu().numpy()
+
+    final_positions = [final_positions_all_nlls, final_positions_all_bh]
+    final_velocities = [final_velocities_all_nlls, final_velocities_all_bh]
+
     epochss = np.arange(total_its[0])
     data = {"TRAINING_EPOCH": epochss, "DATA_LOSS": data_losses, "PHYSICS_LOSS": physics_losses, "RANGE_LOSS": range_losses}
 
-    return pd.DataFrame(data), positions, velocities, nlls_start[0]
+    return pd.DataFrame(data), positions, velocities, nlls_start[0], final_positions, final_velocities
