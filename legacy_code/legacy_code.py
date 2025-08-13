@@ -31,8 +31,8 @@ import argparse
 
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
-sp.furnsh("de430.bsp")
-sp.furnsh('naif0012.tls')
+sp.furnsh("../de430.bsp")
+sp.furnsh('../naif0012.tls')
 
 
 def integrate_n_body_multi(object_states, epoch, end_time, time_interval):

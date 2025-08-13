@@ -4,7 +4,7 @@ from pathlib import Path
 
 # Path to your base config file
 base_config_path = 'to_sync/orbit_det_configuration.yaml'
-output_dir = 'config_IODDATA'
+output_dir = '../config_IODDATA'
 Path(output_dir).mkdir(parents=True, exist_ok=True)
 
 # Load base config

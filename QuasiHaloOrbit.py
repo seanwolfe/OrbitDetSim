@@ -69,7 +69,7 @@ def eme_to_ecliptic_batch(eme_vectors):
 
 
 def get_lpf_helio():
-    lpf_orbit = pd.read_csv('LPF_orbit.csv', sep=',', header=0, names=["Time", "GEO_X_(km)", "GEO_Y_(km)",
+    lpf_orbit = pd.read_csv('legacy_code/LPF_orbit.csv', sep=',', header=0, names=["Time", "GEO_X_(km)", "GEO_Y_(km)",
                                                                        "GEO_Z_(km)", "GEO_Vx_(km/s)", "GEO_Vy_(km/s)",
                                                                        "GEO_Vz_(km/s)"])
 
@@ -150,7 +150,7 @@ def eclip_to_sun_earth_corotating_batch(positions_eclip, et_times):
 
 # lph_orbit_txt_csv()
 
-lpf_orbit = pd.read_csv('LPF_orbit_2.csv', sep=',', header=0,
+lpf_orbit = pd.read_csv('legacy_code/LPF_orbit_2.csv', sep=',', header=0,
                         names=["Time", "GEO_EME_X_(km)", "GEO_EME_Y_(km)", "GEO_EME_Z_(km)", "GEO_EME_Vx_(km/s)",
                                "GEO_EME_Vy_(km/s)", "GEO_EME_Vz_(km/s)", "GEO_ECLIP_X_(km)", "GEO_ECLIP_Y_(km)",
                                "GEO_ECLIP_Z_(km)", "SUN_EARTH_CO_X_(km)", "SUN_EARTH_CO_Y_(km)", "SUN_EARTH_CO_Z_(km)",

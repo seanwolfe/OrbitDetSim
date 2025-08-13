@@ -1,6 +1,5 @@
 import torch
 import yaml
-import sys
 import os
 import pandas as pd
 
@@ -8,12 +7,6 @@ import pandas as pd
 from Asteroid import Asteroid
 from Formation import Formation
 import numpy as np
-import multiprocessing
-from functools import partial
-import matplotlib.pyplot as plt
-from matplotlib.ticker import MaxNLocator
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-import ast
 import mpi4py.rc
 from astropy import units as u
 mpi4py.rc.threads = False
@@ -809,7 +802,7 @@ def run_sim_runnumbers_MPI_getIOD_data_bychunk_eme(config):
                 df.to_parquet(base_path + '.parquet', index=False)
 
 
-            vis = False
+            vis = True
             if vis:
                 #######################
                 # for visualization
@@ -982,36 +975,47 @@ def run_IOD_testing(config):
     local_master = []
 
     for run_idx in range(n_runs):
+
         if run_idx % size == rank:
 
             # get case
             dynamics, orbit, observer, optimizer = config['dynamics'], config['orbit'], config['observer'], config['optimizer']
             if dynamics == '2BD' and orbit == 'GEO' and observer == 'GROUND' and optimizer == 'SGD':
                 import PIELM_sgd_geo_earth as pielm_2gg
-                parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5, 'TIME_DELTA': 0.1 * u.day,
-                              'TOTAL_POINTS': 250, 'SAMPLING_METHOD': "uniform",
-                              'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
-                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 50000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': 1e3, 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1,
-                              'X_TOLERANCE': 1e-15,
-                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15.}
+                parameters = {'NUMBER_OF_OBSERVATIONS': 260, 'OBSERVATION_TIME_FRACTION': 0.5,
+                              'TIME_DELTA': 0.0000000001 * u.day,
+                              'TOTAL_POINTS': 300, 'SAMPLING_METHOD': "uniform",
+                              'LAYER_RATIOS': [(0., 1 / 10000), (1 / 10000, 9999 / 10000), (9999 / 10000, 1.)],
+                              'INPUT_RANGE': (-1, 1),
+                              'HIDDEN_DIMENSION': 20, 'NUMBER_OF_EPOCHS': 100000, 'LEARNING_RATE': 1e-2,
+                              'PHYSICS_WEIGHT': 1e4, 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1,
+                              'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_NFEV': 100,
+                              'A_PERT': 0., 'ECC_PERT': 0., 'INC_PERT': 0., 'RAAN_PERT': 0., 'ARGPER_PERT': 0.,
+                              'ANOM_PERT': 0.}
+                config['lambda'] = parameters['PHYSICS_WEIGHT']
                 data = pielm_2gg.generate_data(config, parameters)
-                results, positions, velocities = pielm_2gg.run(data, config, parameters)
+                results, positions, velocities, nlls_start, final_pos, final_vel, true_pos, true_vel, epochs = pielm_2gg.run(
+                    data, config, parameters)
 
             elif dynamics == '2BD' and orbit == 'GEO' and observer == 'GROUND' and optimizer == 'NLLS':
                 import  PIELM_nlls_geo_earth as pielm_2ggn
-                parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5, 'TIME_DELTA': 0.1 * u.day,
-                              'TOTAL_POINTS': 250, 'SAMPLING_METHOD': "uniform",
-                              'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
-                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 5000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': 1, 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1, 'X_TOLERANCE': 1e-15,
-                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15., 'ANOM_PERT': 15.}
+                parameters = {'NUMBER_OF_OBSERVATIONS': 260, 'OBSERVATION_TIME_FRACTION': 0.5,
+                              'TIME_DELTA': 0.0000000001 * u.day,
+                              'TOTAL_POINTS': 300, 'SAMPLING_METHOD': "uniform",
+                              'LAYER_RATIOS': [(0., 1 / 10000), (1 / 10000, 9999 / 10000), (9999 / 10000, 1.)],
+                              'INPUT_RANGE': (-1, 1),
+                              'HIDDEN_DIMENSION': 20, 'NUMBER_OF_EPOCHS': 50000, 'LEARNING_RATE': 1e-1,
+                              'PHYSICS_WEIGHT': 1e0, 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1,
+                              'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_NFEV': 100,
+                              'A_PERT': 0., 'ECC_PERT': 0., 'INC_PERT': 0., 'RAAN_PERT': 0., 'ARGPER_PERT': 0.,
+                              'ANOM_PERT': 0.}
+                config['lambda'] = parameters['PHYSICS_WEIGHT']
                 data = pielm_2ggn.generate_data(config, parameters)
-                results, positions, velocities = pielm_2ggn.run(data, config, parameters)
+                results, positions, velocities, nlls_start, final_pos, final_vel, true_pos, true_vel, epochs = pielm_2ggn.run(
+                    data, config, parameters)
 
             elif dynamics == '2BD' and orbit == 'GEO' and observer == 'GROUND' and optimizer == 'BASIN_HOPPING':
-                import  PIELM_basinhopping_geo_earth as pielm_2ggb
+                import PIELM_basinhopping_geo_earth as pielm_2ggb
                 parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5, 'TIME_DELTA': 0.1 * u.day,
                               'TOTAL_POINTS': 250, 'SAMPLING_METHOD': "uniform",
                               'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
@@ -1024,7 +1028,7 @@ def run_IOD_testing(config):
                 results, positions, velocities = pielm_2ggb.run(data, config, parameters)
 
             elif dynamics == '2BD' and orbit == 'GEO' and observer == 'GROUND' and optimizer == 'BASIN_HOPPING_NLLS':
-                import  PIELM_basinhopping_intonlls_geo_earth as pielm_2ggbn
+                from legacy_code import PIELM_basinhopping_intonlls_geo_earth as pielm_2ggbn
                 parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5, 'TIME_DELTA': 0.1 * u.day,
                               'TOTAL_POINTS': 250, 'SAMPLING_METHOD': "uniform",
                               'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
@@ -1037,7 +1041,7 @@ def run_IOD_testing(config):
                 results, positions, velocities = pielm_2ggbn.run(data, config, parameters)
 
             elif dynamics == 'NBD' and orbit == 'GEO' and observer == 'GROUND' and optimizer == 'BASIN_HOPPING':
-                import  PIELM_basinhopping_geo_earth_nbody as pielm_nggb
+                from legacy_code import PIELM_basinhopping_geo_earth_nbody as pielm_nggb
                 parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5, 'TIME_DELTA': 0.1 * u.day,
                               'TOTAL_POINTS': 250, 'SAMPLING_METHOD': "uniform",
                               'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
@@ -1050,7 +1054,7 @@ def run_IOD_testing(config):
                 results, positions, velocities = pielm_nggb.run(data, config, parameters)
 
             elif dynamics == 'NBD' and orbit == 'GEO' and observer == 'GROUND' and optimizer == 'BASIN_HOPPING_NLLS':
-                import  PIELM_basinhopping_intonlls_geo_earth as pielm_nggbn
+                from legacy_code import PIELM_basinhopping_intonlls_geo_earth as pielm_nggbn
                 parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5, 'TIME_DELTA': 0.1 * u.day,
                               'TOTAL_POINTS': 250, 'SAMPLING_METHOD': "uniform",
                               'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
@@ -1063,7 +1067,7 @@ def run_IOD_testing(config):
                 results, positions, velocities = pielm_nggbn.run(data, config, parameters)
 
             elif dynamics == 'NBD' and orbit == 'GEO' and observer == 'GROUND' and optimizer == 'NLLS':
-                import  PIELM_nlls_geo_earth_nbody as pielm_nggn
+                from legacy_code import PIELM_nlls_geo_earth_nbody as pielm_nggn
                 parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5, 'TIME_DELTA': 0.1 * u.day,
                               'TOTAL_POINTS': 250, 'SAMPLING_METHOD': "uniform",
                               'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
@@ -1076,7 +1080,7 @@ def run_IOD_testing(config):
                 results, positions, velocities = pielm_nggn.run(data, config, parameters)
 
             elif dynamics == 'NBD' and orbit == 'GEO' and observer == 'GROUND' and optimizer == 'SGD':
-                import  PIELM_sgd_geo_earth_nbody as pielm_nggs
+                from legacy_code import PIELM_sgd_geo_earth_nbody as pielm_nggs
                 parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5, 'TIME_DELTA': 0.1 * u.day,
                               'TOTAL_POINTS': 250, 'SAMPLING_METHOD': "uniform",
                               'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
@@ -1132,7 +1136,7 @@ def run_IOD_testing(config):
                 results, positions, velocities = pielm_cgs.run(data, config, parameters)
 
             elif dynamics == 'CR3BP' and observer == 'GROUND' and optimizer == 'BASIN_HOPPING':
-                import  PIELM_basinhopping_periodicorbits_earth_cr3bp as pielm_cgb
+                from legacy_code import PIELM_basinhopping_periodicorbits_earth_cr3bp as pielm_cgb
                 parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5,
                               'TIME_DELTA': 0.1 * u.day,
                               'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
@@ -1158,7 +1162,7 @@ def run_IOD_testing(config):
                 results, positions, velocities = pielm_cgb.run(data, config, parameters)
 
             elif dynamics == 'CR3BP' and observer == 'GROUND' and optimizer == 'BASIN_HOPPING_NLLS':
-                import  PIELM_basinhopping_intonlls_periodicorbits_earth_cr3bp as pielm_cgbn
+                from legacy_code import PIELM_basinhopping_intonlls_periodicorbits_earth_cr3bp as pielm_cgbn
                 parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5,
                               'TIME_DELTA': 0.1 * u.day,
                               'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
@@ -1217,7 +1221,7 @@ def run_IOD_testing(config):
                 results, positions, velocities = pielm_nsts.run(data, config, parameters)
 
             elif dynamics == 'NBD' and observer == 'SPACE' and optimizer == 'BASIN_HOPPING':
-                import PIELM_basinhopping_tbo_space_nbody as pielm_nstb
+                from legacy_code import PIELM_basinhopping_tbo_space_nbody as pielm_nstb
                 parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5,
                               'TIME_DELTA': 5 * u.day,
                               'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
@@ -1237,7 +1241,7 @@ def run_IOD_testing(config):
 
 
             elif dynamics == 'NBD' and observer == 'SPACE' and optimizer == 'BASIN_HOPPING_NLLS':
-                import PIELM_basinhopping_intonlls_tbo_space_nbody as pielm_nstbn
+                from legacy_code import PIELM_basinhopping_intonlls_tbo_space_nbody as pielm_nstbn
                 # parameters = {'NUMBER_OF_OBSERVATIONS': 20, 'OBSERVATION_TIME_FRACTION': 0.5,
                 #               'TIME_DELTA': 5 * u.day,
                 #               'TOTAL_POINTS': 250, 'SAMPLING_METHOD': "uniform",
@@ -1318,7 +1322,7 @@ def run_IOD_testing(config):
                 results, positions, velocities, nlls_start = pielm_ctsn.run(data, config, parameters)
 
             elif dynamics == 'CR3BP' and observer == 'GROUND' and optimizer == 'CONSTRAINED_NLLS':
-                import PIELM_constrainedbasinhoppingnlls_periodicorbits_earth_cr3bp as pielm_cgcnb
+                from legacy_code import PIELM_constrainedbasinhoppingnlls_periodicorbits_earth_cr3bp as pielm_cgcnb
                 parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5,
                               'TIME_DELTA': 0.3 * u.day,
                               'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
@@ -1377,25 +1381,48 @@ def run_IOD_testing(config):
                         config['optimizer'] + '_run_' + str(run_idx) + '.csv'
             file_path = os.path.join(config['error_file_dir'], file_name)
             rmse_df = util.generate_iod_file(file_path, final_pos, final_vel, true_pos, true_vel, epochs)
+
+            # Position RMSE (IOD)
+            pos_rmse = np.sqrt(((rmse_df[["IOD_X", "IOD_Y", "IOD_Z"]].values -
+                                 rmse_df[["TRUE_X", "TRUE_Y", "TRUE_Z"]].values) ** 2).mean())
+
+            # Position RMSE (IOD_NLLS)
+            pos_rmse_nlls = np.sqrt(((rmse_df[["IOD_X_NLLS", "IOD_Y_NLLS", "IOD_Z_NLLS"]].values -
+                                      rmse_df[["TRUE_X", "TRUE_Y", "TRUE_Z"]].values) ** 2).mean())
+
+            # Velocity RMSE (IOD)
+            vel_rmse = np.sqrt(((rmse_df[["IOD_VX", "IOD_VY", "IOD_VZ"]].values -
+                                 rmse_df[["TRUE_VX", "TRUE_VY", "TRUE_VZ"]].values) ** 2).mean())
+
+            # Velocity RMSE (IOD_NLLS)
+            vel_rmse_nlls = np.sqrt(((rmse_df[["IOD_VX_NLLS", "IOD_VY_NLLS", "IOD_VZ_NLLS"]].values -
+                                      rmse_df[["TRUE_VX", "TRUE_VY", "TRUE_VZ"]].values) ** 2).mean())
+
+            # Add to parameters
+            parameters['POS_RMSE'] = pos_rmse
+            parameters['POS_RMSE_NLLS'] = pos_rmse_nlls
+            parameters['VEL_RMSE'] = vel_rmse
+            parameters['VEL_RMSE_NLLS'] = vel_rmse_nlls
+
             parameters['FILE_USED'] = file_used
             parameters['SAVED_AS'] = file_name
             local_master.append(parameters)
 
             df = pd.DataFrame(data_for_df)
-            util.iod_viz(df, results, positions, velocities, nlls_start, config, rmse_df)
+            # util.iod_viz(df, results, positions, velocities, nlls_start, config, rmse_df)
 
-        # Convert local list to DataFrame
-        df_local = pd.DataFrame(local_master)
+    # Convert local list to DataFrame
+    df_local = pd.DataFrame(local_master)
 
-        # Gather all DataFrames at rank 0
-        dfs = comm.gather(df_local, root=0)
+    # Gather all DataFrames at rank 0
+    dfs = comm.gather(df_local, root=0)
 
-        if rank == 0:
-            # Concatenate all into one DataFrame
-            meta_file_name = config['dynamics'] + '_' + config['orbit'] + '_' + config['observer'] + '_' + \
-                        config['optimizer'] + '_run_' + str(run_idx) + 'meta_data.csv'
-            df_global = pd.concat(dfs, ignore_index=True)
-            df_global.to_csv(meta_file_name, index=False)
+    if rank == 0:
+        # Concatenate all into one DataFrame
+        meta_file_name = config['dynamics'] + '_' + config['orbit'] + '_' + config['observer'] + '_' + \
+                    config['optimizer'] + 'meta_data.csv'
+        df_global = pd.concat(dfs, ignore_index=True)
+        df_global.to_csv(meta_file_name, index=False)
 
     return
 

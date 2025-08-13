@@ -151,7 +151,6 @@ def generate_data(config, parameters):
 
             return ra_noisy, dec_noisy, sigma_ra_deg, sigma_dec_deg
         ra_m, dec_m, sigma_ra_deg, sigma_dec_deg = add_noise(ra, dec, config)
-
     else:
         ra_m, dec_m = ra.clone(), dec.clone()
         sigma_ra_deg = 0.
@@ -166,6 +165,7 @@ def generate_data(config, parameters):
 ####
 # PIELM
 ####
+
 def sample_time_points(
         method: Literal["lhs", "uniform", "gaussian"],
         observation_epochs: np.ndarray,
@@ -193,7 +193,6 @@ def sample_time_points(
     Returns:
         np.ndarray of sampled time points, including observation_epochs.
     """
-
     if config is None:
         config = {}
     rng = np.random.default_rng(config["seed"])

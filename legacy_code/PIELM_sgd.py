@@ -13,8 +13,8 @@ from mpl_toolkits.mplot3d import Axes3D  # Needed for 3D projection
 
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
-spice.furnsh("de430.bsp")
-spice.furnsh('naif0012.tls')
+spice.furnsh("../de430.bsp")
+spice.furnsh('../naif0012.tls')
 
 
 class ELM(nn.Module):

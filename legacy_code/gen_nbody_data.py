@@ -27,8 +27,8 @@ def add_body_from_spice(sim, target_name, spice_id, et, center='EARTH', frame='E
 
 def generate_asteroid_trajectory_real_epoch(start_utc="2023-01-01T00:00:00", duration_days=30):
     # Load kernels
-    spice.furnsh("naif0012.tls")
-    spice.furnsh("de430.bsp")
+    spice.furnsh("../naif0012.tls")
+    spice.furnsh("../de430.bsp")
     filename = "asteroid_trajectory_jdtdb.csv"
 
     et0 = spice.utc2et(start_utc)

@@ -24,20 +24,32 @@ spice.furnsh('naif0012.tls')
 pd.options.mode.chained_assignment = None
 
 
+import numpy as np
+import pandas as pd
+
 def generate_iod_file(file_path, final_pos, final_vel, true_pos, true_vel, epochs):
-    fx, fy, fz = final_pos[0][1:-1, 0], final_pos[0][1:-1, 1], final_pos[0][1:-1, 2]
-    fvx, fvy, fvz = final_vel[0][1:-1, 0], final_vel[0][1:-1, 1], final_vel[0][1:-1, 2]
-    fxn, fyn, fzn = final_pos[1][1:-1, 0], final_pos[1][1:-1, 1], final_pos[1][1:-1, 2]
-    fvxn, fvyn, fvzn = final_vel[1][1:-1, 0], final_vel[1][1:-1, 1], final_vel[1][1:-1, 2]
+    fx, fy, fz = final_pos[1][1:-1, 0], final_pos[1][1:-1, 1], final_pos[1][1:-1, 2]
+    fvx, fvy, fvz = final_vel[1][1:-1, 0], final_vel[1][1:-1, 1], final_vel[1][1:-1, 2]
+    fxn, fyn, fzn = final_pos[0][1:-1, 0], final_pos[0][1:-1, 1], final_pos[0][1:-1, 2]
+    fvxn, fvyn, fvzn = final_vel[0][1:-1, 0], final_vel[0][1:-1, 1], final_vel[0][1:-1, 2]
     tx, ty, tz = true_pos[:, 0], true_pos[:, 1], true_pos[:, 2]
     tvx, tvy, tvz = true_vel[:, 0], true_vel[:, 1], true_vel[:, 2]
-    data = {"EPOCHS":epochs, "IOD_X": fx, "IOD_Y": fy, "IOD_Z": fz, "IOD_VX": fvx, "IOD_VY": fvy,
-            "IOD_VZ": fvz, "IOD_X_NLLS": fxn, "IOD_Y_NLLS": fyn, "IOD_Z_NLLS": fzn, "IOD_VX_NLLS": fvxn,
-            "IOD_VY_NLLS": fvyn, "IOD_VZ_NLLS": fvzn, "TRUE_X": tx, "TRUE_Y": ty, "TRUE_Z": tz,
-            "TRUE_VX": tvx, "TRUE_VY": tvy, "TRUE_VZ": tvz}
+
+    data = {
+        "EPOCHS": epochs,
+        "IOD_X": fx, "IOD_Y": fy, "IOD_Z": fz,
+        "IOD_VX": fvx, "IOD_VY": fvy, "IOD_VZ": fvz,
+        "IOD_X_NLLS": fxn, "IOD_Y_NLLS": fyn, "IOD_Z_NLLS": fzn,
+        "IOD_VX_NLLS": fvxn, "IOD_VY_NLLS": fvyn, "IOD_VZ_NLLS": fvzn,
+        "TRUE_X": tx, "TRUE_Y": ty, "TRUE_Z": tz,
+        "TRUE_VX": tvx, "TRUE_VY": tvy, "TRUE_VZ": tvz
+    }
+
     df = pd.DataFrame(data)
+
     df.to_csv(file_path, index=False)
     return df
+
 
 
 def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, config, rmse_df):
@@ -223,33 +235,33 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
     cbar5.set_label('Training epoch')
 
     ###### data loss ###
-    points = np.vstack((results['TRAINING_EPOCH'].values, results['RANGE_LOSS'].values)).T
-    points = points[::num]
-    segments = np.array([points[:-1], points[1:]]).transpose(1, 0, 2)
-    lc6 = LineCollection(segments, cmap='viridis', array=epoch_points, linewidth=2)
-    ax6 = fig.add_subplot(3, 3, 6)  # 3D subplot
-    ax6.add_collection(lc6)
-    ax6.scatter(results['TRAINING_EPOCH'].iloc[nlls_start], results['RANGE_LOSS'].iloc[nlls_start])
-    ax6.autoscale()  # Auto scale limits to lines
-    ax6.set_xlabel('Training Epoch')
-    ax6.set_ylabel('Data Loss')
-    ax6.set_yscale('log')
-    cbar6 = fig.colorbar(lc6, ax=ax6)
-    cbar6.set_label('Training epoch')
+    # points = np.vstack((results['TRAINING_EPOCH'].values, results['RANGE_LOSS'].values)).T
+    # points = points[::num]
+    # segments = np.array([points[:-1], points[1:]]).transpose(1, 0, 2)
+    # lc6 = LineCollection(segments, cmap='viridis', array=epoch_points, linewidth=2)
+    # ax6 = fig.add_subplot(3, 3, 6)  # 3D subplot
+    # ax6.add_collection(lc6)
+    # ax6.scatter(results['TRAINING_EPOCH'].iloc[nlls_start], results['RANGE_LOSS'].iloc[nlls_start])
+    # ax6.autoscale()  # Auto scale limits to lines
+    # ax6.set_xlabel('Training Epoch')
+    # ax6.set_ylabel('Data Loss')
+    # ax6.set_yscale('log')
+    # cbar6 = fig.colorbar(lc6, ax=ax6)
+    # cbar6.set_label('Training epoch')
 
     fig2 = plt.figure()
     ax21 = fig2.add_subplot(projection='3d')
     ax21.plot(*pred_positions[-1].T, label='NLLS')
-    ax21.plot(*pred_positions[-2].T, label='Basin Hopping')
+    # ax21.plot(*pred_positions[-2].T, label='Basin Hopping')
     ax21.scatter(*iod_data.loc[:, ["SC_GEO_X(KM)_PHYS", "SC_GEO_Y(KM)_PHYS", "SC_GEO_Z(KM)_PHYS"]].values.T, label='Spacecraft Pos')
     ax21.plot(*true_positions.T, label='True')
 
     true_rmse = rmse_df.loc[:, ['TRUE_X', 'TRUE_Y', 'TRUE_Z']].values
-    bh_pos_rmse = rmse_df.loc[:, ['IOD_X', 'IOD_Y', 'IOD_Z']].values
+    # bh_pos_rmse = rmse_df.loc[:, ['IOD_X', 'IOD_Y', 'IOD_Z']].values
     nlls_pos_rmse = rmse_df.loc[:, ['IOD_X_NLLS', 'IOD_Y_NLLS', 'IOD_Z_NLLS']].values
 
     ax21.plot(*true_rmse.T, linestyle='--', label='RMSE True')
-    ax21.plot(*bh_pos_rmse.T, linestyle='--', label='RMSE BH')
+    # ax21.plot(*bh_pos_rmse.T, linestyle='--', label='RMSE BH')
     ax21.plot(*nlls_pos_rmse.T, linestyle='--', label='RMSE NLLS')
 
     # ax21.plot(*asteroid_int_geo, label='Integrated', linestyle='--')
@@ -315,8 +327,8 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
             config['time_between_frames'],
             num_frames)
         ax7.plot(*pred_positions[-1].T, label='Predicted Pos')
-        ax7.plot(*asteroid_eme[:3, :], label='N-body Integrated', linestyle='--', linewidth=3)
-        # ax7.plot(*asteroid_2bd_position.T, label='2-body Integrated', linestyle='--', linewidth=3)
+        # ax7.plot(*asteroid_eme[:3, :], label='N-body Integrated', linestyle='--', linewidth=3)
+        ax7.plot(*asteroid_2bd_position.T, label='2-body Integrated', linestyle='--', linewidth=3)
 
     ax7.set_xlabel('X [KM]')
     ax7.set_ylabel('Y [KM]')
@@ -324,14 +336,17 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
     ax7.set_aspect('equal')
     ax7.legend()
 
+    true_v_rmse = rmse_df.loc[:, ['TRUE_VX', 'TRUE_VY', 'TRUE_VZ']].values
+    # bh_pos_rmse = rmse_df.loc[:, ['IOD_X', 'IOD_Y', 'IOD_Z']].values
+    nlls_vel_rmse = rmse_df.loc[:, ['IOD_VX_NLLS', 'IOD_VY_NLLS', 'IOD_VZ_NLLS']].values
 
 
-    errors_xyz = np.abs(pred_positions[-1] - true_positions)
+    errors_xyz = np.abs(true_rmse - nlls_pos_rmse)
     x = errors_xyz[:, 0]
     y = errors_xyz[:, 1]
     z = errors_xyz[:, 2]
 
-    errors_vxyz = np.abs(pred_velocities[-1] - true_velocities)
+    errors_vxyz = np.abs(true_v_rmse - nlls_vel_rmse)
     vx = errors_vxyz[:, 0]
     vy = errors_vxyz[:, 1]
     vz = errors_vxyz[:, 2]
