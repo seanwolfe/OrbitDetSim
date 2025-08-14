@@ -115,7 +115,7 @@ n_runs_test: 10
 dynamics: '2BD'
 orbit: 'GEO'
 observer: 'GROUND'
-optimizer: 'SGD'
+optimizer: 'CONSTRAINED_BASIN_HOPPING'
 SYSTEM_MASS_PARAMETER: 3.0404e-6
 CR3BP_SCALE_FACTOR: 1.0e+0
 WEIGHT_SCALE_FACTOR: 1.0e+0

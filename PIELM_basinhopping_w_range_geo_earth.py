@@ -464,7 +464,7 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
 
         def __init__(self, q=3, H_size=10, observations=None, H=None, cH_dot=None,
                      rho_range=None, rho_dot_range=None, observer_positions=None, observer_velocities=None,
-                     obs_indices=None, obs_epochs=None, delta_rho=None, delta_rho_dot=None, delta_rho_step=None):
+                     obs_indices=None, obs_epochs=None, delta_rho_step=None, delta_rho_dot_step=None):
             """
                Initialize a structured basin-hopping stepper constrained by the admissible region.
 
@@ -501,9 +501,8 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
             self.observer_velocities = observer_velocities
             self.obs_indices = obs_indices
             self.obs_epochs = obs_epochs
-            self.delta_rho = delta_rho
-            self.delta_rho_dot = delta_rho_dot
             self.delta_rho_step = delta_rho_step
+            self.delta_rho_dot_step = delta_rho_dot_step
 
         def __call__(self, x):
             """
@@ -621,18 +620,28 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
                 current_rho = torch.mean(torch.norm(r_obs, dim=1))
                 num_trys += 1
 
-            delta_rho_dot = (
-                    torch.rand(()) * (self.rho_dot_range[1] - self.rho_dot_range[0]) + self.rho_dot_range[0]
-            )  # (1,)
+            rho_dot_0_central = 0
+            current_rho_dot = -1e15
+            num_trys = 0
+            max_trys = 100
+            while (current_rho_dot < self.rho_dot_range[0] or current_rho_dot > self.rho_dot_range[1]) and num_trys < max_trys:
+                rho_dot_0_central = torch.rand(()) * 2 * self.delta_rho_dot_step - self.delta_rho_dot_step
 
-            delta_v = (observer_vel +
-                    delta_rho_dot * l +
-                    rho_0_central * alpha_dot * l_alpha +
-                    rho_0_central * delta_dot * l_delta
-            )
+                delta_v = (observer_vel +
+                           rho_dot_0_central * l +
+                           rho_0_central * alpha_dot * l_alpha +
+                           rho_0_central * delta_dot * l_delta
+                           )
 
-            # new r and v
-            v_obs = v + delta_v
+                # new r and v
+                v_obs = v + delta_v
+
+                # Compute current_rho_dot as projection of velocity along line of sight
+                rho_dot_per_epoch = torch.sum(v_obs * l, dim=-1)  # (N,)
+                current_rho_dot = rho_dot_per_epoch.mean()
+
+            num_trys += 1
+
 
             all_H = torch.cat([self.H, self.cH_dot], dim=1)  # (N,2H_size)
             H_obs = all_H[self.obs_indices]  # (N_obs, 2H_size)
@@ -727,16 +736,10 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
 
             # expand to (n_init,N,1) with perturbations
             N = l.shape[0]
-            delta_rho = self.delta_rho
-            delta_rho_dot = self.delta_rho_dot  # adjust to your preferred delta
 
-            rho_0 = rho_0_central[:, None, :] + (
-                    torch.rand(n_init, N, 1) * 2 * delta_rho - delta_rho
-            )  # random in [central-delta, central+delta]
+            rho_0 = rho_0_central[:, None, :]
 
-            rho_dot_0 = rho_dot_0_central[:, None, :] + (
-                    torch.rand(n_init, N, 1) * 2 * delta_rho_dot - delta_rho_dot
-            )
+            rho_dot_0 = rho_dot_0_central[:, None, :]
 
             # expand basis vectors to (1,N,3)
             l = l[None, :, :]
@@ -1003,7 +1006,6 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
         return obs_residual + lambda_phys * physics_residual + weighted_dist_res
 
     def func(beta_flat):
-        total_its[0] += 1
         beta_tensor_np = beta_flat.reshape(q, H_size)
         beta_tensor = torch.tensor(beta_tensor_np, dtype=torch.float32, requires_grad=True)
         loss = residual_function(beta_tensor)
@@ -1026,9 +1028,8 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
         observer_velocities=torch.zeros_like(observer_positions),
         obs_indices=obs_indices,
         obs_epochs=colloc_epochs[obs_indices],
-        delta_rho=parameters['DELTA_RHO'],
-        delta_rho_dot=parameters['DELTA_RHO_DOT'],
-        delta_rho_step=parameters['DELTA_RHO_STEP']
+        delta_rho_step=parameters['DELTA_RHO_STEP'],
+        delta_rho_dot_step=parameters['DELTA_RHO_DOT_STEP']
     )
 
     beta0 = mystep.take_initial_step(n_init=parameters['INITIAL_TRAJECTORIES'])
@@ -1043,12 +1044,14 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
         # print(f"Global iteration {global_its[0]} complete: accepted={accept}, epsilon={epsilon[0]}")
         global_its[0] += 1
 
-    # Run basin hopping
+        # Run basin hopping
+
     res = basinhopping(func, beta0, minimizer_kwargs=minimizer_kwargs, niter=parameters['NUMBER_OF_ITERATIONS'],
-                       stepsize=parameters['STEPSIZE'], T=parameters['TEMPERATURE'])
+                       stepsize=parameters['STEPSIZE'], T=parameters['TEMPERATURE'], callback=callback,
+                       take_step=mystep, disp=True)
 
     beta_tensor_bh = np.asarray(res.x).reshape(q, H_size)
-    Y_pred_bh = H_matrix @ beta_tensor_nlls.T  # (N, q)
+    Y_pred_bh = H_matrix @ beta_tensor_bh.T  # (N, q)
     Y_dot_pred_bh = c * H_dot @ beta_tensor_bh.T
 
     Y_pred_obs_bh = Y_pred_bh[obs_indices]
