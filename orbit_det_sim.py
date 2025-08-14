@@ -1022,14 +1022,14 @@ def run_IOD_testing(config):
                               'LAYER_RATIOS': [(0., 1 / 10000), (1 / 10000, 9999 / 10000), (9999 / 10000, 1.)],
                               'INPUT_RANGE': (-1, 1),
                               'HIDDEN_DIMENSION': 20, 'NUMBER_OF_EPOCHS': 50000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': 1e0, 'LAMBDA_DIST': 1e0, 'STEPSIZE': 10e1,
-                              'NUMBER_OF_ITERATIONS': 100, 'TEMPERATURE': 10e-5,
+                              'PHYSICS_WEIGHT': 1e0, 'LAMBDA_DIST': 1e-15, 'STEPSIZE': 10e-5,
+                              'NUMBER_OF_ITERATIONS': 100, 'TEMPERATURE': 10e-8,
                               'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000,
                               'MAX_ITERATiONS': 20000, 'G_TOLERANCE': 1e-15, 'MAX_NFEV':100,
                               'A_PERT': 0., 'ECC_PERT': 0., 'INC_PERT': 0., 'RAAN_PERT': 0., 'ARGPER_PERT': 0.,
                               'ANOM_PERT': 0., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 95 - run_idx,
-                              'MIN_RHO': 1.0976e0, 'MAX_RHO': 2.35157e2, 'MIN_RHO_DOT': -1.2647e2,
-                              'MAX_RHO_DOT': 1.2647e2, 'DELTA_RHO_STEP': 1.5679e0, 'DELTA_RHO_DOT_STEP': 1.265e-1,
+                              'MIN_RHO': 1.0976e0, 'MAX_RHO': 2.35157e2, 'MIN_RHO_DOT': -1.2647e0,
+                              'MAX_RHO_DOT': 1.2647e0, 'DELTA_RHO_STEP': 1.5679e0, 'DELTA_RHO_DOT_STEP': 1.265e-1,
                               'INITIAL_TRAJECTORIES': 1}
                 config['lambda'] = parameters['PHYSICS_WEIGHT']
                 config['run_idx'] = run_idx

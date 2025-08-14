@@ -235,19 +235,19 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
     cbar5.set_label('Training epoch')
 
     ###### data loss ###
-    # points = np.vstack((results['TRAINING_EPOCH'].values, results['RANGE_LOSS'].values)).T
-    # points = points[::num]
-    # segments = np.array([points[:-1], points[1:]]).transpose(1, 0, 2)
-    # lc6 = LineCollection(segments, cmap='viridis', array=epoch_points, linewidth=2)
-    # ax6 = fig.add_subplot(3, 3, 6)  # 3D subplot
-    # ax6.add_collection(lc6)
-    # ax6.scatter(results['TRAINING_EPOCH'].iloc[nlls_start], results['RANGE_LOSS'].iloc[nlls_start])
-    # ax6.autoscale()  # Auto scale limits to lines
-    # ax6.set_xlabel('Training Epoch')
-    # ax6.set_ylabel('Data Loss')
-    # ax6.set_yscale('log')
-    # cbar6 = fig.colorbar(lc6, ax=ax6)
-    # cbar6.set_label('Training epoch')
+    points = np.vstack((results['TRAINING_EPOCH'].values, results['RANGE_LOSS'].values)).T
+    points = points[::num]
+    segments = np.array([points[:-1], points[1:]]).transpose(1, 0, 2)
+    lc6 = LineCollection(segments, cmap='viridis', array=epoch_points, linewidth=2)
+    ax6 = fig.add_subplot(3, 3, 6)  # 3D subplot
+    ax6.add_collection(lc6)
+    ax6.scatter(results['TRAINING_EPOCH'].iloc[nlls_start], results['RANGE_LOSS'].iloc[nlls_start])
+    ax6.autoscale()  # Auto scale limits to lines
+    ax6.set_xlabel('Training Epoch')
+    ax6.set_ylabel('Data Loss')
+    ax6.set_yscale('log')
+    cbar6 = fig.colorbar(lc6, ax=ax6)
+    cbar6.set_label('Training epoch')
 
     fig2 = plt.figure()
     ax21 = fig2.add_subplot(projection='3d')

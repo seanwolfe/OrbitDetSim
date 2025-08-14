@@ -640,7 +640,7 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
                 rho_dot_per_epoch = torch.sum(v_obs * l, dim=-1)  # (N,)
                 current_rho_dot = rho_dot_per_epoch.mean()
 
-            num_trys += 1
+                num_trys += 1
 
 
             all_H = torch.cat([self.H, self.cH_dot], dim=1)  # (N,2H_size)
