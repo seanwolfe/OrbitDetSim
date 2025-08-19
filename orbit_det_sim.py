@@ -988,13 +988,13 @@ def run_IOD_testing(config):
                               'LAYER_RATIOS': [(0., 1 / 10000), (1 / 10000, 9999 / 10000), (9999 / 10000, 1.)],
                               'INPUT_RANGE': (-1, 1),
                               'HIDDEN_DIMENSION': 20, 'NUMBER_OF_EPOCHS': 100000, 'LEARNING_RATE': 1e-2,
-                              'PHYSICS_WEIGHT': 1e4, 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1,
+                              'PHYSICS_WEIGHT': 1e2, 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1,
                               'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_NFEV': 100,
-                              'A_PERT': 0., 'ECC_PERT': 0., 'INC_PERT': 0., 'RAAN_PERT': 0., 'ARGPER_PERT': 0.,
-                              'ANOM_PERT': 0.}
+                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
+                              'ANOM_PERT': 15.}
                 config['lambda'] = parameters['PHYSICS_WEIGHT']
                 data = pielm_2gg.generate_data(config, parameters)
-                results, positions, velocities, nlls_start, final_pos, final_vel, true_pos, true_vel, epochs = pielm_2gg.run(
+                results, positions, velocities, nlls_start, final_pos, final_vel, true_pos, true_vel, epochs, comp_time = pielm_2gg.run(
                     data, config, parameters)
 
             elif dynamics == '2BD' and orbit == 'GEO' and observer == 'GROUND' and optimizer == 'NLLS':
@@ -1007,11 +1007,11 @@ def run_IOD_testing(config):
                               'HIDDEN_DIMENSION': 20, 'NUMBER_OF_EPOCHS': 50000, 'LEARNING_RATE': 1e-1,
                               'PHYSICS_WEIGHT': 1e0, 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1,
                               'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_NFEV': 100,
-                              'A_PERT': 0., 'ECC_PERT': 0., 'INC_PERT': 0., 'RAAN_PERT': 0., 'ARGPER_PERT': 0.,
-                              'ANOM_PERT': 0.}
+                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
+                              'ANOM_PERT': 15.}
                 config['lambda'] = parameters['PHYSICS_WEIGHT']
                 data = pielm_2ggn.generate_data(config, parameters)
-                results, positions, velocities, nlls_start, final_pos, final_vel, true_pos, true_vel, epochs = pielm_2ggn.run(
+                results, positions, velocities, nlls_start, final_pos, final_vel, true_pos, true_vel, epochs, comp_time = pielm_2ggn.run(
                     data, config, parameters)
 
             elif dynamics == '2BD' and orbit=='GEO' and observer == 'GROUND' and optimizer == 'CONSTRAINED_BASIN_HOPPING':
@@ -1022,7 +1022,7 @@ def run_IOD_testing(config):
                               'LAYER_RATIOS': [(0., 1 / 10000), (1 / 10000, 9999 / 10000), (9999 / 10000, 1.)],
                               'INPUT_RANGE': (-1, 1),
                               'HIDDEN_DIMENSION': 20, 'NUMBER_OF_EPOCHS': 50000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': 1e0, 'LAMBDA_DIST': 1e-15, 'STEPSIZE': 10e-5,
+                              'PHYSICS_WEIGHT': 1e2, 'LAMBDA_DIST': 1e-7, 'STEPSIZE': 10e-5,
                               'NUMBER_OF_ITERATIONS': 100, 'TEMPERATURE': 10e-8,
                               'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000,
                               'MAX_ITERATiONS': 20000, 'G_TOLERANCE': 1e-15, 'MAX_NFEV':100,
@@ -1034,7 +1034,7 @@ def run_IOD_testing(config):
                 config['lambda'] = parameters['PHYSICS_WEIGHT']
                 config['run_idx'] = run_idx
                 data = pielm_2ggcb.generate_data(config, parameters)
-                results, positions, velocities, nlls_start, final_pos, final_vel, true_pos, true_vel, epochs = pielm_2ggcb.run(data, config, parameters)
+                results, positions, velocities, nlls_start, final_pos, final_vel, true_pos, true_vel, epochs, comp_time = pielm_2ggcb.run(data, config, parameters)
 
 
             elif dynamics == '2BD' and orbit == 'GEO' and observer == 'GROUND' and optimizer == 'BASIN_HOPPING':
@@ -1402,6 +1402,8 @@ def run_IOD_testing(config):
             file_used = data[9]
             file_name = config['dynamics'] + '_' + config['orbit'] + '_' + config['observer'] + '_' + \
                         config['optimizer'] + '_run_' + str(run_idx) + '.csv'
+
+            os.makedirs(config['error_file_dir'], exist_ok=True)
             file_path = os.path.join(config['error_file_dir'], file_name)
             rmse_df = util.generate_iod_file(file_path, final_pos, final_vel, true_pos, true_vel, epochs)
 
@@ -1426,7 +1428,7 @@ def run_IOD_testing(config):
             parameters['POS_RMSE_NLLS'] = pos_rmse_nlls
             parameters['VEL_RMSE'] = vel_rmse
             parameters['VEL_RMSE_NLLS'] = vel_rmse_nlls
-
+            parameters['COMPUTATION_TIME'] = comp_time
             parameters['FILE_USED'] = file_used
             parameters['SAVED_AS'] = file_name
             local_master.append(parameters)

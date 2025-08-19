@@ -24,6 +24,7 @@ from torch.autograd.functional import jacobian
 from scipy.optimize import least_squares
 import pandas as pd
 import n_body_integrator as nbody
+import time
 
 ####
 # generate data
@@ -422,8 +423,10 @@ def run(data, config, parameters):
 
     elm = ELM(parameters['HIDDEN_DIMENSION'], c_normalization=c, config=config)
 
+    start = time.time()
     data_df, positions, velocities, nlls_start, final_positions, final_velocities = train(elm,
         epochs_nd_norm_reshaped_tensor, data[0], obs_indices, data[1], colloc_points, config, parameters)
+    end = time.time()
 
     # Extract initial position/velocity
     ini_pos = data[3][0, :]  # km
@@ -448,7 +451,7 @@ def run(data, config, parameters):
         num_frames=num_points
     )
 
-    return data_df, positions, velocities, nlls_start, final_positions, final_velocities, tpositions, tvelocities, propagated_epochs
+    return data_df, positions, velocities, nlls_start, final_positions, final_velocities, tpositions, tvelocities, propagated_epochs, end - start
 
 
 def train(model, epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions, colloc_epochs, configuration, parameters):

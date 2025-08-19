@@ -13,6 +13,7 @@ from torch.autograd.functional import jacobian
 from scipy.optimize import least_squares
 import pandas as pd
 import n_body_integrator as nbody
+import time
 
 ####
 # generate data
@@ -362,7 +363,7 @@ def run(data, config, parameters):
     obs_mask = np.isin(colloc_points, data[2])
     obs_indices = np.where(obs_mask)[0]
 
-    data_df, positions, velocities, nlls_start, final_positions, final_velocities = solve(epochs_nd_norm_reshaped_tensor, data[0], obs_indices, data[1], colloc_points, c, config, parameters)
+    data_df, positions, velocities, nlls_start, final_positions, final_velocities, comp_time = solve(epochs_nd_norm_reshaped_tensor, data[0], obs_indices, data[1], colloc_points, c, config, parameters)
 
     # Extract initial position/velocity
     ini_pos = data[3][0, :]  # km
@@ -387,7 +388,7 @@ def run(data, config, parameters):
         num_frames=num_points
     )
 
-    return data_df, positions, velocities, nlls_start, final_positions, final_velocities, tpositions, tvelocities, propagated_epochs
+    return data_df, positions, velocities, nlls_start, final_positions, final_velocities, tpositions, tvelocities, propagated_epochs, comp_time
 
 
 def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions, colloc_epochs, c, configuration,
@@ -542,6 +543,8 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
 
     beta0 = np.random.rand(q * H_size)
 
+    start = time.time()
+
     # === Solve with SciPy ===
     res2 = least_squares(
         fun=residual_np,
@@ -553,6 +556,8 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
         ftol=parameters['F_TOLERANCE'],
         max_nfev=parameters['MAX_NFEV'],
     )
+
+    end = time.time()
 
     beta_tensor_nlls = np.asarray(res2.x).reshape(q, H_size)
     Y_pred_nlls = H_matrix @ beta_tensor_nlls.T  # (N, q)
@@ -599,4 +604,4 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
     epochss = np.arange(total_its[0])
     data = {"TRAINING_EPOCH": epochss, "DATA_LOSS": data_losses, "PHYSICS_LOSS": physics_losses}
 
-    return pd.DataFrame(data), positions, velocities, nlls_start[0], final_positions, final_velocities
+    return pd.DataFrame(data), positions, velocities, nlls_start[0], final_positions, final_velocities, end - start
