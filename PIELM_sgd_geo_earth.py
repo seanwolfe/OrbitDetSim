@@ -220,6 +220,55 @@ def generate_data(config, parameters):
 ####
 # PIELM
 ####
+class ELM(nn.Module):
+    def __init__(self, hidden_dim, q=3, activation=torch.tanh, c_normalization=1.0, initial_nd_positions=None, z_s=None, config=None):
+        """
+        :param input_dim: Dimensionality of each input vector (e.g., 1 for time).
+        :param hidden_dim: Number of hidden neurons (N_star).
+        :param q: Number of output dimensions (e.g., 3 for 3D position).
+        :param activation: Activation function, e.g., tanh.
+        """
+        super().__init__()
+        input_dim= 1
+        self.input_weights = nn.Parameter(config['WEIGHT_SCALE_FACTOR'] * (2 * torch.rand(hidden_dim, input_dim) - 1), requires_grad=False)  # (H x 1)
+        self.bias = nn.Parameter(config['WEIGHT_SCALE_FACTOR'] * (2 * torch.rand(hidden_dim) - 1), requires_grad=False)  # (H,)
+        self.activation = activation
+        if initial_nd_positions is None:
+            self.output_weights = nn.Parameter(torch.rand(q, hidden_dim))  # (q x H) random initializtion
+        else:
+            H = torch.tanh(self.input_weights @ z_s.T + self.bias[:, None])
+            H_inv = torch.linalg.pinv(H)
+            self.output_weights = nn.Parameter(initial_nd_positions @ H_inv )
+        self.c_normalization = c_normalization
+
+    def forward(self, z):
+        # z should be of shape (d, input_dim), typically (d, 1)
+        # Transpose z to (input_dim, d) so matmul (H x 1) @ (1 x d) => (H x d)
+        H = self.activation(self.input_weights @ z.T + self.bias[:, None])  # (H x d)
+        Y = self.output_weights @ H  # (q x H) @ (H x d) => (q x d)
+        return Y.T  # Return shape (d x q)
+
+    def forward_with_derivatives(self, z):
+        """
+        z: shape (d, 1)
+        Returns: y, y', y'' each of shape (d, q)
+        """
+        W = self.input_weights  # (H x 1)
+        b = self.bias[:, None]  # (H x 1)
+        z = W @ z.T + b  # (H x d)
+        H = torch.tanh(z)  # (H x d)
+
+        H_prime = (1 - H ** 2) * W  # (H x d)
+        H_double_prime = -2 * H * (1 - H ** 2) * (W ** 2)  # (H x d)
+
+        Y = self.output_weights @ H  # (q x N)
+        Y_dot = self.c_normalization * self.output_weights @ H_prime  # (q x d)
+        Y_dot_dot = self.c_normalization ** 2 * self.output_weights @ H_double_prime  # (q x d)
+
+        return Y.T, Y_dot.T, Y_dot_dot.T
+
+
+
 def sample_time_points(
         method: Literal["lhs", "uniform", "gaussian"],
         observation_epochs: np.ndarray,
@@ -359,53 +408,6 @@ def epoch_normalization(epoch, z_range, configuration):
 
     return normalized_epoch, scale
 
-class ELM(nn.Module):
-    def __init__(self, hidden_dim, q=3, activation=torch.tanh, c_normalization=1.0, initial_nd_positions=None, z_s=None, config=None):
-        """
-        :param input_dim: Dimensionality of each input vector (e.g., 1 for time).
-        :param hidden_dim: Number of hidden neurons (N_star).
-        :param q: Number of output dimensions (e.g., 3 for 3D position).
-        :param activation: Activation function, e.g., tanh.
-        """
-        super().__init__()
-        input_dim= 1
-        self.input_weights = nn.Parameter((2 * torch.rand(hidden_dim, input_dim) - 1) * config['WEIGHT_SCALE_FACTOR'], requires_grad=False)  # (H x 1)
-        self.bias = nn.Parameter((2 * torch.rand(hidden_dim) - 1) * config['WEIGHT_SCALE_FACTOR'], requires_grad=False)  # (H,)
-        self.activation = activation
-        if initial_nd_positions is None:
-            self.output_weights = nn.Parameter(torch.rand(q, hidden_dim))  # (q x H) random initializtion
-        else:
-            H = torch.tanh(self.input_weights @ z_s.T + self.bias[:, None])
-            H_inv = torch.linalg.pinv(H)
-            self.output_weights = nn.Parameter(initial_nd_positions @ H_inv )
-
-        self.c_normalization = c_normalization
-
-    def forward(self, z):
-        # z should be of shape (d, input_dim), typically (d, 1)
-        # Transpose z to (input_dim, d) so matmul (H x 1) @ (1 x d) => (H x d)
-        H = self.activation(self.input_weights @ z.T + self.bias[:, None])  # (H x d)
-        Y = self.output_weights @ H  # (q x H) @ (H x d) => (q x d)
-        return Y.T  # Return shape (d x q)
-
-    def forward_with_derivatives(self, z):
-        """
-        z: shape (d, 1)
-        Returns: y, y', y'' each of shape (d, q)
-        """
-        W = self.input_weights  # (H x 1)
-        b = self.bias[:, None]  # (H x 1)
-        z = W @ z.T + b  # (H x d)
-        H = torch.tanh(z)  # (H x d)
-
-        H_prime = (1 - H ** 2) * W  # (H x d)
-        H_double_prime = -2 * H * (1 - H ** 2) * (W ** 2)  # (H x d)
-
-        Y = self.output_weights @ H  # (q x N)
-        Y_dot = self.c_normalization * self.output_weights @ H_prime  # (q x d)
-        Y_dot_dot = self.c_normalization ** 2 * self.output_weights @ H_double_prime  # (q x d)
-
-        return Y.T, Y_dot.T, Y_dot_dot.T
 
 def run(data, config, parameters):
 
@@ -604,6 +606,3 @@ def train(model, epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_po
     data = {"TRAINING_EPOCH": epochss, "DATA_LOSS": data_losses, "PHYSICS_LOSS": physics_losses}
 
     return pd.DataFrame(data), positions, velocities, nlls_start[0], final_positions, final_velocities
-
-
-

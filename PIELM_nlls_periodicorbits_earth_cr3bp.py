@@ -13,16 +13,17 @@ from torch.autograd.functional import jacobian
 from scipy.optimize import least_squares
 import pandas as pd
 import os
-import yaml
+import n_body_integrator as nbody
+from scipy.integrate import odeint
+import time
 
 ####
 # generate data
 ###
 def generate_data(config, parameters):
-
-
     # get orbit type
     orbit_type = parameters['ORBIT_TYPE']
+    print(orbit_type)
 
     # get orbit number
     orbit_number = parameters['RUN_NUMBER']
@@ -33,9 +34,10 @@ def generate_data(config, parameters):
     file_paths = []
     for root, _, files in os.walk(folder_path):
         for file in files:
-                file_paths.append(os.path.join(root, file))
+            file_paths.append(os.path.join(root, file))
     files_sorted = sorted(file_paths, key=lambda x: float(os.path.basename(x)))
     file = files_sorted[orbit_number]
+    print(file)
     data = pd.read_csv(file)
 
     # 3. Time array: propagate for half a period
@@ -46,14 +48,29 @@ def generate_data(config, parameters):
     def sample_equally_spaced(df, n):
         if n >= len(df) / 2:
             return df.copy()
-        indices = np.linspace(len(df) / 4, 3 * len(df) / 4  - 1, n, dtype=int)
+        indices = np.linspace(0 * len(df) / 4, 1 * len(df) / 8 - 1, n, dtype=int)
         return df.iloc[indices]
+
     trajectory = sample_equally_spaced(data, num_obs)
+
+    def sample_other_half(df, n):
+        if n >= len(df) / 2:
+            return df.copy()
+        n_each = n // 2
+
+        idx1 = np.linspace(0, len(df) / 4 - 1, n_each, dtype=int)
+        idx2 = np.linspace(3 * len(df) / 4, len(df) - 1, n - n_each, dtype=int)
+
+        indices = np.concatenate([idx2, idx1])
+        return df.iloc[indices], df['time'].iloc[:n]
+
+    # trajectory, time = sample_other_half(data, num_obs)
     positions = trajectory.loc[:, ['x', 'y', 'z']].values
     velocities = trajectory.loc[:, ['vx', 'vy', 'vz']].values
     observation_epochs = trajectory['time'].values
-    observer_position = np.array([1. - mu, 0 , 0])
+    observer_position = np.array([1. - mu, 0, 0])
     observer_positions = np.tile(observer_position, (velocities.shape[0], 1))
+
     # positions -= observer_positions
     # observer_positions = np.tile(np.array([0., 0., 0.]), (velocities.shape[0], 1))
 
@@ -75,6 +92,7 @@ def generate_data(config, parameters):
         # Normalize
         los_unit = los_vec / np.linalg.norm(los_vec, axis=1, keepdims=True)
 
+
         # Convert to RA/DEC
         x, y, z = los_unit.T
 
@@ -85,11 +103,57 @@ def generate_data(config, parameters):
         ra = ra % (2 * torch.pi)
 
         return torch.tensor(np.array(ra), dtype=torch.float32), torch.tensor(np.array(dec), dtype=torch.float32)
-    ra, dec = generate_ra_dec_measurements()
-    sin_ra_meas, cos_ra_meas, sin_dec_meas = torch.sin(ra), torch.cos(ra), torch.sin(dec)
 
-    return ([sin_ra_meas, cos_ra_meas, sin_dec_meas], torch.tensor(observer_positions, dtype=torch.float32),
-            observation_epochs, positions, velocities)
+    ra, dec = generate_ra_dec_measurements()
+    if config['ADD_NOISE'] == 1:
+        def add_noise(ra_rad, dec_rad, config):
+            """
+            Adds Gaussian noise to RA and DEC in radians using PyTorch.
+
+            Args:
+                ra_rad (torch.Tensor): Right Ascension in radians.
+                dec_rad (torch.Tensor): Declination in radians.
+                config (dict): Must contain:
+                    - 'sigma_ra': float, noise stddev in mas
+                    - 'sigma_dec': float, noise stddev in mas
+                    - 'sigma_pointing': float, pointing error in mas
+                    - 'MAS_TO_DEGREE': float, conversion factor (1e3 * 3600 = 3.6e6)
+
+            Returns:
+                Tuple[torch.Tensor, torch.Tensor]: Noisy RA and DEC in radians.
+            """
+            # Total noise in mas
+            sigma_ra_mas = torch.sqrt(torch.tensor(config['sigma_ra'] ** 2 + config['sigma_pointing'] ** 2))
+            sigma_dec_mas = torch.sqrt(torch.tensor(config['sigma_dec'] ** 2 + config['sigma_pointing'] ** 2))
+
+            # Convert to degrees
+            sigma_ra_deg = sigma_ra_mas / config['MAS_TO_DEGREE']
+            sigma_dec_deg = sigma_dec_mas / config['MAS_TO_DEGREE']
+
+            # Convert to radians
+            sigma_ra_rad = torch.deg2rad(sigma_ra_deg)
+            sigma_dec_rad = torch.deg2rad(sigma_dec_deg)
+
+            # Generate noise
+            ra_noise = torch.normal(mean=0.0, std=sigma_ra_rad, size=ra_rad.shape)
+            dec_noise = torch.normal(mean=0.0, std=sigma_dec_rad, size=dec_rad.shape)
+
+            # Apply noise
+            ra_noisy = (ra_rad + ra_noise) % (2 * torch.pi)
+            dec_noisy = torch.clamp(dec_rad + dec_noise, min=-torch.pi / 2, max=torch.pi / 2)
+
+            return ra_noisy, dec_noisy, sigma_ra_deg, sigma_dec_deg
+        ra_m, dec_m, sigma_ra_deg, sigma_dec_deg = add_noise(ra, dec, config)
+    else:
+        ra_m, dec_m = ra.clone(), dec.clone()
+        sigma_ra_deg = 0.
+        sigma_dec_deg = 0.
+
+    sin_ra_meas, cos_ra_meas, sin_dec_meas, cos_dec_meas = torch.sin(ra_m), torch.cos(ra_m), torch.sin(dec_m), torch.cos(dec_m)
+
+    return ([sin_ra_meas, cos_ra_meas, sin_dec_meas, cos_dec_meas], torch.tensor(observer_positions, dtype=torch.float32),
+            observation_epochs, positions, velocities, ra, dec, sigma_ra_deg, sigma_dec_deg, file)
+
 
 
 ####
@@ -97,15 +161,13 @@ def generate_data(config, parameters):
 ####
 
 def sample_time_points(
-    method: Literal["lhs", "uniform", "gaussian"],
-    observation_epochs: np.ndarray,
-    delta: float,
-    num_points: int,
-    mean: float = None,
-    std: float = None,
-    layer_ratios: List[Tuple[float, float]] = None,  # Only used for lhs and random_uniform
+        method: Literal["lhs", "uniform", "gaussian"],
+        observation_epochs: np.ndarray,
+        delta: float,
+        num_points: int,
+        layer_ratios: List[Tuple[float, float]] = None,  # Only used for lhs and random_uniform
         config=None,
-    seed: Union[int, None] = None
+        seed: Union[int, None] = None
 ) -> np.ndarray:
     """
     Generate time samples using specified strategy, including observation epochs.
@@ -132,6 +194,9 @@ def sample_time_points(
     domain_start = t0 - delta
     domain_end = tN + delta
     layer_bounds = [(t0 - delta, t0), (t0, tN), (tN, tN + delta)]
+
+    mean = t0 + (tN - t0) / 2
+    std = (tN - t0) / config['gaussian_std_scale']
 
     # Number of additional points to sample
     n_obs = len(observation_epochs)
@@ -183,12 +248,12 @@ def sample_time_points(
                         samples = np.array([(layer_start + layer_end) / 2])
                     else:
                         samples = np.linspace(layer_start, layer_end, n, endpoint=False) + (layer_end - layer_start) / (
-                                    2 * n)
+                                2 * n)
 
-            else:
-                raise ValueError(f"Unsupported method: {method}")
+                else:
+                    raise ValueError(f"Unsupported method: {method}")
 
-            all_samples.append(samples)
+                all_samples.append(samples)
 
         additional_samples = np.concatenate(all_samples) if all_samples else np.array([])
 
@@ -229,10 +294,10 @@ def epoch_normalization(epoch, z_range, configuration):
 
 
 def run(data, config, parameters):
-
     # get the collocation points
     colloc_points = sample_time_points(parameters['SAMPLING_METHOD'], data[2], parameters['TIME_DELTA'].value,
-                                       parameters['TOTAL_POINTS'], layer_ratios=parameters['LAYER_RATIOS'], config=config)
+                                       parameters['TOTAL_POINTS'], layer_ratios=parameters['LAYER_RATIOS'],
+                                       config=config)
 
     # normalize epochs (inputs)
     epochs_nd_norm, c = epoch_normalization(colloc_points, parameters['INPUT_RANGE'], config)
@@ -242,10 +307,27 @@ def run(data, config, parameters):
     obs_mask = np.isin(colloc_points, data[2])
     obs_indices = np.where(obs_mask)[0]
 
-    return solve(epochs_nd_norm_reshaped_tensor, data[0], obs_indices, data[1], colloc_points, c, config, parameters)
+    data_df, positions, velocities, nlls_start, final_positions, final_velocities, comp_time = solve(epochs_nd_norm_reshaped_tensor, data[0], obs_indices, data[1], colloc_points, c, config, parameters)
+
+    # true positions
+    mu = config['SYSTEM_MASS_PARAMETER']
+    asteroid_ini_pos = data[3][0, :]
+    asteroid_ini_vel = data[4][0, :]
+    ini_state = np.concatenate([asteroid_ini_pos, asteroid_ini_vel])
+    phi_0 = np.eye(6)  # initial Phi (state transition matrix)
+    state = np.hstack((np.array(ini_state), phi_0.ravel()))
+    num_points = 1000
+    epochs = np.linspace(data[2][0], data[2][-1], num_points)
+    res = odeint(nbody.cr3bp, state, epochs, args=(mu,))
+    asteroid_cr3bp_position = np.array(res[:, :3])
+    asteroid_cr3bp_velocity = np.array(res[:, 3:])
+
+    return data_df, positions, velocities, nlls_start, final_positions, final_velocities, asteroid_cr3bp_position, asteroid_cr3bp_velocity, epochs, comp_time
 
 
-def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions, colloc_epochs, c, configuration, parameters):
+def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions, colloc_epochs, c, configuration,
+          parameters):
+
 
     lambda_phys = parameters['PHYSICS_WEIGHT']
     q = 3
@@ -258,11 +340,17 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
 
     data_losses = []
     physics_losses = []
+    range_losses = []
     positions = []
     velocities = []
     total_its = [0]
+    global_its = [0]
+    epsilon = [0]
+    global_positions = []
+    nlls_start = [0]
+    first = [0]
 
-    def compute_hidden_activations():
+    def compute_hidden_activations(input_z):
         """
         :param activation:
         :param z: shape (d, 1)
@@ -270,12 +358,14 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
         :param b: shape (H,)
         :return: H, H_prime, H_double_prime
         """
-        z_proj = W @ epochs_nd_norm_reshaped_tensor.T + b[:, None]  # (H, d)
+        z_proj = W @ input_z.T + b[:, None]  # (H, d)
         H = torch.tanh(z_proj)
         H_prime = (1 - H ** 2) * W  # (H, d)
         H_double_prime = -2 * H * (1 - H ** 2) * (W ** 2)  # (H, d)
+
         return H.T, H_prime.T, H_double_prime.T  # shapes: (d, H)
-    H_matrix, H_dot, H_ddot = compute_hidden_activations()
+
+    H_matrix, H_dot, H_ddot = compute_hidden_activations(epochs_nd_norm_reshaped_tensor)
 
     # === Residual Function for Least Squares ===
     def residual_function(beta_flat):
@@ -286,9 +376,14 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
 
         Y_pred_obs = Y_pred[obs_indices]
         Y_dot_pred_obs = Y_dot_pred[obs_indices]
-        s = configuration['CR3BP_SCALE_FACTOR']
-        positions.append((Y_pred_obs.detach().cpu().detach() + observer_positions * s)  / s)  # undo scaling and move to original cr3bp frame
-        velocities.append(Y_dot_pred_obs.detach().cpu().detach() / s)
+        positions.append(
+            (Y_pred_obs + observer_positions).detach().cpu().numpy())  # undo scaling and move to original cr3bp frame
+        velocities.append(Y_dot_pred_obs.detach().cpu().numpy())
+
+
+        if first[0] == 0:
+            nlls_start[0] = total_its[0]
+            first[0] = 1
         total_its[0] += 1
 
         def ra_dec_observation_residual():
@@ -327,11 +422,12 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
                 return ra_topo, dec_topo
 
             ra_predicted, dec_predicted = generate_ra_dec_from_gcrs()
-            sin_ra_predicted, cos_ra_predicted, sin_dec_predicted = (torch.sin(ra_predicted),
-                                                                     torch.cos(ra_predicted),
-                                                                     torch.sin(dec_predicted))
+            sin_ra_predicted, cos_ra_predicted, sin_dec_predicted, cos_dec_predicted = (torch.sin(ra_predicted),
+                                                                                        torch.cos(ra_predicted),
+                                                                                        torch.sin(dec_predicted),
+                                                                                        torch.cos(dec_predicted))
 
-            Y_pred_ang = torch.stack([sin_ra_predicted, cos_ra_predicted, sin_dec_predicted], dim=1)
+            Y_pred_ang = torch.stack([sin_ra_predicted, cos_ra_predicted, sin_dec_predicted, cos_dec_predicted], dim=1)
             Y_obs = torch.stack(y_obs, dim=1)
 
             # Compute MSE between predicted and observed [sin RA, cos RA, sin DEC]
@@ -365,27 +461,33 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
                 Flattened residuals between the predicted accelerations and the CR3BP model accelerations.
             """
             mu = configuration['SYSTEM_MASS_PARAMETER']
-            s = configuration['CR3BP_SCALE_FACTOR']
-            observer_position = torch.tensor([1. - mu, 0., 0.], dtype=Y_predicted.dtype) * s
+            observer_position = torch.tensor([1. - mu, 0., 0.], dtype=Y_predicted.dtype)
             observer_positions = observer_position.unsqueeze(0).repeat(Y_predicted.shape[0], 1)
 
-            Y_predicted += observer_positions  # move back to original
-            Y_predicted /= s
-            Y_dot_predicted /= s
-            Y_ddot_predicted /= s
-            x = Y_predicted[:, 0]
-            y = Y_predicted[:, 1]
-            z = Y_predicted[:, 2]
+            Y_predict = Y_predicted + observer_positions  # move back to original
+            x = Y_predict[:, 0]
+            y = Y_predict[:, 1]
+            z = Y_predict[:, 2]
             vx = Y_dot_predicted[:, 0]
             vy = Y_dot_predicted[:, 1]
             vz = Y_dot_predicted[:, 2]
 
-            dUdx = -(mu * (mu + x - 1)) / torch.pow(((mu + x - 1) ** 2 + y ** 2 + z ** 2), (3 / 2)) - \
-                   ((1 - mu) * (mu + x)) / torch.pow(((mu + x) ** 2 + y ** 2 + z ** 2), (3 / 2)) + x
-            dUdy = - (mu * y) / torch.pow(((mu + x - 1) ** 2 + y ** 2 + z ** 2), (3 / 2)) - \
-                   ((1 - mu) * y) / torch.pow(((mu + x) ** 2 + y ** 2 + z ** 2), (3 / 2)) + y
-            dUdz = - (mu * z) / torch.pow(((mu + x - 1) ** 2 + y ** 2 + z ** 2), (3 / 2)) - \
-                   ((1 - mu) * z) / torch.pow(((mu + x) ** 2 + y ** 2 + z ** 2), (3 / 2))
+            # alpha = 10.0  # slope control
+            # epsilon_0 = np.power(10, -float(2))
+            # N = parameters['NUMBER_OF_ITERATIONS']
+            # i = global_its[0]
+            # fraction = (N - 1 - i) / (N - 1)
+            # epsilon[0] = epsilon_0 * fraction ** alpha
+            epsilon[0] = 0  # 1e-2 # np.power(10, -float(4))
+            # epsilon[0] = epsilon_0  * (1 - i / (N - 1))
+            r_2 = torch.sqrt((mu + x - 1) ** 2 + y ** 2 + z ** 2) + epsilon[0]
+            r_1 = torch.sqrt((mu + x) ** 2 + y ** 2 + z ** 2)
+            dUdx = -(mu * (mu + x - 1)) / torch.pow(r_2, 3) - \
+                   ((1 - mu) * (mu + x)) / torch.pow(r_1, 3) + x
+            dUdy = - (mu * y) / torch.pow(r_2, 3) - \
+                   ((1 - mu) * y) / torch.pow(r_1, 3) + y
+            dUdz = - (mu * z) / torch.pow(r_2, 3) - \
+                   ((1 - mu) * z) / torch.pow(r_1, 3)
 
             dxdt = vx  # derivative of position is velocity
             dydt = vy
@@ -405,9 +507,6 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
         data_losses.append((torch.mean(obs_residual ** 2)).item())
         physics_losses.append(lambda_phys * (torch.mean(physics_residual ** 2)).item())
 
-        print("Obs res:", torch.norm(obs_residual).item(), "Phys res:", torch.norm(physics_residual).item())
-        print(Y_pred[obs_indices][0].cpu().detach())
-
         return torch.cat([obs_residual, lambda_phys * physics_residual])  # total residual vector
 
     # === Autograd version of residual and Jacobian ===
@@ -425,19 +524,83 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
         J = jacobian(wrapped, beta_flat)  # shape: (n_residuals, n_params)
         return J.detach().numpy()
 
-    beta0 = np.random.rand(q * H_size) * configuration['WEIGHT_SCALE_FACTOR']
+    beta0 = np.random.rand(q * H_size)
 
+    start = time.time()
     # === Solve with SciPy ===
     res2 = least_squares(
         fun=residual_np,
         x0=beta0,
         jac=jacobian_np,
         verbose=2,
-        method='lm',  # or 'trf', depending on structure
-        xtol=parameters['X_TOLERANCE']
+        method='trf',
+        xtol=parameters['X_TOLERANCE'],
+        ftol=parameters['F_TOLERANCE'],
+        max_nfev=parameters['MAX_NFEV']
     )
+    end = time.time()
+
+    beta_tensor_bh = np.asarray(res2.x).reshape(q, H_size)
+    Y_pred_bh = H_matrix @ beta_tensor_bh.T  # (N, q)
+    Y_dot_pred_bh = c * H_dot @ beta_tensor_bh.T
+
+    Y_pred_obs_bh = Y_pred_bh[obs_indices]
+    Y_dot_pred_obs_bh = Y_dot_pred_bh[obs_indices]
+    positions[-2] = ((Y_pred_obs_bh + observer_positions).detach().cpu().numpy())
+    velocities[-2] = Y_dot_pred_obs_bh.detach().cpu().numpy()
+
+    beta_tensor_nlls = np.asarray(res2.x).reshape(q, H_size)
+    Y_pred_nlls = H_matrix @ beta_tensor_nlls.T  # (N, q)
+    Y_dot_pred_nlls = c * H_dot @ beta_tensor_nlls.T
+
+    Y_pred_obs_nlls = Y_pred_nlls[obs_indices]
+    Y_dot_pred_obs_nlls = Y_dot_pred_nlls[obs_indices]
+    positions[-1] = ((Y_pred_obs_nlls + observer_positions).detach().cpu().numpy())
+    velocities[-1] = Y_dot_pred_obs_nlls.detach().cpu().numpy()
+    # print(res.x)
+
+    # for error measurement purposes
+    initial_colloc_epoch = colloc_epochs[0]
+    final_colloc_epoch = colloc_epochs[-1]
+
+    initial_obs_epoch = colloc_epochs[obs_indices][0]
+    final_obs_epoch = colloc_epochs[obs_indices][-1]
+
+    num_points = 1000
+    test_epochs = np.linspace(initial_obs_epoch, final_obs_epoch, num_points)
+
+    # Combine, ensuring the start and end colloc epochs are at the edges
+    total_test_epochs = np.concatenate((
+        [initial_colloc_epoch],
+        test_epochs,
+        [final_colloc_epoch]
+    ))
+
+    # normalize epochs (inputs)
+    test_epochs_nd_norm, c_test = epoch_normalization(total_test_epochs, parameters['INPUT_RANGE'], configuration)
+    tests_epochs_nd_norm_reshaped_tensor = torch.tensor(test_epochs_nd_norm, dtype=torch.float32).unsqueeze(1)
+
+    H_test, H_dot_test, H_ddot_test = compute_hidden_activations(tests_epochs_nd_norm_reshaped_tensor)
+
+    test_Y_pred_bh = H_test @ beta_tensor_bh.T  # (N, q)
+    test_Y_dot_pred_bh = c_test * H_dot_test @ beta_tensor_bh.T
+
+    test_Y_pred_nlls = H_test @ beta_tensor_nlls.T  # (N, q)
+    test_Y_dot_pred_nlls = c_test * H_dot_test @ beta_tensor_nlls.T
+
+    mu = configuration['SYSTEM_MASS_PARAMETER']
+    observer_position_final = torch.tensor([1. - mu, 0., 0.], dtype=test_Y_pred_nlls.dtype)
+    observer_positions_final = observer_position_final.unsqueeze(0).repeat(test_Y_pred_nlls.shape[0], 1)
+
+    final_positions_all_nlls = (test_Y_pred_nlls + observer_positions_final).detach().cpu().numpy()
+    final_velocities_all_nlls = (test_Y_dot_pred_nlls).detach().cpu().numpy()
+    final_positions_all_bh = (test_Y_pred_bh + observer_positions_final).detach().cpu().numpy()
+    final_velocities_all_bh = (test_Y_dot_pred_bh).detach().cpu().numpy()
+
+    final_positions = [final_positions_all_nlls, final_positions_all_bh]
+    final_velocities = [final_velocities_all_nlls, final_velocities_all_bh]
 
     epochss = np.arange(total_its[0])
     data = {"TRAINING_EPOCH": epochss, "DATA_LOSS": data_losses, "PHYSICS_LOSS": physics_losses}
 
-    return pd.DataFrame(data), positions, velocities
+    return pd.DataFrame(data), positions, velocities, nlls_start[0], final_positions, final_velocities, end-start

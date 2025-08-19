@@ -1014,201 +1014,6 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
     res = basinhopping(func, beta0, minimizer_kwargs=minimizer_kwargs, niter=parameters['NUMBER_OF_ITERATIONS'],
                        stepsize=parameters['STEPSIZE'], T=parameters['TEMPERATURE'], callback=callback, take_step=mystep, disp=True)
 
-    # === Residual Function for Least Squares ===
-    def residual_function(beta_flat):
-        beta_tensor = beta_flat.view(q, H_size)
-
-        Y_pred = H_matrix @ beta_tensor.T  # (N, q)
-        Y_dot_pred = c * H_dot @ beta_tensor.T
-
-        Y_pred_obs = Y_pred[obs_indices]
-        Y_dot_pred_obs = Y_dot_pred[obs_indices]
-        positions.append(
-            (Y_pred_obs + observer_positions).detach().cpu().numpy())  # undo scaling and move to original cr3bp frame
-        velocities.append(Y_dot_pred_obs.detach().cpu().numpy())
-
-
-        if first[0] == 0:
-            nlls_start[0] = total_its[0]
-            first[0] = 1
-        total_its[0] += 1
-
-        def ra_dec_observation_residual():
-            """
-            Computes the MSE between observed and predicted [sin(RA), cos(RA), sin(DEC)].
-
-            :param Y_pred: (N, 3) geocentric non-dim predicted positions [x, y, z] in units of 3 Earth Hill Radii
-            :param Y_obs: (N, 3) observations as [sin(RA), cos(RA), sin(DEC)]
-            :param spacecraft_pos: (N, 3) spacecraft geo positions (KM) - used to get observer-to-target vector
-            :return: residual between predicted and observed angular vectors
-            """
-
-            def generate_ra_dec_from_gcrs():
-                """
-                Inputs:
-                    Y_pred_gcrs_km: (N, 3) predicted satellite positions (GCRS, km)
-                    observation_times: (N,) in seconds (e.g., since t0) — torch.Tensor
-                    observatory_choices: list of dicts per time with 'lat', 'lon', 'elev' (in meters)
-
-                Returns:
-                    ra_pred: (N,) RA in degrees
-                    dec_pred: (N,) DEC in degrees
-                """
-
-                topocentric_los_vec = Y_pred_obs  # (N, 3), predict observer centered at origin
-
-                # Normalize
-                los_unit_topo = topocentric_los_vec / torch.norm(topocentric_los_vec, dim=1, keepdim=True)
-
-                # Convert to RA/DEC
-                x_topo, y_topo, z_topo = los_unit_topo[:, 0], los_unit_topo[:, 1], los_unit_topo[:, 2]
-                ra_topo = torch.arctan2(y_topo, x_topo)
-                dec_topo = torch.arcsin(z_topo)
-                # Normalize RA to [0, 360)
-                ra_topo = ra_topo % (2 * torch.pi)
-                return ra_topo, dec_topo
-
-            ra_predicted, dec_predicted = generate_ra_dec_from_gcrs()
-            sin_ra_predicted, cos_ra_predicted, sin_dec_predicted, cos_dec_predicted = (torch.sin(ra_predicted),
-                                                                                        torch.cos(ra_predicted),
-                                                                                        torch.sin(dec_predicted),
-                                                                                        torch.cos(dec_predicted))
-
-            Y_pred_ang = torch.stack([sin_ra_predicted, cos_ra_predicted, sin_dec_predicted, cos_dec_predicted], dim=1)
-            Y_obs = torch.stack(y_obs, dim=1)
-
-            # Compute MSE between predicted and observed [sin RA, cos RA, sin DEC]
-            obs_res = (Y_pred_ang - Y_obs).reshape(-1)
-
-            return obs_res
-
-        obs_residual = ra_dec_observation_residual()  # (N * q)
-
-        Y_ddot_pred = c ** 2 * (H_ddot @ beta_tensor.T)  # (N, q)
-
-        def cr3bp_physics_residual(Y_predicted, Y_dot_predicted, Y_ddot_predicted, configuration):
-            """
-            Computes the physics residual based on CR3BP (Circular Restricted Three-Body Problem) dynamics.
-
-            Parameters
-            ----------
-            Y_predicted : torch.Tensor of shape (N, 3)
-                Predicted non-dimensional asteroid positions (in the synodic frame).
-            Y_ddot_predicted : torch.Tensor of shape (N, 3)
-                Predicted non-dimensional asteroid accelerations (second time derivatives).
-            configuration : dict
-                Dictionary containing:
-                    - 'MU': float, mass parameter (μ = m_secondary / (m_primary + m_secondary)).
-                    - 'L': float, characteristic length (used for non-dimensionalization).
-                    - Optionally 'MU_UNIT': float, gravitational parameter in dimensional units (ignored here if non-dimensional).
-
-            Returns
-            -------
-            torch.Tensor of shape (N * 3,)
-                Flattened residuals between the predicted accelerations and the CR3BP model accelerations.
-            """
-            mu = configuration['SYSTEM_MASS_PARAMETER']
-            observer_position = torch.tensor([1. - mu, 0., 0.], dtype=Y_predicted.dtype)
-            observer_positions = observer_position.unsqueeze(0).repeat(Y_predicted.shape[0], 1)
-
-            Y_predict = Y_predicted + observer_positions  # move back to original
-            x = Y_predict[:, 0]
-            y = Y_predict[:, 1]
-            z = Y_predict[:, 2]
-            vx = Y_dot_predicted[:, 0]
-            vy = Y_dot_predicted[:, 1]
-            vz = Y_dot_predicted[:, 2]
-
-            # alpha = 10.0  # slope control
-            # epsilon_0 = np.power(10, -float(2))
-            # N = parameters['NUMBER_OF_ITERATIONS']
-            # i = global_its[0]
-            # fraction = (N - 1 - i) / (N - 1)
-            # epsilon[0] = epsilon_0 * fraction ** alpha
-            epsilon[0] = 0  # 1e-2 # np.power(10, -float(4))
-            # epsilon[0] = epsilon_0  * (1 - i / (N - 1))
-            r_2 = torch.sqrt((mu + x - 1) ** 2 + y ** 2 + z ** 2) + epsilon[0]
-            r_1 = torch.sqrt((mu + x) ** 2 + y ** 2 + z ** 2)
-            dUdx = -(mu * (mu + x - 1)) / torch.pow(r_2, 3) - \
-                   ((1 - mu) * (mu + x)) / torch.pow(r_1, 3) + x
-            dUdy = - (mu * y) / torch.pow(r_2, 3) - \
-                   ((1 - mu) * y) / torch.pow(r_1, 3) + y
-            dUdz = - (mu * z) / torch.pow(r_2, 3) - \
-                   ((1 - mu) * z) / torch.pow(r_1, 3)
-
-            dxdt = vx  # derivative of position is velocity
-            dydt = vy
-            dzdt = vz
-            ax = dUdx + 2 * dydt  # derivative of velocity is acceleration
-            ay = dUdy - 2 * dxdt
-            az = dUdz
-
-            true_accel = torch.stack((ax, ay, az), dim=1)  # (N, 3)
-
-            residual = Y_ddot_predicted - true_accel  # (N, 3)
-
-            return residual.reshape(-1)
-
-        physics_residual = cr3bp_physics_residual(Y_pred, Y_dot_pred, Y_ddot_pred, configuration)
-
-        def distance_penalty(Y_predicted):
-            return torch.sum(Y_predicted ** 2, dim=1).reshape(-1)
-
-        lambda_dis = 1e0
-        dist_res = distance_penalty(Y_pred)
-
-        data_losses.append((torch.mean(obs_residual ** 2)).item())
-        physics_losses.append(lambda_phys * (torch.mean(physics_residual ** 2)).item())
-        range_losses.append(lambda_dis * torch.mean(dist_res).item())
-
-        # return torch.cat([obs_residual, lambda_phys * physics_residual, lambda_dis * dist_res])
-
-        return torch.cat([obs_residual / np.sqrt(len(obs_residual)), lambda_phys * physics_residual / np.sqrt(len(physics_residual)),
-                          lambda_dis * dist_res / np.sqrt(len(dist_res))])
-
-    def residual_np(beta_flat_np):
-        beta_flat = torch.tensor(beta_flat_np, dtype=torch.float32, requires_grad=True)
-        res = residual_function(beta_flat)
-        return res.detach().numpy()
-
-    def jacobian_np(beta_flat_np):
-        beta_flat = torch.tensor(beta_flat_np, dtype=torch.float32, requires_grad=True)
-
-        def wrapped(beta):
-            return residual_function(beta)
-
-        J = jacobian(wrapped, beta_flat)  # shape: (n_residuals, n_params)
-        return J.detach().numpy()
-
-    def bounded_around(beta0, percent=0.01, min_step=1e-8):
-        beta0 = np.asarray(beta0)
-        delta = np.maximum(np.abs(beta0) * percent, min_step)
-
-        lower = beta0 - delta
-        upper = beta0 + delta
-
-        # ensure lower < upper elementwise
-        lower_bound = np.minimum(lower, upper)
-        upper_bound = np.maximum(lower, upper)
-
-        # if beta0[i] == 0 → [-min_step, +min_step]
-        return (lower_bound, upper_bound)
-
-
-    beta00 = res.x
-    bounds = bounded_around(beta00, percent=0.99)
-    # Solve least-squares
-    res2 = least_squares(
-        fun=residual_np,
-        x0=beta00,
-        jac=jacobian_np,
-        verbose=2,
-        method='trf',
-        xtol=parameters['X_TOLERANCE'],
-        ftol=parameters['F_TOLERANCE'],
-        max_nfev=parameters['MAX_NFEV'],
-        bounds=bounds
-    )
 
     beta_tensor_bh = np.asarray(res.x).reshape(q, H_size)
     Y_pred_bh = H_matrix @ beta_tensor_bh.T  # (N, q)
@@ -1219,7 +1024,7 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
     positions[-2] = ((Y_pred_obs_bh + observer_positions).detach().cpu().numpy())
     velocities[-2] = Y_dot_pred_obs_bh.detach().cpu().numpy()
 
-    beta_tensor_nlls = np.asarray(res2.x).reshape(q, H_size)
+    beta_tensor_nlls = np.asarray(res.x).reshape(q, H_size)
     Y_pred_nlls = H_matrix @ beta_tensor_nlls.T  # (N, q)
     Y_dot_pred_nlls = c * H_dot @ beta_tensor_nlls.T
 
@@ -1263,9 +1068,9 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
     observer_positions_final = observer_position_final.unsqueeze(0).repeat(test_Y_pred_nlls.shape[0], 1)
 
     final_positions_all_nlls = (test_Y_pred_nlls + observer_positions_final).detach().cpu().numpy()
-    final_velocities_all_nlls = (test_Y_dot_pred_nlls).detach().cpu().numpy()
+    final_velocities_all_nlls = (test_Y_dot_pred_nlls + observer_positions_final).detach().cpu().numpy()
     final_positions_all_bh = (test_Y_pred_bh + observer_positions_final).detach().cpu().numpy()
-    final_velocities_all_bh = (test_Y_dot_pred_bh).detach().cpu().numpy()
+    final_velocities_all_bh = (test_Y_dot_pred_bh + observer_positions_final).detach().cpu().numpy()
 
     final_positions = [final_positions_all_nlls, final_positions_all_bh]
     final_velocities = [final_velocities_all_nlls, final_velocities_all_bh]
