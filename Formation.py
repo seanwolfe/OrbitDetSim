@@ -1,11 +1,6 @@
 import pandas as pd
 import numpy as np
-# from mpi4py.futures.aplus import catch
-
 from Spacecraft import Spacecraft
-import matplotlib.pyplot as plt
-import yaml
-from matplotlib.ticker import MaxNLocator
 
 class Formation:
     def __init__(self, configs):

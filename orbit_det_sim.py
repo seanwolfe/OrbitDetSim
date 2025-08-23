@@ -2,8 +2,6 @@ import torch
 import yaml
 import os
 import pandas as pd
-
-
 from Asteroid import Asteroid
 from Formation import Formation
 import numpy as np
@@ -15,6 +13,7 @@ import spiceypy as sp
 import utilities as util
 import n_body_integrator as nbody
 import argparse
+import itertools
 
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
@@ -1038,17 +1037,17 @@ def run_IOD_testing(config):
 
             elif dynamics == 'CR3BP' and observer == 'GROUND' and optimizer == 'NLLS':
                 import  PIELM_nlls_periodicorbits_earth_cr3bp as pielm_cgn
-                parameters = {'NUMBER_OF_OBSERVATIONS': 100, 'OBSERVATION_TIME_FRACTION': 0.5,
-                              'TIME_DELTA': 0.1 * u.day,
-                              'TOTAL_POINTS': 250, 'SAMPLING_METHOD': "uniform",
-                              'LAYER_RATIOS': [(0., 1 / 4), (1 / 4, 3 / 4), (3 / 4, 1.)], 'INPUT_RANGE': (-1, 1),
+                parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5,
+                              'TIME_DELTA': 0.5 * u.day,
+                              'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
+                              'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
                               'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': 1, 'STEPSIZE': 10, 'NUMBER_OF_ITERATIONS': 500, 'TEMPERATURE': 1000,
+                              'PHYSICS_WEIGHT': 1e3, 'STEPSIZE': 10, 'NUMBER_OF_ITERATIONS': 500, 'TEMPERATURE': 1000,
                               'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000,
-                              'MAX_ITERATiONS': 20000,
-                              'G_TOLERANCE': 1e-15,
+                              'MAX_ITERATiONS': 20000, 'WEIGHT_SCALE_FACTOR': 1e0,
+                              'G_TOLERANCE': 1e-15, 'MAX_NFEV': 1000,
                               'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 95}
+                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': run_idx}
                 if config['orbit'] == 'Horizontal Lyapunov Orbits':
                     data = pielm_cgn.generate_data(config, parameters)
                 elif config['orbit'] == 'Halo Orbits':
@@ -1057,18 +1056,315 @@ def run_IOD_testing(config):
                 else:
                     parameters['ORBIT_TYPE'] = 'Vertical Lyapunov Orbits'
                     data = pielm_cgn.generate_data(config, parameters)
-                results, positions, velocities = pielm_cgn.run(data, config, parameters)
+                results, positions, velocities, nlls_start, final_pos, final_vel, true_pos, true_vel, epochs, comp_time = pielm_cgn.run(data, config, parameters)
 
             elif dynamics == 'CR3BP' and observer == 'GROUND' and optimizer == 'SGD':
                 import  PIELM_sgd_periodicorbits_earth_cr3bp as pielm_cgs
                 parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5, 'TIME_DELTA': 0.5 * u.day,
                               'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
                               'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
-                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 100000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': 1e-2, 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1,
+                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 100000, 'LEARNING_RATE': 1e-2,
+                              'PHYSICS_WEIGHT': 1e1, 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1,
+                              'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'G_TOLERANCE': 1e-15, 'WEIGHT_SCALE_FACTOR': 1e0,
+                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
+                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': run_idx
+                               }
+                if config['orbit'] == 'Horizontal Lyapunov Orbits':
+                    data = pielm_cgs.generate_data(config, parameters)
+                elif config['orbit'] == 'Halo Orbits':
+                    parameters['ORBIT_TYPE'] = 'Halo Orbits'
+                    data = pielm_cgs.generate_data(config, parameters)
+                else:
+                    parameters['ORBIT_TYPE'] = 'Vertical Lyapunov Orbits'
+                    data = pielm_cgs.generate_data(config, parameters)
+                results, positions, velocities, nlls_start, final_pos, final_vel, true_pos, true_vel, epochs, comp_time = pielm_cgs.run(data, config, parameters)
+
+            elif dynamics == 'CR3BP' and observer == 'GROUND' and optimizer == 'CONSTRAINED_BASIN_HOPPING':
+                import PIELM_basinhopping_w_range_cr3bp as pielm_cgcb
+                parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5,
+                              'TIME_DELTA': 0.5 * u.day,
+                              'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
+                              'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
+                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
+                              'PHYSICS_WEIGHT': 1e3, 'LAMBDA_DIST':1e-1, 'STEPSIZE': np.power(10, float(1)),
+                              'NUMBER_OF_ITERATIONS': 100, 'TEMPERATURE': 1e-6,
+                              'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000,
+                              'MAX_ITERATiONS': 20000, 'TARGET_ACCEPT_RATE': 0.5, 'STEPWISE_FACTOR': 0.9,
+                              'G_TOLERANCE': 1e-15, 'MAX_NFEV': 100, 'WEIGHT_SCALE_FACTOR': 1e0,
+                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
+                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': run_idx,
+                              'MIN_RHO': 1e-4, 'MAX_RHO': 1e-1, 'MIN_RHO_DOT': -1.01e0, 'MAX_RHO_DOT': 1.01e0,
+                              'DELTA_RHO': 1e-2, 'DELTA_RHO_DOT': 0.067, 'INITIAL_TRAJECTORIES': 1}
+                config['lambda'] = parameters['STEPSIZE']
+                config['run_idx'] = run_idx
+                if config['orbit'] == 'Horizontal Lyapunov Orbits':
+                    data = pielm_cgcb.generate_data(config, parameters)
+                elif config['orbit'] == 'Halo Orbits':
+                    parameters['ORBIT_TYPE'] = 'Halo Orbits'
+                    data = pielm_cgcb.generate_data(config, parameters)
+                else:
+                    parameters['ORBIT_TYPE'] = 'Vertical Lyapunov Orbits'
+                    data = pielm_cgcb.generate_data(config, parameters)
+                results, positions, velocities, nlls_start, final_pos, final_vel, true_pos, true_vel, epochs, comp_time = pielm_cgcb.run(
+                    data, config, parameters)
+
+            elif dynamics == 'NBD' and observer == 'SPACE' and optimizer == 'NLLS':
+                import PIELM_nlls_tbo_space_nbody as pielm_nstn
+                parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5,
+                              'TIME_DELTA': 0.5 * u.day,
+                              'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
+                              'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
+                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
+                              'PHYSICS_WEIGHT': 1e3, 'STEPSIZE': 10, 'NUMBER_OF_ITERATIONS': 500, 'TEMPERATURE': 1000,
+                              'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000,
+                              'MAX_ITERATiONS': 20000,
+                              'G_TOLERANCE': 1e-15, 'MAX_NFEV': 1000,
+                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
+                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 4}
+                config['lambda'] = parameters['PHYSICS_WEIGHT']
+                config['run_idx'] = run_idx
+                data = pielm_nstn.generate_data(config, parameters)
+                results, positions, velocities, nlls_start, final_pos, final_vel, true_pos, true_vel, epochs, comp_time = pielm_nstn.run(data, config, parameters)
+
+            elif dynamics == 'NBD' and observer == 'SPACE' and optimizer == 'SGD':
+                import PIELM_sgd_tbo_space_nbody as pielm_nsts
+                parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5,
+                              'TIME_DELTA': 0.5 * u.day,
+                              'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
+                              'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
+                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 5000, 'LEARNING_RATE': 1e-2,
+                              'PHYSICS_WEIGHT': 1e3, 'STEPSIZE': 10, 'NUMBER_OF_ITERATIONS': 500, 'TEMPERATURE': 1000,
+                              'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000,
+                              'MAX_ITERATiONS': 20000,
+                              'G_TOLERANCE': 1e-15, 'MAX_NFEV': 1000,
+                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
+                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 4}
+                config['lambda'] = parameters['PHYSICS_WEIGHT']
+                config['run_idx'] = run_idx
+                data = pielm_nsts.generate_data(config, parameters)
+                results, positions, velocities, nlls_start, final_pos, final_vel, true_pos, true_vel, epochs, comp_time = pielm_nsts.run(data, config, parameters)
+
+
+            elif dynamics == 'NBD' and observer == 'SPACE' and optimizer == 'CONSTRAINED_BASIN_HOPPING':
+                import PIELM_basinhopping_w_range_nbody as pielm_ctsn
+                parameters = {'NUMBER_OF_OBSERVATIONS': 1, 'OBSERVATION_TIME_FRACTION': 0.5,
+                              'TIME_DELTA': 1 * u.day,
+                              'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
+                              'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
+                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
+                              'PHYSICS_WEIGHT': 1e0, 'LAMBDA_DIST':1e0, 'STEPSIZE': 1e0,
+                              'NUMBER_OF_ITERATIONS': 10, 'TEMPERATURE': 1e-6,
+                              'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000,
+                              'MAX_ITERATiONS': 20000, 'TARGET_ACCEPT_RATE': 0.5, 'STEPWISE_FACTOR': 0.9,
+                              'G_TOLERANCE': 1e-15, 'MAX_NFEV':100,
+                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
+                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 4,
+                              'MIN_RHO': 1e-4, 'MAX_RHO': 1e-1, 'MIN_RHO_DOT': -1.01e0, 'MAX_RHO_DOT': 1.01e0,
+                              'DELTA_RHO': 1e-2, 'DELTA_RHO_DOT': 0.067, 'INITIAL_TRAJECTORIES':10}
+                config['lambda'] = parameters['TIME_DELTA']
+                config['run_idx'] = run_idx
+                data = pielm_ctsn.generate_data(config, parameters)
+                results, positions, velocities, nlls_start, final_pos, final_vel, true_pos, true_vel, epochs, comp_time = pielm_ctsn.run(data, config, parameters)
+
+            else:
+                print("Error specifying")
+
+            # c3bp uses non-dim time directly
+            if dynamics == 'CR3BP':
+                epochs_data = data[2]
+            else:
+                epochs_data = [time.tdb.jd for time in data[2]]
+
+            # visualize
+            data_for_df = {"EPOCH(JDTDB)": epochs_data, "GEO_X(KM)": data[3][:, 0],
+                           "GEO_Y(KM)": data[3][:, 1], "GEO_Z(KM)": data[3][:, 2], "GEO_VX(KM/S)": data[4][:, 0],
+                           "GEO_VY(KM/S)": data[4][:, 1], "GEO_VZ(KM/S)": data[4][:, 2],
+                           "SC_GEO_X(KM)": data[1][:, 0],
+                           "SC_GEO_Y(KM)": data[1][:, 1], "SC_GEO_Z(KM)": data[1][:, 2],
+                           "SC_GEO_VX(KM/S)": np.zeros_like(data[1][:, 1]),
+                           "SC_GEO_VY(KM/S)": np.zeros_like(data[1][:, 1]),
+                           "SC_GEO_VZ(KM/S)": np.zeros_like(data[1][:, 1]), 'SIN_RA': data[0][0],
+                           'COS_RA': data[0][1],
+                           'SIN_DEC': data[0][2], "SC_GEO_X(KM)_PHYS": data[1][:, 0],
+                           "SC_GEO_Y(KM)_PHYS": data[1][:, 1],
+                           "SC_GEO_Z(KM)_PHYS": data[1][:, 2], "SC_GEO_VX(KM/S)_PHYS": np.zeros_like(data[1][:, 1]),
+                           "SC_GEO_VY(KM/S)_PHYS": np.zeros_like(data[1][:, 1]),
+                           "SC_GEO_VZ(KM/S)_PHYS": np.zeros_like(data[1][:, 1]), 'SIN_RA_PHYS': data[0][0],
+                           'COS_RA_PHYS': data[0][1], 'SIN_DEC_PHYS': data[0][2]}
+
+            file_used = data[9]
+            file_name = config['dynamics'] + '_' + config['orbit'] + '_' + config['observer'] + '_' + \
+                        config['optimizer'] + '_run_' + str(run_idx) + '.csv'
+
+            os.makedirs(config['error_file_dir'], exist_ok=True)
+            file_path = os.path.join(config['error_file_dir'], file_name)
+            rmse_df = util.generate_iod_file(file_path, final_pos, final_vel, true_pos, true_vel, epochs)
+
+            # Position RMSE (IOD)
+            pos_rmse = np.sqrt(((rmse_df[["IOD_X", "IOD_Y", "IOD_Z"]].values -
+                                 rmse_df[["TRUE_X", "TRUE_Y", "TRUE_Z"]].values) ** 2).mean())
+
+            # Position RMSE (IOD_NLLS)
+            pos_rmse_nlls = np.sqrt(((rmse_df[["IOD_X_NLLS", "IOD_Y_NLLS", "IOD_Z_NLLS"]].values -
+                                      rmse_df[["TRUE_X", "TRUE_Y", "TRUE_Z"]].values) ** 2).mean())
+
+            # Velocity RMSE (IOD)
+            vel_rmse = np.sqrt(((rmse_df[["IOD_VX", "IOD_VY", "IOD_VZ"]].values -
+                                 rmse_df[["TRUE_VX", "TRUE_VY", "TRUE_VZ"]].values) ** 2).mean())
+
+            # Velocity RMSE (IOD_NLLS)
+            vel_rmse_nlls = np.sqrt(((rmse_df[["IOD_VX_NLLS", "IOD_VY_NLLS", "IOD_VZ_NLLS"]].values -
+                                      rmse_df[["TRUE_VX", "TRUE_VY", "TRUE_VZ"]].values) ** 2).mean())
+
+            # Add to parameters
+            parameters['POS_RMSE'] = pos_rmse
+            parameters['POS_RMSE_NLLS'] = pos_rmse_nlls
+            parameters['VEL_RMSE'] = vel_rmse
+            parameters['VEL_RMSE_NLLS'] = vel_rmse_nlls
+            parameters['COMPUTATION_TIME'] = comp_time
+            parameters['FILE_USED'] = file_used
+            parameters['SAVED_AS'] = file_name
+            local_master.append(parameters)
+
+            df = pd.DataFrame(data_for_df)
+            # util.iod_viz(df, results, positions, velocities, nlls_start, config, rmse_df)
+
+    # Convert local list to DataFrame
+    df_local = pd.DataFrame(local_master)
+
+    # Gather all DataFrames at rank 0
+    dfs = comm.gather(df_local, root=0)
+
+    if rank == 0:
+        # Concatenate all into one DataFrame
+        meta_file_name = config['dynamics'] + '_' + config['orbit'] + '_' + config['observer'] + '_' + \
+                    config['optimizer'] + 'meta_data.csv'
+        df_global = pd.concat(dfs, ignore_index=True)
+        df_global.to_csv(meta_file_name, index=False)
+
+    return
+
+
+def run_IOD_hyperparameter(config):
+    # --- MPI setup ---
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    size = comm.Get_size()
+
+    # --- Example hyperparameters ---
+    param1_values = config['physics_weight']
+    param2_values = config['c_wb']
+    param3_values = config['range_weight']
+
+    # Create all hyperparameter combinations
+    hyperparam_combos = list(itertools.product(param1_values, param2_values, param3_values))
+    n_combos = len(hyperparam_combos)
+
+    # Each rank gets a subset of hyperparameter combos (round-robin)
+    local_combos = [combo for i, combo in enumerate(hyperparam_combos) if i % size == rank]
+
+    # Number of repeated runs per combination
+    n_runs = config['n_runs_test']
+
+    local_master = []
+
+    # --- Work loop ---
+    for combo in local_combos:
+        print(f"[Rank {rank}] Running hyperparameter combo {combo}")
+
+        for run_idx in range(n_runs):
+
+            # get case
+            dynamics, orbit, observer, optimizer = config['dynamics'], config['orbit'], config['observer'], config['optimizer']
+            if dynamics == '2BD' and orbit == 'GEO' and observer == 'GROUND' and optimizer == 'SGD':
+                import PIELM_sgd_geo_earth as pielm_2gg
+                parameters = {'NUMBER_OF_OBSERVATIONS': 260, 'OBSERVATION_TIME_FRACTION': 0.5,
+                              'TIME_DELTA': 0.0000000001 * u.day,
+                              'TOTAL_POINTS': 300, 'SAMPLING_METHOD': "uniform",
+                              'LAYER_RATIOS': [(0., 1 / 10000), (1 / 10000, 9999 / 10000), (9999 / 10000, 1.)],
+                              'INPUT_RANGE': (-1, 1),
+                              'HIDDEN_DIMENSION': 20, 'NUMBER_OF_EPOCHS': 100000, 'LEARNING_RATE': 1e-2,
+                              'PHYSICS_WEIGHT': 1e2, 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1,
+                              'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_NFEV': 100,
+                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
+                              'ANOM_PERT': 15.}
+                config['lambda'] = parameters['PHYSICS_WEIGHT']
+                data = pielm_2gg.generate_data(config, parameters)
+                results, positions, velocities, nlls_start, final_pos, final_vel, true_pos, true_vel, epochs, comp_time = pielm_2gg.run(
+                    data, config, parameters)
+
+            elif dynamics == '2BD' and orbit == 'GEO' and observer == 'GROUND' and optimizer == 'NLLS':
+                import  PIELM_nlls_geo_earth as pielm_2ggn
+                parameters = {'NUMBER_OF_OBSERVATIONS': 260, 'OBSERVATION_TIME_FRACTION': 0.5,
+                              'TIME_DELTA': 0.0000000001 * u.day,
+                              'TOTAL_POINTS': 300, 'SAMPLING_METHOD': "uniform",
+                              'LAYER_RATIOS': [(0., 1 / 10000), (1 / 10000, 9999 / 10000), (9999 / 10000, 1.)],
+                              'INPUT_RANGE': (-1, 1),
+                              'HIDDEN_DIMENSION': 20, 'NUMBER_OF_EPOCHS': 50000, 'LEARNING_RATE': 1e-1,
+                              'PHYSICS_WEIGHT': 1e0, 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1,
+                              'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_NFEV': 100,
+                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
+                              'ANOM_PERT': 15.}
+                config['lambda'] = parameters['PHYSICS_WEIGHT']
+                data = pielm_2ggn.generate_data(config, parameters)
+                results, positions, velocities, nlls_start, final_pos, final_vel, true_pos, true_vel, epochs, comp_time = pielm_2ggn.run(
+                    data, config, parameters)
+
+            elif dynamics == '2BD' and orbit=='GEO' and observer == 'GROUND' and optimizer == 'CONSTRAINED_BASIN_HOPPING':
+                import PIELM_basinhopping_w_range_geo_earth as pielm_2ggcb
+                parameters = {'NUMBER_OF_OBSERVATIONS': 260, 'OBSERVATION_TIME_FRACTION': 0.5,
+                              'TIME_DELTA': 0.0000000001 * u.day,
+                              'TOTAL_POINTS': 300, 'SAMPLING_METHOD': "uniform",
+                              'LAYER_RATIOS': [(0., 1 / 10000), (1 / 10000, 9999 / 10000), (9999 / 10000, 1.)],
+                              'INPUT_RANGE': (-1, 1),
+                              'HIDDEN_DIMENSION': 20, 'NUMBER_OF_EPOCHS': 50000, 'LEARNING_RATE': 1e-1,
+                              'PHYSICS_WEIGHT': 1e2, 'LAMBDA_DIST': 1e-7, 'STEPSIZE': 10e-5,
+                              'NUMBER_OF_ITERATIONS': 100, 'TEMPERATURE': 10e-8,
+                              'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000,
+                              'MAX_ITERATiONS': 20000, 'G_TOLERANCE': 1e-15, 'MAX_NFEV':100,
+                              'A_PERT': 0., 'ECC_PERT': 0., 'INC_PERT': 0., 'RAAN_PERT': 0., 'ARGPER_PERT': 0.,
+                              'ANOM_PERT': 0., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 95 - run_idx,
+                              'MIN_RHO': 1.0976e0, 'MAX_RHO': 2.35157e2, 'MIN_RHO_DOT': -1.2647e0,
+                              'MAX_RHO_DOT': 1.2647e0, 'DELTA_RHO_STEP': 1.5679e0, 'DELTA_RHO_DOT_STEP': 1.265e-1,
+                              'INITIAL_TRAJECTORIES': 1}
+                config['lambda'] = parameters['PHYSICS_WEIGHT']
+                config['run_idx'] = run_idx
+                data = pielm_2ggcb.generate_data(config, parameters)
+                results, positions, velocities, nlls_start, final_pos, final_vel, true_pos, true_vel, epochs, comp_time = pielm_2ggcb.run(data, config, parameters)
+
+            elif dynamics == 'CR3BP' and observer == 'GROUND' and optimizer == 'NLLS':
+                import  PIELM_nlls_periodicorbits_earth_cr3bp as pielm_cgn
+                parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5,
+                              'TIME_DELTA': 0.5 * u.day,
+                              'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
+                              'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
+                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
+                              'PHYSICS_WEIGHT': combo[0], 'STEPSIZE': 10, 'NUMBER_OF_ITERATIONS': 500, 'TEMPERATURE': 1000,
+                              'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000,
+                              'MAX_ITERATiONS': 20000, 'WEIGHT_SCALE_FACTOR': combo[1],
+                              'G_TOLERANCE': 1e-15, 'MAX_NFEV': 1000,
+                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
+                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': run_idx}
+                if config['orbit'] == 'Horizontal Lyapunov Orbits':
+                    data = pielm_cgn.generate_data(config, parameters)
+                elif config['orbit'] == 'Halo Orbits':
+                    parameters['ORBIT_TYPE'] = 'Halo Orbits'
+                    data = pielm_cgn.generate_data(config, parameters)
+                else:
+                    parameters['ORBIT_TYPE'] = 'Vertical Lyapunov Orbits'
+                    data = pielm_cgn.generate_data(config, parameters)
+                results, positions, velocities, nlls_start, final_pos, final_vel, true_pos, true_vel, epochs, comp_time = pielm_cgn.run(data, config, parameters)
+
+            elif dynamics == 'CR3BP' and observer == 'GROUND' and optimizer == 'SGD':
+                import  PIELM_sgd_periodicorbits_earth_cr3bp as pielm_cgs
+                parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5, 'TIME_DELTA': 0.5 * u.day,
+                              'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
+                              'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
+                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 100000, 'LEARNING_RATE': 1e-2,
+                              'PHYSICS_WEIGHT': 1e1, 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1,
                               'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'G_TOLERANCE': 1e-15,
                               'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 95 - 8 * run_idx
+                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': run_idx
                                }
                 if config['orbit'] == 'Horizontal Lyapunov Orbits':
                     data = pielm_cgs.generate_data(config, parameters)
@@ -1109,272 +1405,62 @@ def run_IOD_testing(config):
                 results, positions, velocities, nlls_start, final_pos, final_vel, true_pos, true_vel, epochs, comp_time = pielm_cgcb.run(
                     data, config, parameters)
 
-
-            elif dynamics == '2BD' and orbit == 'GEO' and observer == 'GROUND' and optimizer == 'BASIN_HOPPING':
-                import PIELM_basinhopping_geo_earth as pielm_2ggb
-                parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5, 'TIME_DELTA': 0.1 * u.day,
-                              'TOTAL_POINTS': 250, 'SAMPLING_METHOD': "uniform",
-                              'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
-                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 50000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': 1e3, 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1,
-                              'X_TOLERANCE': 1e-15,
-                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15.}
-                data = pielm_2ggb.generate_data(config, parameters)
-                results, positions, velocities = pielm_2ggb.run(data, config, parameters)
-
-            elif dynamics == '2BD' and orbit == 'GEO' and observer == 'GROUND' and optimizer == 'BASIN_HOPPING_NLLS':
-                from legacy_code import PIELM_basinhopping_intonlls_geo_earth as pielm_2ggbn
-                parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5, 'TIME_DELTA': 0.1 * u.day,
-                              'TOTAL_POINTS': 250, 'SAMPLING_METHOD': "uniform",
-                              'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
-                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 50000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': 1e3, 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1,
-                              'X_TOLERANCE': 1e-15,
-                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15.}
-                data = pielm_2ggbn.generate_data(config, parameters)
-                results, positions, velocities = pielm_2ggbn.run(data, config, parameters)
-
-            elif dynamics == 'NBD' and orbit == 'GEO' and observer == 'GROUND' and optimizer == 'BASIN_HOPPING':
-                from legacy_code import PIELM_basinhopping_geo_earth_nbody as pielm_nggb
-                parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5, 'TIME_DELTA': 0.1 * u.day,
-                              'TOTAL_POINTS': 250, 'SAMPLING_METHOD': "uniform",
-                              'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
-                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 50000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': 1e3, 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1,
-                              'X_TOLERANCE': 1e-15,
-                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15.}
-                data = pielm_nggb.generate_data(config, parameters)
-                results, positions, velocities = pielm_nggb.run(data, config, parameters)
-
-            elif dynamics == 'NBD' and orbit == 'GEO' and observer == 'GROUND' and optimizer == 'BASIN_HOPPING_NLLS':
-                from legacy_code import PIELM_basinhopping_intonlls_geo_earth as pielm_nggbn
-                parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5, 'TIME_DELTA': 0.1 * u.day,
-                              'TOTAL_POINTS': 250, 'SAMPLING_METHOD': "uniform",
-                              'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
-                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 50000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': 1e3, 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1,
-                              'X_TOLERANCE': 1e-15,
-                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15.}
-                data = pielm_nggbn.generate_data(config, parameters)
-                results, positions, velocities = pielm_nggbn.run(data, config, parameters)
-
-            elif dynamics == 'NBD' and orbit == 'GEO' and observer == 'GROUND' and optimizer == 'NLLS':
-                from legacy_code import PIELM_nlls_geo_earth_nbody as pielm_nggn
-                parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5, 'TIME_DELTA': 0.1 * u.day,
-                              'TOTAL_POINTS': 250, 'SAMPLING_METHOD': "uniform",
-                              'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
-                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 50000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': 1, 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1,
-                              'X_TOLERANCE': 1e-15,
-                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15.}
-                data = pielm_nggn.generate_data(config, parameters)
-                results, positions, velocities = pielm_nggn.run(data, config, parameters)
-
-            elif dynamics == 'NBD' and orbit == 'GEO' and observer == 'GROUND' and optimizer == 'SGD':
-                from legacy_code import PIELM_sgd_geo_earth_nbody as pielm_nggs
-                parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5, 'TIME_DELTA': 0.1 * u.day,
-                              'TOTAL_POINTS': 250, 'SAMPLING_METHOD': "uniform",
-                              'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
-                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 50000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': 1e3, 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1,
-                              'X_TOLERANCE': 1e-15,
-                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15.}
-                data = pielm_nggs.generate_data(config, parameters)
-                results, positions, velocities = pielm_nggs.run(data, config, parameters)
-
-
-            elif dynamics == 'CR3BP' and observer == 'GROUND' and optimizer == 'BASIN_HOPPING':
-                from legacy_code import PIELM_basinhopping_periodicorbits_earth_cr3bp as pielm_cgb
-                parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5,
-                              'TIME_DELTA': 0.1 * u.day,
-                              'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
-                              'LAYER_RATIOS': [(0., 1 / 4), (1 / 4, 3 / 4), (3 / 4, 1.)], 'INPUT_RANGE': (-1, 1),
-                              'HIDDEN_DIMENSION': 10, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': np.power(10, float(-4)), 'STEPSIZE': np.power(10, float(1)),
-                              'NUMBER_OF_ITERATIONS': 1000, 'TEMPERATURE': np.power(10, float(-6)),
-                              'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000,
-                              'MAX_ITERATiONS': 20000, 'TARGET_ACCEPT_RATE': 0.5, 'STEPWISE_FACTOR': 0.9,
-                              'G_TOLERANCE': 1e-15,
-                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': run_idx + 50}
-                config['lambda'] = parameters['STEPSIZE']
-                config['run_idx'] = run_idx
-                if config['orbit'] == 'Horizontal Lyapunov Orbits':
-                    data = pielm_cgb.generate_data(config, parameters)
-                elif config['orbit'] == 'Halo Orbits':
-                    parameters['ORBIT_TYPE'] = 'Halo Orbits'
-                    data = pielm_cgb.generate_data(config, parameters)
-                else:
-                    parameters['ORBIT_TYPE'] = 'Vertical Lyapunov Orbits'
-                    data = pielm_cgb.generate_data(config, parameters)
-                results, positions, velocities = pielm_cgb.run(data, config, parameters)
-
-            elif dynamics == 'CR3BP' and observer == 'GROUND' and optimizer == 'BASIN_HOPPING_NLLS':
-                from legacy_code import PIELM_basinhopping_intonlls_periodicorbits_earth_cr3bp as pielm_cgbn
-                parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5,
-                              'TIME_DELTA': 0.1 * u.day,
-                              'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
-                              'LAYER_RATIOS': [(0., 1 / 4), (1 / 4, 3 / 4), (3 / 4, 1.)], 'INPUT_RANGE': (-1, 1),
-                              'HIDDEN_DIMENSION': 10, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': np.power(10, float(-4)), 'STEPSIZE': np.power(10, float(-2)),
-                              'NUMBER_OF_ITERATIONS': 1000, 'TEMPERATURE': np.power(10, float(2)),
-                              'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000,
-                              'MAX_ITERATiONS': 20000,
-                              'G_TOLERANCE': 1e-15,
-                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 15}
-                config['run_idx'] = run_idx
-                config['lambda'] = parameters['STEPSIZE']
-                if config['orbit'] == 'Horizontal Lyapunov Orbits':
-                    data = pielm_cgbn.generate_data(config, parameters)
-                elif config['orbit'] == 'Halo Orbits':
-                    parameters['ORBIT_TYPE'] = 'Halo Orbits'
-                    data = pielm_cgbn.generate_data(config, parameters)
-                else:
-                    parameters['ORBIT_TYPE'] = 'Vertical Lyapunov Orbits'
-                    data = pielm_cgbn.generate_data(config, parameters)
-                results, positions, velocities = pielm_cgbn.run(data, config, parameters)
-
             elif dynamics == 'NBD' and observer == 'SPACE' and optimizer == 'NLLS':
                 import PIELM_nlls_tbo_space_nbody as pielm_nstn
-                parameters = {'NUMBER_OF_OBSERVATIONS': 100, 'OBSERVATION_TIME_FRACTION': 0.5,
-                              'TIME_DELTA': 1 * u.day,
-                              'TOTAL_POINTS': 250, 'SAMPLING_METHOD': "uniform",
-                              'LAYER_RATIOS': [(0., 1 / 10), (1 / 10, 9 / 10), (9 / 10, 1.)], 'INPUT_RANGE': (-1, 1),
+                parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5,
+                              'TIME_DELTA': 0.5 * u.day,
+                              'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
+                              'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
                               'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': np.power(10., -float(run_idx)), 'STEPSIZE': 10, 'NUMBER_OF_ITERATIONS': 500, 'TEMPERATURE': 1000,
+                              'PHYSICS_WEIGHT': 1e3, 'STEPSIZE': 10, 'NUMBER_OF_ITERATIONS': 500, 'TEMPERATURE': 1000,
                               'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000,
                               'MAX_ITERATiONS': 20000,
-                              'G_TOLERANCE': 1e-15,
+                              'G_TOLERANCE': 1e-15, 'MAX_NFEV': 1000,
                               'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
                               'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 4}
+                config['lambda'] = parameters['PHYSICS_WEIGHT']
+                config['run_idx'] = run_idx
                 data = pielm_nstn.generate_data(config, parameters)
-                results, positions, velocities = pielm_nstn.run(data, config, parameters)
+                results, positions, velocities, nlls_start, final_pos, final_vel, true_pos, true_vel, epochs, comp_time = pielm_nstn.run(data, config, parameters)
 
             elif dynamics == 'NBD' and observer == 'SPACE' and optimizer == 'SGD':
                 import PIELM_sgd_tbo_space_nbody as pielm_nsts
-                parameters = {'NUMBER_OF_OBSERVATIONS': 100, 'OBSERVATION_TIME_FRACTION': 0.5,
-                              'TIME_DELTA': 1 * u.day,
-                              'TOTAL_POINTS': 250, 'SAMPLING_METHOD': "uniform",
-                              'LAYER_RATIOS': [(0., 1 / 10), (1 / 10, 9 / 10), (9 / 10, 1.)], 'INPUT_RANGE': (-1, 1),
-                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': np.power(10., -float(run_idx)), 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 5000, 'TEMPERATURE': 1,
+                parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5,
+                              'TIME_DELTA': 0.5 * u.day,
+                              'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
+                              'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
+                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 5000, 'LEARNING_RATE': 1e-2,
+                              'PHYSICS_WEIGHT': 1e3, 'STEPSIZE': 10, 'NUMBER_OF_ITERATIONS': 500, 'TEMPERATURE': 1000,
                               'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000,
                               'MAX_ITERATiONS': 20000,
-                              'G_TOLERANCE': 1e-15,
+                              'G_TOLERANCE': 1e-15, 'MAX_NFEV': 1000,
                               'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
                               'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 4}
-                # config['normalization_ratio'] = np.power(10., -float(run_idx))
-                data = pielm_nsts.generate_data(config, parameters)
-                results, positions, velocities = pielm_nsts.run(data, config, parameters)
-
-            elif dynamics == 'NBD' and observer == 'SPACE' and optimizer == 'BASIN_HOPPING':
-                from legacy_code import PIELM_basinhopping_tbo_space_nbody as pielm_nstb
-                parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5,
-                              'TIME_DELTA': 5 * u.day,
-                              'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
-                              'LAYER_RATIOS': [(0., 1 / 4), (1 / 4, 3 / 4), (3 / 4, 1.)], 'INPUT_RANGE': (-1, 1),
-                              'HIDDEN_DIMENSION': 10, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': np.power(10, float(-4)), 'STEPSIZE': np.power(10, float(-2)),
-                              'NUMBER_OF_ITERATIONS': 250, 'TEMPERATURE': np.power(10, float(2)),
-                              'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000,
-                              'MAX_ITERATiONS': 20000,
-                              'G_TOLERANCE': 1e-15,
-                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 0}
+                config['lambda'] = parameters['PHYSICS_WEIGHT']
                 config['run_idx'] = run_idx
-                config['lambda'] = parameters['STEPSIZE']
-                data = pielm_nstb.generate_data(config, parameters)
-                results, positions, velocities = pielm_nstb.run(data, config, parameters)
-
-
-            elif dynamics == 'NBD' and observer == 'SPACE' and optimizer == 'BASIN_HOPPING_NLLS':
-                from legacy_code import PIELM_basinhopping_intonlls_tbo_space_nbody as pielm_nstbn
-                # parameters = {'NUMBER_OF_OBSERVATIONS': 20, 'OBSERVATION_TIME_FRACTION': 0.5,
-                #               'TIME_DELTA': 5 * u.day,
-                #               'TOTAL_POINTS': 250, 'SAMPLING_METHOD': "uniform",
-                #               'LAYER_RATIOS': [(0., 3 / 10), (3 / 10, 7 / 10), (7 / 10, 1.)], 'INPUT_RANGE': (-1, 1),
-                #               'HIDDEN_DIMENSION': 300, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
-                #               'PHYSICS_WEIGHT': np.power(10., -float(4)), 'STEPSIZE': np.power(10., -float(0)), 'NUMBER_OF_ITERATIONS': 100, 'TEMPERATURE': np.power(10., -float(30)),
-                #               'X_TOLERANCE': 1e-9, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000,
-                #               'MAX_ITERATiONS': 20000,
-                #               'G_TOLERANCE': 1e-15,
-                #               'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                #               'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': run_idx}
-                parameters = {'NUMBER_OF_OBSERVATIONS': 20, 'OBSERVATION_TIME_FRACTION': 0.5,
-                              'TIME_DELTA': 5 * u.day,
-                              'TOTAL_POINTS': 250, 'SAMPLING_METHOD': "uniform",
-                              'LAYER_RATIOS': [(0., 3 / 10), (3 / 10, 7 / 10), (7 / 10, 1.)], 'INPUT_RANGE': (-1, 1),
-                              'HIDDEN_DIMENSION': 300, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': np.power(10., -float(4)), 'STEPSIZE': np.power(10., -float(0)),
-                              'NUMBER_OF_ITERATIONS': 10000, 'TEMPERATURE': -np.power(10., float(3*run_idx)),
-                              'X_TOLERANCE': 1e-9, 'F_TOLERANCE': 1e-9, 'MAX_FUNCTION_EVAL': 20000,
-                              'MAX_ITERATiONS': 20000,
-                              'G_TOLERANCE': 1e-9,
-                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 0}
-                # config['normalization_ratio'] = np.power(10., float(run_idx / 2 + 1 ))
-                config['TEMPERATURE'] = parameters['TEMPERATURE']
-                data = pielm_nstbn.generate_data(config, parameters)
-                results, positions, velocities = pielm_nstbn.run(data, config, parameters)
-
+                data = pielm_nsts.generate_data(config, parameters)
+                results, positions, velocities, nlls_start, final_pos, final_vel, true_pos, true_vel, epochs, comp_time = pielm_nsts.run(data, config, parameters)
 
             elif dynamics == 'NBD' and observer == 'SPACE' and optimizer == 'CONSTRAINED_BASIN_HOPPING':
-                import PIELM_constrainedbasinhopping_tbo_space_nbody as pielm_ctsn
-                parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5,
-                              'TIME_DELTA': 1.5 * u.day,
+                import PIELM_basinhopping_w_range_nbody as pielm_ctsn
+                parameters = {'NUMBER_OF_OBSERVATIONS': 1, 'OBSERVATION_TIME_FRACTION': 0.5,
+                              'TIME_DELTA': 1 * u.day,
                               'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
                               'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
                               'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': np.power(10, float(0)), 'STEPSIZE': np.power(10, float(1)),
-                              'NUMBER_OF_ITERATIONS': 100, 'TEMPERATURE': np.power(10, float(-6)),
+                              'PHYSICS_WEIGHT': 1e0, 'LAMBDA_DIST':1e0, 'STEPSIZE': 1e0,
+                              'NUMBER_OF_ITERATIONS': 10, 'TEMPERATURE': 1e-6,
                               'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000,
                               'MAX_ITERATiONS': 20000, 'TARGET_ACCEPT_RATE': 0.5, 'STEPWISE_FACTOR': 0.9,
                               'G_TOLERANCE': 1e-15, 'MAX_NFEV':100,
                               'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 1 + run_idx,
-                              'MIN_RHO': 1e-6, 'MAX_RHO': 2e-1, 'MIN_RHO_DOT': -1e-1, 'MAX_RHO_DOT': 1e-1, 'DELTA_RHO': 0.,
-                              'DELTA_RHO_STEP':1e-2, 'SCALE_FACTOR':1, 'LAMBDA_DIST': np.power(10, float(-4)),
-                              'DELTA_RHO_DOT': 0., 'INITIAL_TRAJECTORIES':10}
+                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 4,
+                              'MIN_RHO': 1e-4, 'MAX_RHO': 1e-1, 'MIN_RHO_DOT': -1.01e0, 'MAX_RHO_DOT': 1.01e0,
+                              'DELTA_RHO': 1e-2, 'DELTA_RHO_DOT': 0.067, 'INITIAL_TRAJECTORIES':10}
                 config['lambda'] = parameters['TIME_DELTA']
                 config['run_idx'] = run_idx
                 data = pielm_ctsn.generate_data(config, parameters)
-                results, positions, velocities, nlls_start = pielm_ctsn.run(data, config, parameters)
-
-            elif dynamics == 'CR3BP' and observer == 'GROUND' and optimizer == 'CONSTRAINED_NLLS':
-                from legacy_code import PIELM_constrainedbasinhoppingnlls_periodicorbits_earth_cr3bp as pielm_cgcnb
-                parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5,
-                              'TIME_DELTA': 0.3 * u.day,
-                              'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
-                              'LAYER_RATIOS': [(0., 1 / 4), (1 / 4, 3 / 4), (3 / 4, 1.)], 'INPUT_RANGE': (-1, 1),
-                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': np.power(10, float(0)), 'STEPSIZE': np.power(10, float(1)),
-                              'NUMBER_OF_ITERATIONS': 10, 'TEMPERATURE': np.power(10, float(0)),
-                              'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000, 'MAX_NFEV':100,
-                              'MAX_ITERATiONS': 20000, 'TARGET_ACCEPT_RATE': 0.5, 'STEPWISE_FACTOR': 0.9,
-                              'G_TOLERANCE': 1e-15,
-                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 90 - run_idx,
-                              'MIN_RHO': 1e-4, 'MAX_RHO': 5e-2, 'MIN_RHO_DOT': -1e-2, 'MAX_RHO_DOT': 1e-2, 'DELTA_RHO': 0.,
-                              'DELTA_RHO_STEP':1e-2, 'SCALE_FACTOR':1,
-                              'DELTA_RHO_DOT': 0., 'INITIAL_TRAJECTORIES':1000, 'NOISE_STD': config['sigma_pointing']}
-                config['lambda'] = parameters['STEPSIZE']
-                config['run_idx'] = run_idx
-                if config['orbit'] == 'Horizontal Lyapunov Orbits':
-                    data = pielm_cgcnb.generate_data(config, parameters)
-                elif config['orbit'] == 'Halo Orbits':
-                    parameters['ORBIT_TYPE'] = 'Halo Orbits'
-                    data = pielm_cgcnb.generate_data(config, parameters)
-                else:
-                    parameters['ORBIT_TYPE'] = 'Vertical Lyapunov Orbits'
-                    data = pielm_cgcnb.generate_data(config, parameters)
-                results, positions, velocities = pielm_cgcnb.run(data, config, parameters)
+                results, positions, velocities, nlls_start, final_pos, final_vel, true_pos, true_vel, epochs, comp_time = pielm_ctsn.run(data, config, parameters)
 
             else:
                 print("Error specifying")
@@ -1402,9 +1488,12 @@ def run_IOD_testing(config):
                            "SC_GEO_VZ(KM/S)_PHYS": np.zeros_like(data[1][:, 1]), 'SIN_RA_PHYS': data[0][0],
                            'COS_RA_PHYS': data[0][1], 'SIN_DEC_PHYS': data[0][2]}
 
+            def combo_to_string(combo):
+                return "_" + "_".join(str(x) for x in combo)
+            combo_str = combo_to_string(combo)
             file_used = data[9]
             file_name = config['dynamics'] + '_' + config['orbit'] + '_' + config['observer'] + '_' + \
-                        config['optimizer'] + '_run_' + str(run_idx) + '.csv'
+                        config['optimizer'] + '_run_' + str(run_idx) + combo_str + '.csv'
 
             os.makedirs(config['error_file_dir'], exist_ok=True)
             file_path = os.path.join(config['error_file_dir'], file_name)
@@ -1499,6 +1588,11 @@ size = comm.Get_size()
 
 run_IOD_testing(config)
 
+###################################
+# Hyperparameter tuning for IOD
+##################################
+
+# run_IOD_hyperparameter(config)
 ###################################
 # Single results file implementation
 ####################################

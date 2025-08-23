@@ -1,12 +1,4 @@
-from astropy import units as u
-from astropy.time import Time
-from poliastro.bodies import Earth
-from poliastro.twobody import Orbit
-from poliastro.plotting.static import StaticOrbitPlotter
-from poliastro.twobody.propagation import propagate
-import matplotlib.pyplot as plt
 import numpy as np
-from astropy.coordinates import EarthLocation, AltAz, ITRS, GCRS, SkyCoord, Angle
 from typing import Callable, List, Literal, Tuple, Union
 import torch
 from torch.autograd.functional import jacobian
@@ -335,8 +327,8 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
     # Dimensions
     H_size = parameters['HIDDEN_DIMENSION']  # hidden layer size
     # Fake precomputed hidden layer activations and derivatives
-    W = (2 * torch.rand(H_size, 1) - 1) * configuration['WEIGHT_SCALE_FACTOR']
-    b = (2 * torch.rand(H_size) - 1) * configuration['WEIGHT_SCALE_FACTOR']
+    W = (2 * torch.rand(H_size, 1) - 1) * parameters['WEIGHT_SCALE_FACTOR']
+    b = (2 * torch.rand(H_size) - 1) * parameters['WEIGHT_SCALE_FACTOR']
 
     data_losses = []
     physics_losses = []

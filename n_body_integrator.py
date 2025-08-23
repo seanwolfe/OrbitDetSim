@@ -1,14 +1,7 @@
 import spiceypy as spice
-import numpy as np
 from scipy.integrate import solve_ivp
-import matplotlib.pyplot as plt
-import pandas as pd
 import yaml
 import argparse
-from astropy import units as u
-from astropy.time import Time
-from poliastro.bodies import Earth
-from poliastro.twobody import Orbit
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
 spice.furnsh("de430.bsp")
@@ -106,11 +99,10 @@ def integrate_n_body(object_state, epoch, end_time, time_interval, type):
 
 
 import numpy as np
-from astropy.time import Time, TimeDelta
+from astropy.time import TimeDelta
 from astropy import units as u
 from poliastro.bodies import Earth
 from poliastro.twobody import Orbit
-from poliastro.constants import GM_earth
 
 def two_body_integrator(r0_km, v0_kms, epoch, timestep_sec, num_frames):
     """

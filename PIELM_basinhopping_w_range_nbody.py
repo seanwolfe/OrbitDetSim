@@ -1,107 +1,59 @@
-import time
+from astropy import units as u
+from astropy.time import Time, TimeDelta
+from poliastro.bodies import Earth
+from poliastro.twobody import Orbit
+from poliastro.plotting.static import StaticOrbitPlotter
+from poliastro.twobody.propagation import propagate
+import matplotlib.pyplot as plt
 import numpy as np
-from typing import List, Literal, Tuple, Union
+from astropy.coordinates import EarthLocation, AltAz, ITRS, GCRS, SkyCoord, Angle
+from typing import Callable, List, Literal, Tuple, Union
 import torch
+from torch.autograd.functional import jacobian
+from scipy.optimize import least_squares
 from scipy.optimize import basinhopping
 import pandas as pd
 import spiceypy as spice
 import n_body_integrator as nbody
-import os
-from scipy.integrate import odeint
+from utilities import eme_to_ecliptic_batch, ecliptic_to_eme_batch
+import utilities as util
+import time
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
 spice.furnsh("de430.bsp")
 spice.furnsh('naif0012.tls')
 
-
 ####
 # generate data
 ###
 def generate_data(config, parameters):
-    # get orbit type
-    orbit_type = parameters['ORBIT_TYPE']
-    print(orbit_type)
-
-    # get orbit number
-    orbit_number = parameters['RUN_NUMBER']
-
-    # get orbit file and trajectory data
-    folder = [f for f in os.listdir() if os.path.isdir(f) and orbit_type in f][0]
-    folder_path = os.path.join(os.getcwd(), folder)
-    file_paths = []
-    for root, _, files in os.walk(folder_path):
-        for file in files:
-            file_paths.append(os.path.join(root, file))
-    files_sorted = sorted(file_paths, key=lambda x: float(os.path.basename(x)))
-    file = files_sorted[orbit_number]
-    print(file)
-    data = pd.read_csv(file)
-
-    # 3. Time array: propagate for half a period
-    # T_half = data['halfT'].iloc[0]
-    num_obs = parameters['NUMBER_OF_OBSERVATIONS']  # number of points
-    mu = config['SYSTEM_MASS_PARAMETER']
-
-    def sample_equally_spaced(df, n):
-        if n >= len(df) / 2:
-            return df.copy()
-        indices = np.linspace(0 * len(df) / 4, 1 * len(df) / 8 - 1, n, dtype=int)
-        return df.iloc[indices]
-
-    trajectory = sample_equally_spaced(data, num_obs)
-
-    def sample_other_half(df, n):
-        if n >= len(df) / 2:
-            return df.copy()
-        n_each = n // 2
-
-        idx1 = np.linspace(0, len(df) / 4 - 1, n_each, dtype=int)
-        idx2 = np.linspace(3 * len(df) / 4, len(df) - 1, n - n_each, dtype=int)
-
-        indices = np.concatenate([idx2, idx1])
-        return df.iloc[indices], df['time'].iloc[:n]
-
-    # trajectory, time = sample_other_half(data, num_obs)
-    positions = trajectory.loc[:, ['x', 'y', 'z']].values
-    velocities = trajectory.loc[:, ['vx', 'vy', 'vz']].values
-    observation_epochs = trajectory['time'].values
-    observer_position = np.array([1. - mu, 0, 0])
-    observer_positions = np.tile(observer_position, (velocities.shape[0], 1))
-
-    # positions -= observer_positions
-    # observer_positions = np.tile(np.array([0., 0., 0.]), (velocities.shape[0], 1))
-
-    def generate_ra_dec_measurements():
-        """
-        Generate topocentric RA/DEC observations from the observatory with highest elevation.
-
-        Parameters:
-            times: array of datetime or astropy.Time
-            sat_positions_eci: Nx3 array in km (GCRS)
-            observatories: list of dicts with 'name', 'lat', 'lon', 'elev'
-
-        Returns:
-            ra_list, dec_list, used_obs
-        """
-
-        los_vec = positions - observer_positions  # Now both are Quantity arrays (3,)
-
-        # Normalize
-        los_unit = los_vec / np.linalg.norm(los_vec, axis=1, keepdims=True)
 
 
-        # Convert to RA/DEC
-        x, y, z = los_unit.T
+    all_files = util.get_all_files(config['IOD_folder_path'], config['save_format'])
+    run_number = parameters['RUN_NUMBER']
+    file_path = all_files[run_number]
+    print(file_path)
+    iod_data = util.read_IOD_data_geo(file_path, config)
 
-        ra = np.arctan2(y, x)
-        dec = np.arcsin(z)
+    sin_ra_meas = torch.tensor(iod_data['SIN_RA_PHYS'].values, dtype=torch.float32)
+    cos_ra_meas = torch.tensor(iod_data['COS_RA_PHYS'].values, dtype=torch.float32)
+    sin_dec_meas = torch.tensor(iod_data['SIN_DEC_PHYS'].values, dtype=torch.float32)
+    observer_positions = torch.tensor(
+        iod_data.loc[:, ["SC_GEO_X(KM)_PHYS", "SC_GEO_Y(KM)_PHYS", "SC_GEO_Z(KM)_PHYS"]].values,
+        dtype=torch.float32)
+    observer_velocities = torch.tensor(
+        iod_data.loc[:, ["SC_GEO_VX(KM/S)_PHYS", "SC_GEO_VY(KM/S)_PHYS", "SC_GEO_VZ(KM/S)_PHYS"]].values,
+        dtype=torch.float32)
+    observation_epochs = [Time(jd, format='jd', scale='tdb') for jd in iod_data['EPOCH(JDTDB)'].values]
 
-        # Normalize RA to [0, 360)
-        ra = ra % (2 * torch.pi)
+    positions = iod_data.loc[:, ["GEO_X(KM)", "GEO_Y(KM)", "GEO_Z(KM)"]].values
+    velocities = iod_data.loc[:, ["GEO_VX(KM/S)", "GEO_VY(KM/S)", "GEO_VZ(KM/S)"]].values
 
-        return torch.tensor(np.array(ra), dtype=torch.float32), torch.tensor(np.array(dec), dtype=torch.float32)
+    # Reconstruct RA and DEC in radians
+    ra_meas = torch.atan2(sin_ra_meas, cos_ra_meas)
+    ra = ra_meas % (2 * np.pi)  # Ensure RA in [0, 2π)
+    dec = torch.asin(sin_dec_meas)  # DEC in [-π/2, π/2]
 
-    ra, dec = generate_ra_dec_measurements()
     if config['ADD_NOISE'] == 1:
         def add_noise(ra_rad, dec_rad, config):
             """
@@ -141,6 +93,7 @@ def generate_data(config, parameters):
 
             return ra_noisy, dec_noisy, sigma_ra_deg, sigma_dec_deg
         ra_m, dec_m, sigma_ra_deg, sigma_dec_deg = add_noise(ra, dec, config)
+
     else:
         ra_m, dec_m = ra.clone(), dec.clone()
         sigma_ra_deg = 0.
@@ -149,13 +102,12 @@ def generate_data(config, parameters):
     sin_ra_meas, cos_ra_meas, sin_dec_meas, cos_dec_meas = torch.sin(ra_m), torch.cos(ra_m), torch.sin(dec_m), torch.cos(dec_m)
 
     return ([sin_ra_meas, cos_ra_meas, sin_dec_meas, cos_dec_meas], torch.tensor(observer_positions, dtype=torch.float32),
-            observation_epochs, positions, velocities, ra, dec, sigma_ra_deg, sigma_dec_deg, file)
+            observation_epochs, positions, velocities, ra, dec, sigma_ra_deg, sigma_dec_deg, file_path, observer_velocities)
 
 
 ####
 # PIELM
 ####
-
 def sample_time_points(
         method: Literal["lhs", "uniform", "gaussian"],
         observation_epochs: np.ndarray,
@@ -183,6 +135,7 @@ def sample_time_points(
     Returns:
         np.ndarray of sampled time points, including observation_epochs.
     """
+
     if config is None:
         config = {}
     rng = np.random.default_rng(config["seed"])
@@ -276,9 +229,17 @@ def epoch_normalization(epoch, z_range, configuration):
         normalization_constant (float): (zf - z0) / (t_ndim_f - t_ndim_0)
     """
 
+    # === Constants and scales ===
+    L =  configuration['AU_TO_M'] / configuration['KM_TO_M']# Length scale in km
+    G_km = (configuration['GRAVITATIONAL_CONSTANT'] / configuration['KM_TO_M'] ** 3)
+    sys_mass = configuration['SUN_MASS'] + configuration['MOON_MASS'] + configuration['EARTH_MASS']
+    T = np.sqrt(L ** 3 / (G_km * sys_mass))
+
+    epoch = Time(epoch)
+    t_seconds = (epoch - epoch[0]).sec
 
     # === Nondimensionalize ===
-    t_nondim = epoch
+    t_nondim = t_seconds / T
     t0, tf = t_nondim[0], t_nondim[-1]
 
     # === Normalize to z_range ===
@@ -290,10 +251,10 @@ def epoch_normalization(epoch, z_range, configuration):
 
 
 def run(data, config, parameters):
+
     # get the collocation points
-    colloc_points = sample_time_points(parameters['SAMPLING_METHOD'], data[2], parameters['TIME_DELTA'].value,
-                                       parameters['TOTAL_POINTS'], layer_ratios=parameters['LAYER_RATIOS'],
-                                       config=config)
+    colloc_points = sample_time_points(parameters['SAMPLING_METHOD'], data[2], parameters['TIME_DELTA'],
+                                       parameters['TOTAL_POINTS'], layer_ratios=parameters['LAYER_RATIOS'], config=config)
 
     # normalize epochs (inputs)
     epochs_nd_norm, c = epoch_normalization(colloc_points, parameters['INPUT_RANGE'], config)
@@ -303,28 +264,58 @@ def run(data, config, parameters):
     obs_mask = np.isin(colloc_points, data[2])
     obs_indices = np.where(obs_mask)[0]
 
-    data_df, positions, velocities, nlls_start, final_positions, final_velocities, comp_time = solve(epochs_nd_norm_reshaped_tensor, data[0], obs_indices, data[1], colloc_points, c, config, parameters)
+    data_df, positions, velocities, nlls_start, final_positions, final_velocities, comp_time = solve(epochs_nd_norm_reshaped_tensor, data[0], obs_indices, data[1], colloc_points, c, config, parameters, data[-1])
 
-    # true positions
-    mu = config['SYSTEM_MASS_PARAMETER']
-    asteroid_ini_pos = data[3][0, :]
-    asteroid_ini_vel = data[4][0, :]
-    ini_state = np.concatenate([asteroid_ini_pos, asteroid_ini_vel])
-    phi_0 = np.eye(6)  # initial Phi (state transition matrix)
-    state = np.hstack((np.array(ini_state), phi_0.ravel()))
+    # Extract initial position/velocity
+    ini_pos = data[3][0, :]  # km
+    ini_vel = data[4][0, :]  # km/s
+
+    # Set up epochs
     num_points = 1000
-    epochs = np.linspace(data[2][0], data[2][-1], num_points)
-    res = odeint(nbody.cr3bp, state, epochs, args=(mu,))
-    asteroid_cr3bp_position = np.array(res[:, :3])
-    asteroid_cr3bp_velocity = np.array(res[:, 3:])
+    epochs = np.linspace(data[2][0], data[2][-1], num_points)  # still astropy Time objects
 
-    return data_df, positions, velocities, nlls_start, final_positions, final_velocities, asteroid_cr3bp_position, asteroid_cr3bp_velocity, epochs, comp_time
+    # Initial epoch is just the first time
+    epoch0 = data[2][0]  # already Time
+
+    # Uniform time step in seconds
+    timestep_sec = (epochs[1] - epochs[0]).sec
+
+    # calc epochs
+    total_observation_window = num_points * timestep_sec  # epoch is in jd
+
+    # Convert astropy Time -> JD (TDB scale)
+    jd_tdb = epoch0.tdb.jd  # this is a float
+
+    # Convert JD_TDB -> ET (seconds past J2000)
+    epoch_et = spice.unitim(jd_tdb, 'JDTDB', 'ET')
+
+    def get_state(body, reference=10):
+        state, _ = spice.spkgeo(body, epoch_et, "ECLIPJ2000", reference)
+        return np.array(state)
+
+    earth_state = get_state(399)
+
+    asteroid_state_geo = np.concatenate([ini_pos, ini_vel])
+    asteroid_state_helio = eme_to_ecliptic_batch(asteroid_state_geo) + earth_state
+
+    # integrate s/c traj
+    asteroid_integrated_states, asteroid_earth_states = nbody.integrate_n_body(asteroid_state_helio,
+                                                                               jd_tdb,
+                                                                               total_observation_window,
+                                                                               timestep_sec,
+                                                                               type="ASTEROID")  # integrator takes seconds
+
+    asteroid_int_geo = (asteroid_integrated_states - asteroid_earth_states)
+    asteroid_eme = ecliptic_to_eme_batch(asteroid_int_geo)
+
+    return data_df, positions, velocities, nlls_start, final_positions, final_velocities, asteroid_eme[:3, :].T, asteroid_eme[3:, :].T, epochs, comp_time
 
 
-def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions, colloc_epochs, c, configuration,
-          parameters):
-
-
+def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions, colloc_epochs, c, configuration, parameters, observer_velocity):
+    L = configuration['AU_TO_M'] / configuration['KM_TO_M']  # Length scale in km
+    G_km = (configuration['GRAVITATIONAL_CONSTANT'] / configuration['KM_TO_M'] ** 3)
+    sys_mass = configuration['SUN_MASS'] + configuration['MOON_MASS'] + configuration['EARTH_MASS']
+    T = np.sqrt(L ** 3 / (G_km * sys_mass))
     lambda_phys = parameters['PHYSICS_WEIGHT']
     lambda_dist = parameters['LAMBDA_DIST']
     q = 3
@@ -332,8 +323,8 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
     # Dimensions
     H_size = parameters['HIDDEN_DIMENSION']  # hidden layer size
     # Fake precomputed hidden layer activations and derivatives
-    W = (2 * torch.rand(H_size, 1) - 1) * parameters['WEIGHT_SCALE_FACTOR']
-    b = (2 * torch.rand(H_size) - 1) * parameters['WEIGHT_SCALE_FACTOR']
+    W = (2 * torch.rand(H_size, 1) - 1) * configuration['WEIGHT_SCALE_FACTOR']
+    b = (2 * torch.rand(H_size) - 1) * configuration['WEIGHT_SCALE_FACTOR']
 
     data_losses = []
     physics_losses = []
@@ -510,8 +501,12 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
             ], dim=-1)
 
             def fit_angular_rates(t, alpha, delta):
-                t0 = t.mean()
-                dt = t - t0
+                # Convert Time object to seconds (or days, or any consistent unit)
+                t = Time(t)  # convert list/array of Time objects into a Time array
+                t_sec = (t - t[0]).to_value('s')  # TimeDelta → float seconds
+
+                t0 = t_sec.mean()
+                dt = t_sec - t0
 
                 alpha_mean = alpha.mean()
                 delta_mean = delta.mean()
@@ -523,8 +518,19 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
 
             alpha_dot, delta_dot = fit_angular_rates(self.obs_epochs, alpha, delta)
 
+            # observer positions & velocities (N,3)
+            L = configuration['AU_TO_M'] / configuration['KM_TO_M']  # Length scale in km
+            G_km = (configuration['GRAVITATIONAL_CONSTANT'] / configuration['KM_TO_M'] ** 3)
+            sys_mass = configuration['SUN_MASS'] + configuration['MOON_MASS'] + configuration['EARTH_MASS']
+            T = np.sqrt(L ** 3 / (G_km * sys_mass))
+            observer_pos = self.observer_positions / L
+            observer_vel = self.observer_velocities / L * T
+
+            # LOS relative to observer
+            r_rel = r - observer_pos  # (N,3)
+
             # LOS projection per epoch (N,)
-            rho_base = torch.sum(r * l, dim=1)  # (N,)
+            rho_base = torch.sum(r_rel * l, dim=1)  # (N,)
 
             # Sample perturbation in range space per epoch
             delta_rho = (torch.rand(rho_base.shape, device=r.device) * 2 - 1.0) * self.delta_rho_step  # (N,)
@@ -537,15 +543,18 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
             # Perturbed candidate positions (geocentric)
             r_obs = r + delta_r  # (N,3)
 
-            rho_dot_base = torch.sum(v * l, dim=1)  # (N,)
+            # For velocities
+            v_rel = v - observer_vel  # (N,3)
+            rho_dot_base = torch.sum(v_rel * l, dim=1)  # (N,)
 
             # Sample rho_dot per epoch
             delta_rho_dot = (torch.rand(rho_dot_base.shape, device=v.device) * 2 - 1.0) * self.delta_rho_dot_step
             rho_dot = torch.clamp(rho_dot_base + delta_rho_dot, min=self.rho_dot_range[0],
                                   max=self.rho_dot_range[1])  # (N,)
 
+
             # Full velocity reconstruction:
-            v_obs = (
+            v_obs = (observer_vel +
                     rho_dot[:, None] * l
                     + rho[:, None] * (alpha_dot * l_alpha + delta_dot * l_delta)
             )
@@ -607,19 +616,31 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
                 cos_dec
             ], dim=-1)
 
-            # angular rates
             def fit_angular_rates(t, alpha, delta):
-                t0 = t.mean()
-                dt = t - t0
-                dalpha = ((alpha - alpha.mean()) * dt).sum() / (dt * dt).sum()
-                ddelta = ((delta - delta.mean()) * dt).sum() / (dt * dt).sum()
+                # Convert Time object to seconds (or days, or any consistent unit)
+                t = Time(t)  # convert list/array of Time objects into a Time array
+                t_sec = (t - t[0]).to_value('s')  # TimeDelta → float seconds
+
+                t0 = t_sec.mean()
+                dt = t_sec - t0
+
+                alpha_mean = alpha.mean()
+                delta_mean = delta.mean()
+
+                dalpha = ((alpha - alpha_mean) * dt).sum() / (dt * dt).sum()
+                ddelta = ((delta - delta_mean) * dt).sum() / (dt * dt).sum()
+
                 return dalpha, ddelta
 
             alpha_dot, delta_dot = fit_angular_rates(self.obs_epochs, alpha, delta)
 
             # observer pos & vel: (N,3)
-            observer_pos = self.observer_positions
-            observer_vel = self.observer_velocities
+            L = configuration['AU_TO_M'] / configuration['KM_TO_M']  # Length scale in km
+            G_km = (configuration['GRAVITATIONAL_CONSTANT'] / configuration['KM_TO_M'] ** 3)
+            sys_mass = configuration['SUN_MASS'] + configuration['MOON_MASS'] + configuration['EARTH_MASS']
+            T = np.sqrt(L ** 3 / (G_km * sys_mass))
+            observer_pos = self.observer_positions / L
+            observer_vel = self.observer_velocities * T / L
 
             # sample n_init central candidates: (n_init,1)
             rho_0_central = (
@@ -681,8 +702,8 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
             r_best = r_0[best_idx]  # (N,3)
             v_best = v_0[best_idx]  # (N,3)
 
-            r_obs = r_best - self.observer_positions  # (N,3)
-            v_obs = v_best - self.observer_velocities  # (N,3)
+            r_obs = r_best
+            v_obs = v_best
 
             all_H = torch.cat([self.H, self.cH_dot], dim=1)  # (N,2H_size)
             H_obs = all_H[self.obs_indices]  # (N_obs, 2H_size)
@@ -717,6 +738,56 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
         return H.T, H_prime.T, H_double_prime.T  # shapes: (d, H)
     H_matrix, H_dot, H_ddot = compute_hidden_activations(epochs_nd_norm_reshaped_tensor)
 
+    def precompute_body_states(epochs, config, L, sys_mass):
+        """
+        Precompute other-body positions and nondimensional masses.
+
+        Parameters
+        ----------
+        epochs : list[astropy.time.Time]
+            Epochs to query (N,).
+        config : dict
+            Dict containing physical constants and body masses.
+        L : float
+            Length scale for nondimensionalization.
+        sys_mass : float
+            Total system mass.
+
+        Returns
+        -------
+        positions_nd : torch.Tensor
+            (N, n, 3) nondimensional positions.
+        mus_nd : torch.Tensor
+            (n,) nondimensional body gravitational parameters.
+        """
+        bodies = [10, 1, 2, 399, 4, 5, 6, 7, 8, 301]
+        names = ['SUN', 'MERCURY', 'VENUS', 'EARTH', 'MARS',
+                 'JUPITER', 'SATURN', 'URANUS', 'NEPTUNE', 'MOON']
+        masses = np.array([config[f'{name}_MASS'] for name in names])
+
+        N, n = len(epochs), len(bodies)
+        positions = np.zeros((N, n, 3))
+
+        # Convert epochs to ET
+        epoch_ets = [spice.unitim(t.tdb.jd, 'JDTDB', 'ET') for t in epochs]
+
+        for i, et in enumerate(epoch_ets):
+            for j, body in enumerate(bodies):
+                state, _ = spice.spkgeo(targ=body, et=et, ref='J2000', obs=399)
+                positions[i, j, :] = state[:3]  # km
+
+        # Nondimensionalize positions
+        positions_nd = torch.tensor(positions / L, dtype=torch.float32)
+
+        # Nondimensionalize μ
+        G_km = (config['GRAVITATIONAL_CONSTANT'] / config['KM_TO_M'] ** 3)
+        mus = G_km * masses
+        mus_nd = torch.tensor(mus / (G_km * sys_mass), dtype=torch.float32)
+
+        return positions_nd, mus_nd
+    non_dim_positions, non_dim_grav_params = precompute_body_states(colloc_epochs, configuration, L, sys_mass)
+
+
     # === Residual Function for Least Squares ===
     def loss_function(beta_flat):
         beta_tensor = beta_flat.view(q, H_size)
@@ -725,9 +796,10 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
         Y_dot_pred = c * H_dot @ beta_tensor.T
 
         Y_pred_obs = Y_pred[obs_indices]
-        Y_dot_pred_obs = Y_dot_pred[obs_indices]
-        positions.append(
-            (Y_pred_obs + observer_positions).detach().cpu().numpy())  # undo scaling and move to original CR3BP frame
+        Y_pred_obs_km = Y_pred_obs * L
+        Y_dot_pred_obs = Y_dot_pred[obs_indices] * L / T
+
+        positions.append(Y_pred_obs_km.detach().cpu().numpy())
         velocities.append(Y_dot_pred_obs.detach().cpu().numpy())
         if first[0] == 0:
             nlls_start[0] = total_its[0]
@@ -756,7 +828,7 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
                     dec_pred: (N,) DEC in degrees
                 """
 
-                topocentric_los_vec = Y_pred_obs  # (N, 3), predict observer centered at earth
+                topocentric_los_vec = Y_pred_obs_km - observer_positions  # (N, 3)
 
                 # Normalize
                 los_unit_topo = topocentric_los_vec / torch.norm(topocentric_los_vec, dim=1, keepdim=True)
@@ -787,68 +859,39 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
 
         Y_ddot_pred = c ** 2 * (H_ddot @ beta_tensor.T)  # (N, q)
 
-        def cr3bp_physics_residual(Y_predicted, Y_dot_predicted, Y_ddot_predicted, configuration):
+        def nbody_physics_residual(Y_preds, Y_ddot_preds, positions_nd, mus_nd):
             """
-            Computes the physics residual based on CR3BP (Circular Restricted Three-Body Problem) dynamics.
+            Compute residual between predicted and n-body accelerations.
 
             Parameters
             ----------
-            Y_predicted : torch.Tensor of shape (N, 3)
-                Predicted non-dimensional asteroid positions (in the synodic frame).
-            Y_ddot_predicted : torch.Tensor of shape (N, 3)
-                Predicted non-dimensional asteroid accelerations (second time derivatives).
-            configuration : dict
-                Dictionary containing:
-                    - 'MU': float, mass parameter (μ = m_secondary / (m_primary + m_secondary)).
-                    - 'L': float, characteristic length (used for non-dimensionalization).
-                    - Optionally 'MU_UNIT': float, gravitational parameter in dimensional units (ignored here if non-dimensional).
-
-            Returns
-            -------
-            torch.Tensor of shape (N * 3,)
-                Flattened residuals between the predicted accelerations and the CR3BP model accelerations.
+            Y_preds : torch.Tensor
+                (N, 3) — nondimensional predicted positions of asteroid (geocentric).
+            Y_ddot_preds : torch.Tensor
+                (N, 3) — nondimensional predicted accelerations of asteroid.
+            positions_nd : torch.Tensor
+                (N, n, 3) — nondimensional positions of other bodies (geocentric).
+            mus_nd : torch.Tensor
+                (n,) — nondimensional gravitational parameters of other bodies.
+            L : float
+                Length scale (e.g. Earth–Sun distance in km).
+            sys_mass : float
+                Total system mass (for nondimensionalization).
             """
-            mu = configuration['SYSTEM_MASS_PARAMETER']
-            observer_position = torch.tensor([1. - mu, 0., 0.], dtype=Y_predicted.dtype)
-            observer_positions = observer_position.unsqueeze(0).repeat(Y_predicted.shape[0], 1)
 
-            Y_predict = Y_predicted + observer_positions  # move back to original
-            x = Y_predict[:, 0]
-            y = Y_predict[:, 1]
-            z = Y_predict[:, 2]
-            vx = Y_dot_predicted[:, 0]
-            vy = Y_dot_predicted[:, 1]
-            vz = Y_dot_predicted[:, 2]
+            N, n, _ = positions_nd.shape
+            Y_expanded = Y_preds[:, None, :]  # (N, 1, 3)
 
-            # alpha = 10.0  # slope control
-            # epsilon_0 = np.power(10, -float(2))
-            # N = parameters['NUMBER_OF_ITERATIONS']
-            # i = global_its[0]
-            # fraction = (N - 1 - i) / (N - 1)
-            # epsilon[0] = epsilon_0 * fraction ** alpha
-            epsilon[0] = 0  # 1e-2 # np.power(10, -float(4))
-            # epsilon[0] = epsilon_0  * (1 - i / (N - 1))
-            r_2 = torch.sqrt((mu + x - 1) ** 2 + y ** 2 + z ** 2) + epsilon[0]
-            r_1 = torch.sqrt((mu + x) ** 2 + y ** 2 + z ** 2)
-            dUdx = -(mu * (mu + x - 1)) / torch.pow(r_2, 3) - \
-                   ((1 - mu) * (mu + x)) / torch.pow(r_1, 3) + x
-            dUdy = - (mu * y) / torch.pow(r_2, 3) - \
-                   ((1 - mu) * y) / torch.pow(r_1, 3) + y
-            dUdz = - (mu * z) / torch.pow(r_2, 3) - \
-                   ((1 - mu) * z) / torch.pow(r_1, 3)
+            r_vecs = positions_nd - Y_expanded  # (N, n, 3)
+            r_norms = torch.norm(r_vecs, dim=-1, keepdim=True)  # (N, n, 1)
 
-            dxdt = vx  # derivative of position is velocity
-            dydt = vy
-            dzdt = vz
-            ax = dUdx + 2 * dydt  # derivative of velocity is acceleration
-            ay = dUdy - 2 * dxdt
-            az = dUdz
+            accel_terms = mus_nd[None, :, None] * r_vecs / (r_norms ** 3)  # (N, n, 3)
+            total_accel = accel_terms.sum(dim=1)  # (N, 3)
 
-            true_accel = torch.stack((ax, ay, az), dim=1)  # (N, 3)
+            return torch.mean((Y_ddot_preds - total_accel) ** 2)
 
-            return torch.mean((Y_ddot_predicted - true_accel) ** 2)
+        physics_residual = nbody_physics_residual(Y_pred, Y_ddot_pred, non_dim_positions, non_dim_grav_params)
 
-        physics_residual = cr3bp_physics_residual(Y_pred, Y_dot_pred, Y_ddot_pred, configuration)
 
         def distance_penalty(Y_predicted):
             return torch.mean(torch.sum(Y_predicted ** 2, dim=1))
@@ -882,7 +925,7 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
         rho_range=(parameters['MIN_RHO'], parameters['MAX_RHO']),
         rho_dot_range=(parameters['MIN_RHO_DOT'], parameters['MAX_RHO_DOT']),
         observer_positions=observer_positions,
-        observer_velocities=torch.zeros_like(observer_positions),
+        observer_velocities=observer_velocity,
         obs_indices=obs_indices,
         obs_epochs=colloc_epochs[obs_indices],
         delta_rho=parameters['DELTA_RHO'],
@@ -901,29 +944,20 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
         # print(f"Global iteration {global_its[0]} complete: accepted={accept}, epsilon={epsilon[0]}")
         global_its[0] += 1
 
-    # Run basin hopping
     start = time.time()
-    res = basinhopping(func, beta0, minimizer_kwargs=minimizer_kwargs, niter=parameters['NUMBER_OF_ITERATIONS'],
+    # Run basin hopping
+    res2 = basinhopping(func, beta0, minimizer_kwargs=minimizer_kwargs, niter=parameters['NUMBER_OF_ITERATIONS'],
                        stepsize=parameters['STEPSIZE'], T=parameters['TEMPERATURE'], callback=callback, take_step=mystep, disp=True)
     end = time.time()
 
-    beta_tensor_bh = np.asarray(res.x).reshape(q, H_size)
-    Y_pred_bh = H_matrix @ beta_tensor_bh.T  # (N, q)
-    Y_dot_pred_bh = c * H_dot @ beta_tensor_bh.T
-
-    Y_pred_obs_bh = Y_pred_bh[obs_indices]
-    Y_dot_pred_obs_bh = Y_dot_pred_bh[obs_indices]
-    positions[-2] = ((Y_pred_obs_bh + observer_positions).detach().cpu().numpy())
-    velocities[-2] = Y_dot_pred_obs_bh.detach().cpu().numpy()
-
-    beta_tensor_nlls = np.asarray(res.x).reshape(q, H_size)
+    beta_tensor_nlls = np.asarray(res2.x).reshape(q, H_size)
     Y_pred_nlls = H_matrix @ beta_tensor_nlls.T  # (N, q)
     Y_dot_pred_nlls = c * H_dot @ beta_tensor_nlls.T
 
     Y_pred_obs_nlls = Y_pred_nlls[obs_indices]
     Y_dot_pred_obs_nlls = Y_dot_pred_nlls[obs_indices]
-    positions[-1] = ((Y_pred_obs_nlls + observer_positions).detach().cpu().numpy())
-    velocities[-1] = Y_dot_pred_obs_nlls.detach().cpu().numpy()
+    positions[-1] = ((Y_pred_obs_nlls * L).detach().cpu().numpy())
+    velocities[-1] = (Y_dot_pred_obs_nlls * L / T).detach().cpu().numpy()
     # print(res.x)
 
     # for error measurement purposes
@@ -949,23 +983,14 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
 
     H_test, H_dot_test, H_ddot_test = compute_hidden_activations(tests_epochs_nd_norm_reshaped_tensor)
 
-    test_Y_pred_bh = H_test @ beta_tensor_bh.T  # (N, q)
-    test_Y_dot_pred_bh = c_test * H_dot_test @ beta_tensor_bh.T
-
     test_Y_pred_nlls = H_test @ beta_tensor_nlls.T  # (N, q)
     test_Y_dot_pred_nlls = c_test * H_dot_test @ beta_tensor_nlls.T
 
-    mu = configuration['SYSTEM_MASS_PARAMETER']
-    observer_position_final = torch.tensor([1. - mu, 0., 0.], dtype=test_Y_pred_nlls.dtype)
-    observer_positions_final = observer_position_final.unsqueeze(0).repeat(test_Y_pred_nlls.shape[0], 1)
+    final_positions_all_nlls = (test_Y_pred_nlls * L).detach().cpu().numpy()
+    final_velocities_all_nlls = (test_Y_dot_pred_nlls * L / T).detach().cpu().numpy()
 
-    final_positions_all_nlls = (test_Y_pred_nlls + observer_positions_final).detach().cpu().numpy()
-    final_velocities_all_nlls = (test_Y_dot_pred_nlls + observer_positions_final).detach().cpu().numpy()
-    final_positions_all_bh = (test_Y_pred_bh + observer_positions_final).detach().cpu().numpy()
-    final_velocities_all_bh = (test_Y_dot_pred_bh + observer_positions_final).detach().cpu().numpy()
-
-    final_positions = [final_positions_all_nlls, final_positions_all_bh]
-    final_velocities = [final_velocities_all_nlls, final_velocities_all_bh]
+    final_positions = [final_positions_all_nlls, final_positions_all_nlls]
+    final_velocities = [final_velocities_all_nlls, final_velocities_all_nlls]
 
     epochss = np.arange(total_its[0])
     data = {"TRAINING_EPOCH": epochss, "DATA_LOSS": data_losses, "PHYSICS_LOSS": physics_losses, "RANGE_LOSS": range_losses}

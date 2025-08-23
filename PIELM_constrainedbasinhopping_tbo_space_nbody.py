@@ -102,7 +102,7 @@ def generate_data(config, parameters):
     sin_ra_meas, cos_ra_meas, sin_dec_meas, cos_dec_meas = torch.sin(ra_m), torch.cos(ra_m), torch.sin(dec_m), torch.cos(dec_m)
 
     return ([sin_ra_meas, cos_ra_meas, sin_dec_meas, cos_dec_meas], torch.tensor(observer_positions, dtype=torch.float32),
-            observation_epochs, positions, velocities, ra, dec, sigma_ra_deg, sigma_dec_deg, torch.tensor(observer_velocities, dtype=torch.float32))
+            observation_epochs, positions, velocities, ra, dec, sigma_ra_deg, sigma_dec_deg,  file_path)
 
 
 ####
@@ -199,10 +199,10 @@ def sample_time_points(
                         samples = np.linspace(layer_start, layer_end, n, endpoint=False) + (layer_end - layer_start) / (
                                 2 * n)
 
-            else:
-                raise ValueError(f"Unsupported method: {method}")
+                else:
+                    raise ValueError(f"Unsupported method: {method}")
 
-            all_samples.append(samples)
+                all_samples.append(samples)
 
         additional_samples = np.concatenate(all_samples) if all_samples else np.array([])
 
@@ -263,10 +263,10 @@ def run(data, config, parameters):
     obs_mask = np.isin(colloc_points, data[2])
     obs_indices = np.where(obs_mask)[0]
 
-    return solve(epochs_nd_norm_reshaped_tensor, data[0], obs_indices, data[1], colloc_points, c, config, parameters, data[9])
+    return solve(epochs_nd_norm_reshaped_tensor, data[0], obs_indices, data[1], colloc_points, c, config, parameters)
 
 
-def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions, colloc_epochs, c, configuration, parameters, observer_velocities):
+def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions, colloc_epochs, c, configuration, parameters):
     L = configuration['AU_TO_M'] / configuration['KM_TO_M']  # Length scale in km
     G_km = (configuration['GRAVITATIONAL_CONSTANT'] / configuration['KM_TO_M'] ** 3)
     sys_mass = configuration['SUN_MASS'] + configuration['MOON_MASS'] + configuration['EARTH_MASS']
@@ -292,478 +292,7 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
     nlls_start = [0]
     first = [0]
 
-    class MyStep:
-        """
-         Structured basin-hopping step proposal constrained by the admissible region.
-
-         This class implements a physics-informed proposal mechanism for basin-hopping
-         in orbit determination problems. It perturbs the current solution `beta` by sampling
-         line-of-sight range (`rho`) and range-rate (`rho_dot`) uniformly within user-specified bounds
-         at each observation epoch. The resulting state vectors remain consistent with the
-         observed right ascension (`alpha`) and declination (`delta`) and their best-fit angular rates.
-
-         The step is constructed in the admissible region defined by the current observations and
-         projected back into the parameter space via the pseudoinverse of the design matrix.
-
-         Attributes:
-             q (int): Dimension of position/velocity vectors (typically 3 for Cartesian space).
-             H_size (int): Size of the basis vector `beta`.
-             observations (torch.Tensor): Observations at each epoch, shape (N, 4), containing:
-                 [sin(alpha), cos(alpha), sin(delta), cos(delta)] per row.
-             pos_step (float): Default positional step size scale (not currently used directly).
-             vel_step (float): Default velocity step size scale (not currently used directly).
-             H (torch.Tensor): Design matrix for position at each epoch, shape (N, H_size).
-             cH_dot (torch.Tensor): Design matrix for velocity at each epoch, shape (N, H_size).
-             rho_range (tuple): (min_rho, max_rho), uniform sampling range for line-of-sight distance.
-             rho_dot_range (tuple): (min_rho_dot, max_rho_dot), uniform sampling range for line-of-sight rate.
-             observer_positions (torch.Tensor): Observer position vectors at each epoch, shape (N, 3).
-             observer_velocities (torch.Tensor): Observer velocity vectors at each epoch, shape (N, 3).
-             obs_indices (torch.Tensor or list): Indices of observations in `H`/`cH_dot`.
-             obs_epochs (torch.Tensor): Times of each observation epoch, shape (N,).
-
-         Methods:
-             __call__(x: torch.Tensor) -> torch.Tensor:
-                 Delegates to `take_step(x)`.
-
-             take_step(beta: torch.Tensor) -> torch.Tensor:
-                 Propose a new `beta` vector by perturbing the current state in the admissible region.
-
-                 Args:
-                     beta (torch.Tensor): Current parameter vector, shape (q * H_size,).
-
-                 Returns:
-                     beta_new (torch.Tensor): Proposed parameter vector after admissible perturbation,
-                         shape (q * H_size,).
-         """
-
-        def __init__(self, q=3, H_size=10, observations=None, H=None, cH_dot=None,
-                     rho_range=None, rho_dot_range=None, observer_positions=None, observer_velocities=None,
-                     obs_indices=None, obs_epochs=None, delta_rho=None, delta_rho_dot=None, delta_rho_step=None):
-            """
-               Initialize a structured basin-hopping stepper constrained by the admissible region.
-
-               This constructor sets up the parameters, observation data, and matrices needed to
-               propose admissible steps in the solution space of an orbit determination problem.
-
-               Args:
-                   q (int, optional): Dimensionality of position/velocity vectors (default: 3).
-                   H_size (int, optional): Basis vector size in the parameter space (default: 10).
-                   observations (torch.Tensor, optional): Observation matrix of shape (N,4), with
-                       columns [sin(alpha), cos(alpha), sin(delta), cos(delta)] for each epoch.
-                   pos_step (float, optional): Position step size scale (not directly used here).
-                   vel_step (float, optional): Velocity step size scale (not directly used here).
-                   H (torch.Tensor, optional): Design matrix mapping beta to position (shape: [N, H_size]).
-                   cH_dot (torch.Tensor, optional): Design matrix mapping beta to velocity (shape: [N, H_size]).
-                   rho_range (tuple, optional): Tuple (rho_min, rho_max) defining uniform sampling range
-                       for line-of-sight distance perturbations.
-                   rho_dot_range (tuple, optional): Tuple (rho_dot_min, rho_dot_max) defining uniform sampling range
-                       for line-of-sight rate perturbations.
-                   observer_positions (torch.Tensor, optional): Observer positions at each epoch (shape: [N,3]).
-                   observer_velocities (torch.Tensor, optional): Observer velocities at each epoch (shape: [N,3]).
-                   obs_indices (torch.Tensor or list, optional): Indices of epochs to extract from H/cH_dot.
-                   obs_epochs (torch.Tensor, optional): Times of observations (shape: [N]).
-               """
-
-            self.obs = observations
-            self.q = q
-            self.H_size = H_size
-            self.H = H
-            self.cH_dot = cH_dot
-            self.rho_range = rho_range
-            self.rho_dot_range = rho_dot_range
-            self.observer_positions = observer_positions
-            self.observer_velocities = observer_velocities
-            self.obs_indices = obs_indices
-            self.obs_epochs = obs_epochs
-            self.delta_rho = delta_rho
-            self.delta_rho_dot = delta_rho_dot
-            self.delta_rho_step = delta_rho_step
-
-        def __call__(self, x):
-            """
-                Callable interface for proposing a new admissible step.
-
-                This method allows instances of the class to be called like a function,
-                and simply delegates to `take_step()`.
-
-                Args:
-                    x (torch.Tensor): Current parameter vector `beta`, shape (q * H_size,).
-
-                Returns:
-                    torch.Tensor: Proposed new parameter vector `beta_new`, shape (q * H_size,).
-                """
-            return self.take_step(x)
-
-        def take_step(self, beta):
-            """
-            Propose a new admissible step in the solution space.
-
-            This method perturbs the current parameter vector `beta` by sampling
-            line-of-sight distance (`rho`) and rate (`rho_dot`) uniformly at each epoch
-            within the specified admissible ranges. It computes the resulting position and
-            velocity vectors consistent with the observed right ascension (`alpha`) and declination (`delta`),
-            plus their best-fit angular rates, and projects the perturbed state back into
-            the parameter space via the pseudoinverse of the design matrix.
-
-            Args:
-                beta (torch.Tensor): Current parameter vector, shape (q * H_size,).
-
-            Returns:
-                torch.Tensor: Proposed parameter vector after admissible perturbation,
-                    shape (q * H_size,).
-            """
-
-            # transform beta to current r and v
-            beta_tensor = beta.reshape(self.q, self.H_size)
-            r = (self.H @ beta_tensor.T)[self.obs_indices]  # (N_obs, q)
-            v = (self.cH_dot @ beta_tensor.T)[self.obs_indices]  # (N_obs, q)
-
-            # unpack obs
-            sin_ra = self.obs[0]
-            cos_ra = self.obs[1]
-            sin_dec = self.obs[2]
-            cos_dec = self.obs[3]
-
-            alpha = torch.atan2(sin_ra, cos_ra)
-
-            def torch_unwrap(p, discont=np.pi, dim=-1):
-                diff = torch.diff(p, dim=dim)
-                diff_mod = (diff + np.pi) % (2 * np.pi) - np.pi
-                diff_mod = torch.where((diff_mod == -np.pi) & (diff > 0), np.pi, diff_mod)
-                p0 = torch.index_select(p, dim, torch.tensor([0], device=p.device))
-                return torch.cat([p0, p0 + torch.cumsum(diff_mod, dim=dim)], dim=dim)
-
-            alpha = torch_unwrap(alpha, dim=0)
-            delta = torch.atan2(sin_dec, cos_dec)
-
-            # compute basis vectors, shape (N,3)
-            l = torch.stack([
-                cos_ra * cos_dec,
-                sin_ra * cos_dec,
-                sin_dec
-            ], dim=-1)
-
-            l_alpha = torch.stack([
-                -sin_ra * cos_dec,
-                cos_ra * cos_dec,
-                torch.zeros_like(cos_dec)
-            ], dim=-1)
-
-            l_delta = torch.stack([
-                -cos_ra * sin_dec,
-                -sin_ra * sin_dec,
-                cos_dec
-            ], dim=-1)
-
-            def fit_angular_rates(t, alpha, delta):
-                # Convert Time object to seconds (or days, or any consistent unit)
-                t = Time(t)  # convert list/array of Time objects into a Time array
-                t_sec = (t - t[0]).to_value('s')  # TimeDelta → float seconds
-
-                t0 = t_sec.mean()
-                dt = t_sec - t0
-
-                alpha_mean = alpha.mean()
-                delta_mean = delta.mean()
-
-                dalpha = ((alpha - alpha_mean) * dt).sum() / (dt * dt).sum()
-                ddelta = ((delta - delta_mean) * dt).sum() / (dt * dt).sum()
-
-                return dalpha, ddelta
-
-            alpha_dot, delta_dot = fit_angular_rates(self.obs_epochs, alpha, delta)
-
-            # observer positions & velocities (N,3)
-            observer_pos = self.observer_positions / L
-            observer_vel = self.observer_velocities / L * T
-
-            # expand to (N,1) with perturbations
-            N = l.shape[0]
-
-            # sample n_init central candidates: (1,)
-            rho_0_central = 0
-            current_rho = 0
-            num_trys = 0
-            max_trys = 100
-            while (current_rho < self.rho_range[0] or current_rho > self.rho_range[1]) and num_trys < max_trys:
-                rho_0_central = (
-                        torch.rand(()) * 2 * self.delta_rho_step - self.delta_rho_step
-                )  # scalar
-
-                delta_r = observer_pos + rho_0_central * l
-                r_obs = r + delta_r
-                current_rho = torch.mean(torch.norm(r_obs, dim=1))
-                num_trys += 1
-
-            delta_rho_dot = (
-                    torch.rand(()) * (self.rho_dot_range[1] - self.rho_dot_range[0]) + self.rho_dot_range[0]
-            )  # (1,)
-
-            delta_v = (observer_vel +
-                    delta_rho_dot * l +
-                    rho_0_central * alpha_dot * l_alpha +
-                    rho_0_central * delta_dot * l_delta
-            )
-
-            # new r and v
-            v_obs = v + delta_v
-
-            all_H = torch.cat([self.H, self.cH_dot], dim=1)  # (N,2H_size)
-            H_obs = all_H[self.obs_indices]  # (N_obs, 2H_size)
-
-            H_pos = H_obs[:, :self.H_size]  # (N_obs, H_size)
-            H_vel = H_obs[:, self.H_size:]  # (N_obs, H_size)
-
-            # stack and solve
-            H_stacked = torch.cat([H_pos, H_vel], dim=0)  # (2N_obs, H_size)
-            rv_stacked_tensor = torch.cat([r_obs, v_obs], dim=0).float()  # (2N_obs, 3)
-
-            beta_best = torch.linalg.pinv(H_stacked) @ rv_stacked_tensor  # (H_size, 3)
-
-            return beta_best.view(-1)
-
-        def take_initial_step(self, n_init=10):
-            """
-            Sample n_init initial trajectories and pick the one
-            minimizing Jacobi constant variation.
-            """
-
-            # unpack obs
-            sin_ra = self.obs[0]
-            cos_ra = self.obs[1]
-            sin_dec = self.obs[2]
-            cos_dec = self.obs[3]
-
-            alpha = torch.atan2(sin_ra, cos_ra)
-
-            def torch_unwrap(p, discont=np.pi, dim=-1):
-                diff = torch.diff(p, dim=dim)
-                diff_mod = (diff + np.pi) % (2 * np.pi) - np.pi
-                diff_mod = torch.where((diff_mod == -np.pi) & (diff > 0), np.pi, diff_mod)
-                p0 = torch.index_select(p, dim, torch.tensor([0], device=p.device))
-                return torch.cat([p0, p0 + torch.cumsum(diff_mod, dim=dim)], dim=dim)
-
-            alpha = torch_unwrap(alpha, dim=0)
-            delta = torch.atan2(sin_dec, cos_dec)
-
-            # basis vectors (N,3)
-            l = torch.stack([
-                cos_ra * cos_dec,
-                sin_ra * cos_dec,
-                sin_dec
-            ], dim=-1)
-
-            l_alpha = torch.stack([
-                -sin_ra * cos_dec,
-                cos_ra * cos_dec,
-                torch.zeros_like(cos_dec)
-            ], dim=-1)
-
-            l_delta = torch.stack([
-                -cos_ra * sin_dec,
-                -sin_ra * sin_dec,
-                cos_dec
-            ], dim=-1)
-
-            def fit_angular_rates(t, alpha, delta):
-                # Convert Time object to seconds (or days, or any consistent unit)
-                t = Time(t)  # convert list/array of Time objects into a Time array
-                t_sec = (t - t[0]).to_value('s')  # TimeDelta → float seconds
-
-                t0 = t_sec.mean()
-                dt = t_sec - t0
-
-                alpha_mean = alpha.mean()
-                delta_mean = delta.mean()
-
-                dalpha = ((alpha - alpha_mean) * dt).sum() / (dt * dt).sum()
-                ddelta = ((delta - delta_mean) * dt).sum() / (dt * dt).sum()
-
-                return dalpha, ddelta
-
-            alpha_dot, delta_dot = fit_angular_rates(self.obs_epochs, alpha, delta)
-
-            # observer pos & vel: (N,3)
-            L = configuration['AU_TO_M'] / configuration['KM_TO_M']  # Length scale in km
-            G_km = (configuration['GRAVITATIONAL_CONSTANT'] / configuration['KM_TO_M'] ** 3)
-            sys_mass = configuration['SUN_MASS'] + configuration['MOON_MASS'] + configuration['EARTH_MASS']
-            T = np.sqrt(L ** 3 / (G_km * sys_mass))
-            observer_pos = self.observer_positions / L
-            observer_vel = self.observer_velocities * T / L
-
-            # sample n_init central candidates: (n_init,1)
-            rho_0_central = (
-                    torch.rand(n_init, 1) * (self.rho_range[1] - self.rho_range[0]) + self.rho_range[0]
-            )  # (n_init,1)
-
-            rho_dot_0_central = (
-                    torch.rand(n_init, 1) * (self.rho_dot_range[1] - self.rho_dot_range[0]) + self.rho_dot_range[0]
-            )  # (n_init,1)
-
-            # expand to (n_init,N,1) with perturbations
-            N = l.shape[0]
-            delta_rho = self.delta_rho
-            delta_rho_dot = self.delta_rho_dot  # adjust to your preferred delta
-
-            rho_0 = rho_0_central[:, None, :] + (
-                    torch.rand(n_init, N, 1) * 2 * delta_rho - delta_rho
-            )  # random in [central-delta, central+delta]
-
-            rho_dot_0 = rho_dot_0_central[:, None, :] + (
-                    torch.rand(n_init, N, 1) * 2 * delta_rho_dot - delta_rho_dot
-            )
-
-            # expand basis vectors to (1,N,3)
-            l = l[None, :, :]
-            l_alpha = l_alpha[None, :, :]
-            l_delta = l_delta[None, :, :]
-            observer_pos = observer_pos[None, :, :]
-            observer_vel = observer_vel[None, :, :]
-
-            # compute r_0 and v_0: (n_init,N,3)
-            r_0 = observer_pos + rho_0 * l
-            v_0 = (
-                    observer_vel +
-                    rho_dot_0 * l +
-                    rho_0 * alpha_dot * l_alpha +
-                    rho_0 * delta_dot * l_delta
-            )
-
-            # compute Jacobi for each (n_init,N)
-            def compute_jacobi(r_0, v_0):
-                mu = configuration['SYSTEM_MASS_PARAMETER']
-
-                r_bary = r_0
-                v_bary = v_0
-                x = r_bary[:, :, 0]
-                y = r_bary[:, :, 1]
-                z = r_bary[:, :, 2]
-                vx = v_bary[:, :, 0]
-                vy = v_bary[:, :, 1]
-                vz = v_bary[:, :, 2]
-                r_2 = torch.sqrt((mu + x - 1) ** 2 + y ** 2 + z ** 2)
-                r_1 = torch.sqrt((mu + x) ** 2 + y ** 2 + z ** 2)
-                omega = 0.5 * (x ** 2 + y ** 2) + (1 - mu) / r_1 + mu / r_2
-                energy = 2 * omega - (vx ** 2 + vy ** 2 + vz ** 2)
-                return energy
-
-            jacobi = compute_jacobi(r_0, v_0)
-
-            # variance of Jacobi over timesteps, per candidate
-            jacobi_var = torch.var(jacobi, dim=1)
-
-            # pick candidate with smallest variance
-            best_idx = torch.argmin(jacobi_var)
-            r_best = r_0[best_idx]  # (N,3)
-            v_best = v_0[best_idx]  # (N,3)
-
-            r_obs = r_best
-            v_obs = v_best
-
-            all_H = torch.cat([self.H, self.cH_dot], dim=1)  # (N,2H_size)
-            H_obs = all_H[self.obs_indices]  # (N_obs, 2H_size)
-
-            H_pos = H_obs[:, :self.H_size]  # (N_obs, H_size)
-            H_vel = H_obs[:, self.H_size:]  # (N_obs, H_size)
-
-            # stack and solve
-            H_stacked = torch.cat([H_pos, H_vel], dim=0)  # (2N_obs, H_size)
-            rv_stacked = torch.cat([r_obs, v_obs], dim=0)  # (2N_obs, 3)
-
-            beta_best = torch.linalg.pinv(H_stacked) @ rv_stacked  # (H_size, 3)
-
-            global_positions.append(r_best)
-
-            return beta_best.view(-1)
-
-        def get_bounds(self, scale_factor=1):
-            # unpack obs
-            sin_ra = self.obs[0]
-            cos_ra = self.obs[1]
-            sin_dec = self.obs[2]
-            cos_dec = self.obs[3]
-
-            alpha = torch.atan2(sin_ra, cos_ra)
-
-            def torch_unwrap(p, discont=np.pi, dim=-1):
-                diff = torch.diff(p, dim=dim)
-                diff_mod = (diff + np.pi) % (2 * np.pi) - np.pi
-                diff_mod = torch.where((diff_mod == -np.pi) & (diff > 0), np.pi, diff_mod)
-                p0 = torch.index_select(p, dim, torch.tensor([0], device=p.device))
-                return torch.cat([p0, p0 + torch.cumsum(diff_mod, dim=dim)], dim=dim)
-
-            alpha = torch_unwrap(alpha, dim=0)
-            delta = torch.atan2(sin_dec, cos_dec)
-
-            # compute basis vectors, shape (N,3)
-            l = torch.stack([
-                cos_ra * cos_dec,
-                sin_ra * cos_dec,
-                sin_dec
-            ], dim=-1)
-
-            l_alpha = torch.stack([
-                -sin_ra * cos_dec,
-                cos_ra * cos_dec,
-                torch.zeros_like(cos_dec)
-            ], dim=-1)
-
-            l_delta = torch.stack([
-                -cos_ra * sin_dec,
-                -sin_ra * sin_dec,
-                cos_dec
-            ], dim=-1)
-
-            # fit angular rates using least squares
-            def fit_angular_rates(t, alpha, delta):
-                t0 = t.mean()
-                dt = t - t0
-
-                alpha_mean = alpha.mean()
-                delta_mean = delta.mean()
-
-                dalpha = ((alpha - alpha_mean) * dt).sum() / (dt * dt).sum()
-                ddelta = ((delta - delta_mean) * dt).sum() / (dt * dt).sum()
-
-                return dalpha, ddelta
-
-            alpha_dot, delta_dot = fit_angular_rates(self.obs_epochs, alpha, delta)
-
-            H_pos = self.H[self.obs_indices]
-            H_vel = self.cH_dot[self.obs_indices]  # (N_obs, H_size)
-
-            # stack and solve
-            H_stacked = torch.cat([H_pos, H_vel], dim=0)  # (2N_obs, H_size)
-
-            # lower bound
-            rho_min = self.rho_range[0]
-            rhod_min = self.rho_dot_range[0]
-            r_min = rho_min * l
-            v_min = (
-                    rhod_min * l +
-                    rho_min * alpha_dot * l_alpha +
-                    rho_min * delta_dot * l_delta
-            )
-            rv_stacked_min = torch.cat([r_min, v_min], dim=0)  # (2N_obs, 3)
-            rv_stacked_min_tensor = torch.tensor(rv_stacked_min, dtype=torch.float32)
-            beta_min = torch.linalg.pinv(H_stacked) @ rv_stacked_min_tensor  # (H_size, 3)
-
-            # upper bound
-            rho_max = self.rho_range[1]
-            rhod_max = self.rho_dot_range[1]
-            r_max = rho_max * l
-            v_max = (
-                    rhod_max * l +
-                    rho_max * alpha_dot * l_alpha +
-                    rho_max * delta_dot * l_delta
-            )
-            rv_stacked_max = torch.cat([r_max, v_max], dim=0)  # (2N_obs, 3)
-            rv_stacked_max_tensor = torch.tensor(rv_stacked_max, dtype=torch.float32)
-            beta_max = torch.linalg.pinv(H_stacked) @ rv_stacked_max_tensor  # (H_size, 3)
-
-            return beta_min.reshape(-1) / scale_factor, beta_max.reshape(-1) * scale_factor
-
-    def compute_hidden_activations():
+    def compute_hidden_activations(input_z):
         """
         :param activation:
         :param z: shape (d, 1)
@@ -771,14 +300,14 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
         :param b: shape (H,)
         :return: H, H_prime, H_double_prime
         """
-        z_proj = W @ epochs_nd_norm_reshaped_tensor.T + b[:, None]  # (H, d)
+        z_proj = W @ input_z.T + b[:, None]  # (H, d)
         H = torch.tanh(z_proj)
         H_prime = (1 - H ** 2) * W  # (H, d)
         H_double_prime = -2 * H * (1 - H ** 2) * (W ** 2)  # (H, d)
 
         return H.T, H_prime.T, H_double_prime.T  # shapes: (d, H)
 
-    H_matrix, H_dot, H_ddot = compute_hidden_activations()
+    H_matrix, H_dot, H_ddot = compute_hidden_activations(epochs_nd_norm_reshaped_tensor)
 
     # === Residual Function for Least Squares ===
     def loss_function(beta_flat):
@@ -1180,19 +709,47 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
 
     beta_tensor_nlls = np.asarray(res2.x).reshape(q, H_size)
     Y_pred_nlls = H_matrix @ beta_tensor_nlls.T  # (N, q)
-    Y_pred_nlls_km = Y_pred_nlls * L
     Y_dot_pred_nlls = c * H_dot @ beta_tensor_nlls.T
-    Y_dot_pred_nlls_kms = Y_dot_pred_nlls * L / T
 
     Y_pred_obs_nlls = Y_pred_nlls[obs_indices]
-    Y_pred_obs_nlls_km = Y_pred_obs_nlls * L
     Y_dot_pred_obs_nlls = Y_dot_pred_nlls[obs_indices]
-    Y_dot_pred_obs_nlls_kms = Y_dot_pred_obs_nlls * L / T
-    positions[-1] = Y_pred_obs_nlls_km.detach().cpu().numpy()
-    velocities[-1] = Y_dot_pred_obs_nlls_kms.detach().cpu().numpy()
+    positions[-1] = ((Y_pred_obs_nlls * L).detach().cpu().numpy())
+    velocities[-1] = (Y_dot_pred_obs_nlls * L / T).detach().cpu().numpy()
     # print(res.x)
+
+    # for error measurement purposes
+    initial_colloc_epoch = colloc_epochs[0]
+    final_colloc_epoch = colloc_epochs[-1]
+
+    initial_obs_epoch = colloc_epochs[obs_indices][0]
+    final_obs_epoch = colloc_epochs[obs_indices][-1]
+
+    num_points = 1000
+    test_epochs = np.linspace(initial_obs_epoch, final_obs_epoch, num_points)
+
+    # Combine, ensuring the start and end colloc epochs are at the edges
+    total_test_epochs = np.concatenate((
+        [initial_colloc_epoch],
+        test_epochs,
+        [final_colloc_epoch]
+    ))
+
+    # normalize epochs (inputs)
+    test_epochs_nd_norm, c_test = epoch_normalization(total_test_epochs, parameters['INPUT_RANGE'], configuration)
+    tests_epochs_nd_norm_reshaped_tensor = torch.tensor(test_epochs_nd_norm, dtype=torch.float32).unsqueeze(1)
+
+    H_test, H_dot_test, H_ddot_test = compute_hidden_activations(tests_epochs_nd_norm_reshaped_tensor)
+
+    test_Y_pred_nlls = H_test @ beta_tensor_nlls.T  # (N, q)
+    test_Y_dot_pred_nlls = c_test * H_dot_test @ beta_tensor_nlls.T
+
+    final_positions_all_nlls = (test_Y_pred_nlls * L).detach().cpu().numpy()
+    final_velocities_all_nlls = (test_Y_dot_pred_nlls * L / T).detach().cpu().numpy()
+
+    final_positions = [final_positions_all_nlls, final_positions_all_nlls]
+    final_velocities = [final_velocities_all_nlls, final_velocities_all_nlls]
 
     epochss = np.arange(total_its[0])
     data = {"TRAINING_EPOCH": epochss, "DATA_LOSS": data_losses, "PHYSICS_LOSS": physics_losses, "RANGE_LOSS": range_losses}
 
-    return pd.DataFrame(data), positions, velocities, nlls_start[0]
+    return pd.DataFrame(data), positions, velocities, nlls_start[0], final_positions, final_velocities, end - start

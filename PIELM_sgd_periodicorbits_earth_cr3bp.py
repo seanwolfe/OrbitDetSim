@@ -1,19 +1,8 @@
-from astropy import units as u
-from astropy.time import Time
-from poliastro.bodies import Earth
-from poliastro.twobody import Orbit
-from poliastro.plotting.static import StaticOrbitPlotter
-from poliastro.twobody.propagation import propagate
-import matplotlib.pyplot as plt
 import numpy as np
-from astropy.coordinates import EarthLocation, AltAz, ITRS, GCRS, SkyCoord, Angle
-from typing import Callable, List, Literal, Tuple, Union
+from typing import List, Literal, Tuple, Union
 import torch
-from torch.autograd.functional import jacobian
-from scipy.optimize import least_squares
 import pandas as pd
 import os
-import yaml
 import torch.nn as nn
 import n_body_integrator as nbody
 from scipy.integrate import odeint
@@ -346,7 +335,7 @@ def run(data, config, parameters):
     obs_mask = np.isin(colloc_points, data[2])
     obs_indices = np.where(obs_mask)[0]
 
-    elm = ELM(parameters['HIDDEN_DIMENSION'], c_normalization=c, config=config)
+    elm = ELM(parameters['HIDDEN_DIMENSION'], c_normalization=c, config=parameters)
     start = time.time()
     data_df, positions, velocities, nlls_start, final_positions, final_velocities = train(elm,
         epochs_nd_norm_reshaped_tensor, data[0], obs_indices, data[1], colloc_points, config, parameters)

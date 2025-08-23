@@ -603,46 +603,34 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
             observer_pos = self.observer_positions / L
             observer_vel = self.observer_velocities / L * T
 
-            # expand to (N,1) with perturbations
-            N = l.shape[0]
+            # Current LOS ranges per epoch (projection onto LOS)
+            rho_i = torch.sum(r * l, dim=1)  # (N,)
+            rho_base = rho_i.mean()  # scalar baseline rho
 
-            # sample n_init central candidates: (1,)
-            rho_0_central = 0
-            current_rho = 0
-            num_trys = 0
-            max_trys = 100
-            while (current_rho < self.rho_range[0] or current_rho > self.rho_range[1]) and num_trys < max_trys:
-                rho_0_central = (
-                        torch.rand(()) * 2 * self.delta_rho_step - self.delta_rho_step
-                )  # scalar
+            # Sample perturbation in range space
+            delta_rho = (torch.rand((), device=r.device) * 2 - 1.0) * self.delta_rho_step
+            rho_min, rho_max = self.rho_range
+            rho = torch.clamp(rho_base + delta_rho, min=rho_min, max=rho_max)  # scalar new rho
 
-                delta_r = observer_pos + rho_0_central * l
-                r_obs = r + delta_r
-                current_rho = torch.mean(torch.norm(r_obs, dim=1))
-                num_trys += 1
+            # Perturbation vector in r-space (direction l)
+            delta_r = (rho - rho_base) * l  # (N,3)
 
-            rho_dot_0_central = 0
-            current_rho_dot = -1e15
-            num_trys = 0
-            max_trys = 100
-            while (current_rho_dot < self.rho_dot_range[0] or current_rho_dot > self.rho_dot_range[1]) and num_trys < max_trys:
-                rho_dot_0_central = torch.rand(()) * 2 * self.delta_rho_dot_step - self.delta_rho_dot_step
+            # Perturbed candidate positions (relative to observer)
+            r_obs = r + delta_r  # (N,3)
 
-                delta_v = (observer_vel +
-                           rho_dot_0_central * l +
-                           rho_0_central * alpha_dot * l_alpha +
-                           rho_0_central * delta_dot * l_delta
-                           )
+            # Baseline rho_dot from current state
+            rho_dot_base = torch.sum(v * l, dim=-1).mean()  # scalar baseline rho_dot
 
-                # new r and v
-                v_obs = v + delta_v
+            # Propose perturbed rho_dot within range
+            delta = (torch.rand((), device=v.device) * 2 - 1.0) * self.delta_rho_dot_step
+            rho_dot_min, rho_dot_max = self.rho_dot_range
+            rho_dot_target = torch.clamp(rho_dot_base + delta, min=rho_dot_min, max=rho_dot_max)
 
-                # Compute current_rho_dot as projection of velocity along line of sight
-                rho_dot_per_epoch = torch.sum(v_obs * l, dim=-1)  # (N,)
-                current_rho_dot = rho_dot_per_epoch.mean()
+            # Rebuild candidate velocities along LOS
+            delta_v = (rho_dot_target - rho_dot_base) * l  # (N,3)
 
-                num_trys += 1
-
+            # Update observed velocity
+            v_obs = v + delta_v
 
             all_H = torch.cat([self.H, self.cH_dot], dim=1)  # (N,2H_size)
             H_obs = all_H[self.obs_indices]  # (N_obs, 2H_size)
@@ -805,92 +793,6 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
 
             return beta_best.view(-1)
 
-        def get_bounds(self, scale_factor=1):
-            # unpack obs
-            sin_ra = self.obs[0]
-            cos_ra = self.obs[1]
-            sin_dec = self.obs[2]
-            cos_dec = self.obs[3]
-
-            alpha = torch.atan2(sin_ra, cos_ra)
-
-            def torch_unwrap(p, discont=np.pi, dim=-1):
-                diff = torch.diff(p, dim=dim)
-                diff_mod = (diff + np.pi) % (2 * np.pi) - np.pi
-                diff_mod = torch.where((diff_mod == -np.pi) & (diff > 0), np.pi, diff_mod)
-                p0 = torch.index_select(p, dim, torch.tensor([0], device=p.device))
-                return torch.cat([p0, p0 + torch.cumsum(diff_mod, dim=dim)], dim=dim)
-
-            alpha = torch_unwrap(alpha, dim=0)
-            delta = torch.atan2(sin_dec, cos_dec)
-
-            # compute basis vectors, shape (N,3)
-            l = torch.stack([
-                cos_ra * cos_dec,
-                sin_ra * cos_dec,
-                sin_dec
-            ], dim=-1)
-
-            l_alpha = torch.stack([
-                -sin_ra * cos_dec,
-                cos_ra * cos_dec,
-                torch.zeros_like(cos_dec)
-            ], dim=-1)
-
-            l_delta = torch.stack([
-                -cos_ra * sin_dec,
-                -sin_ra * sin_dec,
-                cos_dec
-            ], dim=-1)
-
-            # fit angular rates using least squares
-            def fit_angular_rates(t, alpha, delta):
-                t0 = t.mean()
-                dt = t - t0
-
-                alpha_mean = alpha.mean()
-                delta_mean = delta.mean()
-
-                dalpha = ((alpha - alpha_mean) * dt).sum() / (dt * dt).sum()
-                ddelta = ((delta - delta_mean) * dt).sum() / (dt * dt).sum()
-
-                return dalpha, ddelta
-
-            alpha_dot, delta_dot = fit_angular_rates(self.obs_epochs, alpha, delta)
-
-            H_pos = self.H[self.obs_indices]
-            H_vel = self.cH_dot[self.obs_indices]  # (N_obs, H_size)
-
-            # stack and solve
-            H_stacked = torch.cat([H_pos, H_vel], dim=0)  # (2N_obs, H_size)
-
-            # lower bound
-            rho_min = self.rho_range[0]
-            rhod_min = self.rho_dot_range[0]
-            r_min = rho_min * l
-            v_min = (
-                    rhod_min * l +
-                    rho_min * alpha_dot * l_alpha +
-                    rho_min * delta_dot * l_delta
-            )
-            rv_stacked_min = torch.cat([r_min, v_min], dim=0)  # (2N_obs, 3)
-            rv_stacked_min_tensor = torch.tensor(rv_stacked_min, dtype=torch.float32)
-            beta_min = torch.linalg.pinv(H_stacked) @ rv_stacked_min_tensor  # (H_size, 3)
-
-            # upper bound
-            rho_max = self.rho_range[1]
-            rhod_max = self.rho_dot_range[1]
-            r_max = rho_max * l
-            v_max = (
-                    rhod_max * l +
-                    rho_max * alpha_dot * l_alpha +
-                    rho_max * delta_dot * l_delta
-            )
-            rv_stacked_max = torch.cat([r_max, v_max], dim=0)  # (2N_obs, 3)
-            rv_stacked_max_tensor = torch.tensor(rv_stacked_max, dtype=torch.float32)
-            beta_max = torch.linalg.pinv(H_stacked) @ rv_stacked_max_tensor  # (H_size, 3)
-
-            return beta_min.reshape(-1) / scale_factor, beta_max.reshape(-1) * scale_factor
 
     def compute_hidden_activations(input_z):
         """
@@ -906,7 +808,6 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
         H_double_prime = -2 * H * (1 - H ** 2) * (W ** 2)  # (H, d)
 
         return H.T, H_prime.T, H_double_prime.T  # shapes: (d, H)
-
     H_matrix, H_dot, H_ddot = compute_hidden_activations(epochs_nd_norm_reshaped_tensor)
 
     # === Residual Function for Least Squares ===
