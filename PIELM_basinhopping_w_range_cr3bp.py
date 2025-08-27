@@ -960,9 +960,9 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
     observer_positions_final = observer_position_final.unsqueeze(0).repeat(test_Y_pred_nlls.shape[0], 1)
 
     final_positions_all_nlls = (test_Y_pred_nlls + observer_positions_final).detach().cpu().numpy()
-    final_velocities_all_nlls = (test_Y_dot_pred_nlls + observer_positions_final).detach().cpu().numpy()
+    final_velocities_all_nlls = (test_Y_dot_pred_nlls).detach().cpu().numpy()
     final_positions_all_bh = (test_Y_pred_bh + observer_positions_final).detach().cpu().numpy()
-    final_velocities_all_bh = (test_Y_dot_pred_bh + observer_positions_final).detach().cpu().numpy()
+    final_velocities_all_bh = (test_Y_dot_pred_bh).detach().cpu().numpy()
 
     final_positions = [final_positions_all_nlls, final_positions_all_bh]
     final_velocities = [final_velocities_all_nlls, final_velocities_all_bh]

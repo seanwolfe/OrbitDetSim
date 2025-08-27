@@ -1047,7 +1047,7 @@ def run_IOD_testing(config):
                               'MAX_ITERATiONS': 20000, 'WEIGHT_SCALE_FACTOR': 1e0,
                               'G_TOLERANCE': 1e-15, 'MAX_NFEV': 1000,
                               'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': run_idx}
+                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 4}
                 if config['orbit'] == 'Horizontal Lyapunov Orbits':
                     data = pielm_cgn.generate_data(config, parameters)
                 elif config['orbit'] == 'Halo Orbits':
@@ -1067,7 +1067,7 @@ def run_IOD_testing(config):
                               'PHYSICS_WEIGHT': 1e1, 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1,
                               'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'G_TOLERANCE': 1e-15, 'WEIGHT_SCALE_FACTOR': 1e0,
                               'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': run_idx
+                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 30
                                }
                 if config['orbit'] == 'Horizontal Lyapunov Orbits':
                     data = pielm_cgs.generate_data(config, parameters)
@@ -1085,14 +1085,14 @@ def run_IOD_testing(config):
                               'TIME_DELTA': 0.5 * u.day,
                               'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
                               'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
-                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
+                              'HIDDEN_DIMENSION': 10, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
                               'PHYSICS_WEIGHT': 1e3, 'LAMBDA_DIST':1e-1, 'STEPSIZE': np.power(10, float(1)),
                               'NUMBER_OF_ITERATIONS': 100, 'TEMPERATURE': 1e-6,
                               'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000,
                               'MAX_ITERATiONS': 20000, 'TARGET_ACCEPT_RATE': 0.5, 'STEPWISE_FACTOR': 0.9,
                               'G_TOLERANCE': 1e-15, 'MAX_NFEV': 100, 'WEIGHT_SCALE_FACTOR': 1e0,
                               'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': run_idx,
+                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 87,
                               'MIN_RHO': 1e-4, 'MAX_RHO': 1e-1, 'MIN_RHO_DOT': -1.01e0, 'MAX_RHO_DOT': 1.01e0,
                               'DELTA_RHO': 1e-2, 'DELTA_RHO_DOT': 0.067, 'INITIAL_TRAJECTORIES': 1}
                 config['lambda'] = parameters['STEPSIZE']
@@ -1227,7 +1227,7 @@ def run_IOD_testing(config):
             local_master.append(parameters)
 
             df = pd.DataFrame(data_for_df)
-            # util.iod_viz(df, results, positions, velocities, nlls_start, config, rmse_df)
+            util.iod_viz(df, results, positions, velocities, nlls_start, config, rmse_df)
 
     # Convert local list to DataFrame
     df_local = pd.DataFrame(local_master)
@@ -1257,7 +1257,11 @@ def run_IOD_hyperparameter(config):
     param3_values = config['range_weight']
 
     # Create all hyperparameter combinations
-    hyperparam_combos = list(itertools.product(param1_values, param2_values, param3_values))
+    if config['optimizer'] == 'CONSTRAINED_BASIN_HOPPING':
+        hyperparam_combos = list(itertools.product(param1_values, param2_values, param3_values))
+    else:
+        hyperparam_combos = list(itertools.product(param1_values, param2_values))    
+
     n_combos = len(hyperparam_combos)
 
     # Each rank gets a subset of hyperparameter combos (round-robin)
@@ -1272,6 +1276,7 @@ def run_IOD_hyperparameter(config):
     for combo in local_combos:
         print(f"[Rank {rank}] Running hyperparameter combo {combo}")
 
+        run_number_orb = 0.
         for run_idx in range(n_runs):
 
             # get case
@@ -1334,6 +1339,8 @@ def run_IOD_hyperparameter(config):
 
             elif dynamics == 'CR3BP' and observer == 'GROUND' and optimizer == 'NLLS':
                 import  PIELM_nlls_periodicorbits_earth_cr3bp as pielm_cgn
+                if run_idx % 3 == 0:
+                   run_number_orb = 95 - 8 * (run_idx % 10)
                 parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5,
                               'TIME_DELTA': 0.5 * u.day,
                               'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
@@ -1344,10 +1351,10 @@ def run_IOD_hyperparameter(config):
                               'MAX_ITERATiONS': 20000, 'WEIGHT_SCALE_FACTOR': combo[1],
                               'G_TOLERANCE': 1e-15, 'MAX_NFEV': 1000,
                               'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': run_idx}
-                if config['orbit'] == 'Horizontal Lyapunov Orbits':
+                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': run_number_orb}
+                if run_idx % 3 == 0:
                     data = pielm_cgn.generate_data(config, parameters)
-                elif config['orbit'] == 'Halo Orbits':
+                elif run_idx % 3 == 1:
                     parameters['ORBIT_TYPE'] = 'Halo Orbits'
                     data = pielm_cgn.generate_data(config, parameters)
                 else:
@@ -1357,18 +1364,21 @@ def run_IOD_hyperparameter(config):
 
             elif dynamics == 'CR3BP' and observer == 'GROUND' and optimizer == 'SGD':
                 import  PIELM_sgd_periodicorbits_earth_cr3bp as pielm_cgs
+                if run_idx % 3 == 0:
+                    run_number_orb = 95 - 8 * (run_idx % 10)
                 parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5, 'TIME_DELTA': 0.5 * u.day,
                               'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
                               'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
                               'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 100000, 'LEARNING_RATE': 1e-2,
-                              'PHYSICS_WEIGHT': 1e1, 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1,
+                              'PHYSICS_WEIGHT': combo[0], 'WEIGHT_SCALE_FACTOR': combo[1],
+                              'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1,
                               'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'G_TOLERANCE': 1e-15,
                               'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': run_idx
+                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': run_number_orb
                                }
-                if config['orbit'] == 'Horizontal Lyapunov Orbits':
+                if run_idx % 3 == 0:
                     data = pielm_cgs.generate_data(config, parameters)
-                elif config['orbit'] == 'Halo Orbits':
+                elif run_idx % 3 == 1:
                     parameters['ORBIT_TYPE'] = 'Halo Orbits'
                     data = pielm_cgs.generate_data(config, parameters)
                 else:
@@ -1378,25 +1388,27 @@ def run_IOD_hyperparameter(config):
 
             elif dynamics == 'CR3BP' and observer == 'GROUND' and optimizer == 'CONSTRAINED_BASIN_HOPPING':
                 import PIELM_basinhopping_w_range_cr3bp as pielm_cgcb
+                if run_idx % 3 == 0:
+                   run_number_orb = 95 - 8 * (run_idx % 10)
                 parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5,
                               'TIME_DELTA': 0.5 * u.day,
                               'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
                               'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
                               'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': np.power(10, float(0)), 'LAMBDA_DIST':1e0, 'STEPSIZE': np.power(10, float(1)),
+                              'PHYSICS_WEIGHT': combo[0], 'LAMBDA_DIST':combo[2], 'STEPSIZE': np.power(10, float(1)),
                               'NUMBER_OF_ITERATIONS': 10, 'TEMPERATURE': np.power(10, float(-4)),
                               'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000,
                               'MAX_ITERATiONS': 20000, 'TARGET_ACCEPT_RATE': 0.5, 'STEPWISE_FACTOR': 0.9,
-                              'G_TOLERANCE': 1e-15, 'MAX_NFEV': 100,
+                              'G_TOLERANCE': 1e-15, 'MAX_NFEV': 100, 'WEIGHT_SCALE_FACTOR': combo[1],
                               'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 95 - run_idx,
+                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': run_number_orb,
                               'MIN_RHO': 1e-4, 'MAX_RHO': 1e-1, 'MIN_RHO_DOT': -1.01e0, 'MAX_RHO_DOT': 1.01e0,
                               'DELTA_RHO': 1e-2, 'DELTA_RHO_DOT': 0.067, 'INITIAL_TRAJECTORIES': 1}
                 config['lambda'] = parameters['STEPSIZE']
                 config['run_idx'] = run_idx
-                if config['orbit'] == 'Horizontal Lyapunov Orbits':
+                if run_idx % 3 == 0:
                     data = pielm_cgcb.generate_data(config, parameters)
-                elif config['orbit'] == 'Halo Orbits':
+                elif run_idx % 3 == 1:
                     parameters['ORBIT_TYPE'] = 'Halo Orbits'
                     data = pielm_cgcb.generate_data(config, parameters)
                 else:

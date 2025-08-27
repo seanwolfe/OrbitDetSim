@@ -49,7 +49,7 @@ def generate_iod_file(file_path, final_pos, final_vel, true_pos, true_vel, epoch
 
 
 def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, config, rmse_df):
-    fig = plt.figure(figsize=(18, 12))
+    fig = plt.figure()
 
     # for plotting optimization progress in x, y, z
     total_length = len(results['TRAINING_EPOCH'])
@@ -58,12 +58,13 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
     indices.append(-1)
 
     positions_filtered = [pred_positions[i] for i in indices]  # shape: (E, len(indices), 3)
-    x_vals = [pos[:, 0] for pos in positions_filtered]  # (E, len(indices))
-    y_vals = [pos[:, 1] for pos in positions_filtered]
-    z_vals = [pos[:, 2] for pos in positions_filtered]
+    x_vals = [pos[:, 0] * config['AU_TO_M'] / config['KM_TO_M'] for pos in positions_filtered]  # (E, len(indices))
+    y_vals = [pos[:, 1] * config['AU_TO_M'] / config['KM_TO_M'] for pos in positions_filtered]
+    z_vals = [pos[:, 2] * config['AU_TO_M'] / config['KM_TO_M'] for pos in positions_filtered]
     epoch_vals = results['TRAINING_EPOCH'].iloc[indices]
-    observation_epochs = iod_data["EPOCH(JDTDB)"].values
-    true_positions = iod_data.loc[:, ["GEO_X(KM)", "GEO_Y(KM)", "GEO_Z(KM)"]].values
+    if config['dynamics'] == 'CR3BP':
+        observation_epochs = iod_data["EPOCH(JDTDB)"].values * 5.02189e6 / config['SECONDS_PER_DAY']
+    true_positions = iod_data.loc[:, ["GEO_X(KM)", "GEO_Y(KM)", "GEO_Z(KM)"]].values * config['AU_TO_M'] / config['KM_TO_M']
     true_velocities = iod_data.loc[:, ["GEO_VX(KM/S)", "GEO_VY(KM/S)", "GEO_VZ(KM/S)"]].values
 
     ### x ###
@@ -74,13 +75,13 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
         lines.append(line)
         colors.append(epoch_val)
 
-    lc = LineCollection(lines, cmap='viridis', array=np.array(colors), linewidth=2)
-    ax = fig.add_subplot(3, 3, 1)  # 3D subplot
+    lc = LineCollection(lines, cmap='coolwarm', array=np.array(colors), linewidth=2)
+    ax = fig.add_subplot()  # 3D subplot
     ax.plot(observation_epochs, true_positions[:, 0], linestyle='--', color='black', zorder=15)
     ax.add_collection(lc)
     ax.autoscale()  # Auto scale limits to lines
-    ax.set_xlabel('Time ' + str(config['lambda']))
-    ax.set_ylabel('X position')
+    ax.set_xlabel('Time [days]')
+    ax.set_ylabel('X position [km]')
 
     cbar = fig.colorbar(lc, ax=ax)
     cbar.set_label('Training epoch')
@@ -93,15 +94,16 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
         lines.append(line)
         colors.append(epoch_val)
 
-    lc2 = LineCollection(lines, cmap='viridis', array=np.array(colors), linewidth=2)
-    ax2 = fig.add_subplot(3, 3, 2)  # 3D subplot
+    fig2 = plt.figure()
+    lc2 = LineCollection(lines, cmap='coolwarm', array=np.array(colors), linewidth=2)
+    ax2 = fig2.add_subplot()  # 3D subplot
     ax2.plot(observation_epochs, true_positions[:, 1], linestyle='--', color='black', zorder=15)
     ax2.add_collection(lc2)
     ax2.autoscale()  # Auto scale limits to lines
-    ax2.set_xlabel('Time')
-    ax2.set_ylabel('Y position')
+    ax2.set_xlabel('Time [days]')
+    ax2.set_ylabel('Y position [km]')
 
-    cbar2 = fig.colorbar(lc2, ax=ax2)
+    cbar2 = fig2.colorbar(lc2, ax=ax2)
     cbar2.set_label('Training epoch')
 
     ### z ###
@@ -112,15 +114,16 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
         lines.append(line)
         colors.append(epoch_val)
 
-    lc3 = LineCollection(lines, cmap='viridis', array=np.array(colors), linewidth=2)
-    ax3 = fig.add_subplot(3, 3, 3)  # 3D subplot
+    fig3 = plt.figure()
+    lc3 = LineCollection(lines, cmap='coolwarm', array=np.array(colors), linewidth=2)
+    ax3 = fig3.add_subplot()  # 3D subplot
     ax3.plot(observation_epochs, true_positions[:, 2], linestyle='--', color='black', zorder=15)
     ax3.add_collection(lc3)
     ax3.autoscale()  # Auto scale limits to lines
-    ax3.set_xlabel('Time')
-    ax3.set_ylabel('Z position')
+    ax3.set_xlabel('Time [days]')
+    ax3.set_ylabel('Z position [km]')
 
-    cbar3 = fig.colorbar(lc3, ax=ax3)
+    cbar3 = fig3.colorbar(lc3, ax=ax3)
     cbar3.set_label('Training epoch')
 
     """
@@ -204,61 +207,73 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
     epoch_points = results['TRAINING_EPOCH'].values
     epoch_points = epoch_points[::num]
     segments = np.array([points[:-1], points[1:]]).transpose(1, 0, 2)
-    lc4 = LineCollection(segments, cmap='viridis', array=epoch_points, linewidth=2)
-    ax4 = fig.add_subplot(3, 3, 4)  # 3D subplot
+    fig4 = plt.figure()
+    lc4 = LineCollection(segments, cmap='coolwarm', array=epoch_points, linewidth=2)
+    ax4 = fig4.add_subplot()  # 3D subplot
     ax4.add_collection(lc4)
     ax4.scatter(results['TRAINING_EPOCH'].iloc[nlls_start], results['PHYSICS_LOSS'].iloc[nlls_start])
     ax4.autoscale()  # Auto scale limits to lines
-    ax4.set_xlabel('Training Epoch')
-    ax4.set_ylabel('Weigthed Physics Loss')
+    ax4.set_xlabel('Overall Iteration')
+    ax4.set_ylabel('Weighted Physics Loss')
     ax4.set_yscale('log')
-    cbar4 = fig.colorbar(lc4, ax=ax4)
-    cbar4.set_label('Training epoch')
+    cbar4 = fig4.colorbar(lc4, ax=ax4)
+    cbar4.set_label('Overall Iteration')
 
     ###### data loss ###
     points = np.vstack((results['TRAINING_EPOCH'].values, results['DATA_LOSS'].values)).T
     points = points[::num]
     segments = np.array([points[:-1], points[1:]]).transpose(1, 0, 2)
-    lc5 = LineCollection(segments, cmap='viridis', array=epoch_points, linewidth=2)
-    ax5 = fig.add_subplot(3, 3, 5)  # 3D subplot
+    fig5 = plt.figure()
+    lc5 = LineCollection(segments, cmap='coolwarm', array=epoch_points, linewidth=2)
+    ax5 = fig5.add_subplot()  # 3D subplot
     ax5.add_collection(lc5)
     ax5.scatter(results['TRAINING_EPOCH'].iloc[nlls_start], results['DATA_LOSS'].iloc[nlls_start])
     ax5.autoscale()  # Auto scale limits to lines
-    ax5.set_xlabel('Training Epoch')
-    ax5.set_ylabel('Data Loss')
+    ax5.set_xlabel('Overall Iteration')
+    ax5.set_ylabel('Observation Loss')
     ax5.set_yscale('log')
-    cbar5 = fig.colorbar(lc5, ax=ax5)
-    cbar5.set_label('Training epoch')
+    cbar5 = fig5.colorbar(lc5, ax=ax5)
+    cbar5.set_label('Overall Iteration')
 
     ###### data loss ###
-    points = np.vstack((results['TRAINING_EPOCH'].values, results['RANGE_LOSS'].values)).T
-    points = points[::num]
-    segments = np.array([points[:-1], points[1:]]).transpose(1, 0, 2)
-    lc6 = LineCollection(segments, cmap='viridis', array=epoch_points, linewidth=2)
-    ax6 = fig.add_subplot(3, 3, 6)  # 3D subplot
-    ax6.add_collection(lc6)
-    ax6.scatter(results['TRAINING_EPOCH'].iloc[nlls_start], results['RANGE_LOSS'].iloc[nlls_start])
-    ax6.autoscale()  # Auto scale limits to lines
-    ax6.set_xlabel('Training Epoch')
-    ax6.set_ylabel('Data Loss')
-    ax6.set_yscale('log')
-    cbar6 = fig.colorbar(lc6, ax=ax6)
-    cbar6.set_label('Training epoch')
+    # points = np.vstack((results['TRAINING_EPOCH'].values, results['RANGE_LOSS'].values)).T
+    # points = points[::num]
+    # segments = np.array([points[:-1], points[1:]]).transpose(1, 0, 2)
+    # fig6 = plt.figure()
+    # lc6 = LineCollection(segments, cmap='coolwarm', array=epoch_points, linewidth=2)
+    # ax6 = fig6.add_subplot()  # 3D subplot
+    # ax6.add_collection(lc6)
+    # ax6.scatter(results['TRAINING_EPOCH'].iloc[nlls_start], results['RANGE_LOSS'].iloc[nlls_start])
+    # ax6.autoscale()  # Auto scale limits to lines
+    # ax6.set_xlabel('Overall Iteration')
+    # ax6.set_ylabel('Weighted Range Loss')
+    # ax6.set_yscale('log')
+    # cbar6 = fig6.colorbar(lc6, ax=ax6)
+    # cbar6.set_label('Overall Iteration')
 
-    fig2 = plt.figure()
-    ax21 = fig2.add_subplot(projection='3d')
-    ax21.plot(*pred_positions[-1].T, label='NLLS')
+    fig11 = plt.figure()
+    ax21 = fig11.add_subplot()
+    if config['optimizer'] == 'NLLS':
+        label = 'NLLS'
+    elif config['optimizer'] == 'SGD':
+        label = 'SGD'
+    else:
+        label = 'BH+Range'
+    ax21.plot(*(pred_positions[-1][:, :2] * config['AU_TO_M'] / config['KM_TO_M']).T, label=label)
     # ax21.plot(*pred_positions[-2].T, label='Basin Hopping')
-    ax21.scatter(*iod_data.loc[:, ["SC_GEO_X(KM)_PHYS", "SC_GEO_Y(KM)_PHYS", "SC_GEO_Z(KM)_PHYS"]].values.T, label='Spacecraft Pos')
-    ax21.plot(*true_positions.T, label='True')
 
-    true_rmse = rmse_df.loc[:, ['TRUE_X', 'TRUE_Y', 'TRUE_Z']].values
+    ax21.plot(*true_positions[:, :2].T, label='True')
+    ax21.scatter(
+        *(iod_data.loc[:, ["SC_GEO_X(KM)_PHYS", "SC_GEO_Y(KM)_PHYS"]].values * config['AU_TO_M'] / config['KM_TO_M']).T,
+        label='Observer Position')
+
+    # true_rmse = rmse_df.loc[:, ['TRUE_X', 'TRUE_Y', 'TRUE_Z']].values
     # bh_pos_rmse = rmse_df.loc[:, ['IOD_X', 'IOD_Y', 'IOD_Z']].values
-    nlls_pos_rmse = rmse_df.loc[:, ['IOD_X_NLLS', 'IOD_Y_NLLS', 'IOD_Z_NLLS']].values
+    # nlls_pos_rmse = rmse_df.loc[:, ['IOD_X_NLLS', 'IOD_Y_NLLS', 'IOD_Z_NLLS']].values
 
-    ax21.plot(*true_rmse.T, linestyle='--', label='RMSE True')
+    # ax21.plot(*true_rmse.T, linestyle='--', label='RMSE True')
     # ax21.plot(*bh_pos_rmse.T, linestyle='--', label='RMSE BH')
-    ax21.plot(*nlls_pos_rmse.T, linestyle='--', label='RMSE NLLS')
+    # ax21.plot(*nlls_pos_rmse.T, linestyle='--', label='RMSE NLLS')
 
     # ax21.plot(*asteroid_int_geo, label='Integrated', linestyle='--')
     # ax21.plot(*pred_global_pos[0].T, label="Initial")
@@ -268,11 +283,12 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
     #     ax6.plot(*pos.T, label=f"{i}")
     ax21.set_xlabel('X [KM]')
     ax21.set_ylabel('Y [KM]')
-    ax21.set_zlabel('Z [KM]')
+    # ax21.set_zlabel('Z [KM]')
     ax21.set_aspect('equal')
     ax21.legend()
 
-    ax7 = fig.add_subplot(3, 3, 7, projection='3d')
+    fig7 = plt.figure()
+    ax7 = fig7.add_subplot()
     if config['dynamics'] == 'CR3BP':  # i.e. consistently non-dim
         mu = config['SYSTEM_MASS_PARAMETER']
         asteroid_ini_pos = pred_positions[-1][0, :]
@@ -280,10 +296,10 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
         ini_state = np.concatenate([asteroid_ini_pos, asteroid_ini_vel])
         phi_0 = np.eye(6)  # initial Phi (state transition matrix)
         state = np.hstack((np.array(ini_state), phi_0.ravel()))
-        res = odeint(nbody.cr3bp, state, observation_epochs, args=(mu,))
+        res = odeint(nbody.cr3bp, state, iod_data["EPOCH(JDTDB)"].values, args=(mu,))
         asteroid_cr3bp_position = np.array(res[:, :3])
-        ax7.plot(*pred_positions[-1].T, label='Predicted Pos')
-        ax7.plot(*asteroid_cr3bp_position.T, label='CR3BP Integrated', linestyle='--', linewidth=3)
+        ax7.plot(*(pred_positions[-1][:, :2] * config['AU_TO_M'] / config['KM_TO_M']).T, label=label, zorder=10)
+        ax7.plot(*(asteroid_cr3bp_position[:, :2] * config['AU_TO_M'] / config['KM_TO_M']).T, label='CR3BP Integrated', linestyle='--', linewidth=3, zorder=5)
     else:
         # calc epochs
         num_frames = config['number_of_frames']
@@ -328,16 +344,17 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
 
     ax7.set_xlabel('X [KM]')
     ax7.set_ylabel('Y [KM]')
-    ax7.set_zlabel('Z [KM]')
+    # ax7.set_zlabel('Z [KM]')
     ax7.set_aspect('equal')
     ax7.legend()
 
-    true_v_rmse = rmse_df.loc[:, ['TRUE_VX', 'TRUE_VY', 'TRUE_VZ']].values
-    # bh_pos_rmse = rmse_df.loc[:, ['IOD_X', 'IOD_Y', 'IOD_Z']].values
-    nlls_vel_rmse = rmse_df.loc[:, ['IOD_VX_NLLS', 'IOD_VY_NLLS', 'IOD_VZ_NLLS']].values
+    true_v_rmse = rmse_df.loc[:, ['TRUE_VX', 'TRUE_VY', 'TRUE_VZ']].values * 29.8
+    nlls_vel_rmse = rmse_df.loc[:, ['IOD_VX_NLLS', 'IOD_VY_NLLS', 'IOD_VZ_NLLS']].values * 29.8
+    true_rmse = rmse_df.loc[:, ['TRUE_X', 'TRUE_Y', 'TRUE_Z']].values * config['AU_TO_M'] / config['KM_TO_M']
+    pos_rmse = rmse_df.loc[:, ['IOD_X_NLLS', 'IOD_Y_NLLS', 'IOD_Z_NLLS']].values * config['AU_TO_M'] / config['KM_TO_M']
 
 
-    errors_xyz = np.abs(true_rmse - nlls_pos_rmse)
+    errors_xyz = np.abs(true_rmse - pos_rmse)
     x = errors_xyz[:, 0]
     y = errors_xyz[:, 1]
     z = errors_xyz[:, 2]
@@ -368,27 +385,27 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
     # Subplot 2: Grouped bar chart for positions
     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
 
-
-    ax8 = fig.add_subplot(3, 3, 8)
-    ax8.bar(bin_centers - width, counts_x, width=width, label='x', color='r')
-    ax8.bar(bin_centers, counts_y, width=width, label='y', color='g')
-    ax8.bar(bin_centers + width, counts_z, width=width, label='z', color='b')
+    fig8 = plt.figure()
+    ax8 = fig8.add_subplot()
+    ax8.bar(bin_centers - width, counts_x, width=width, label='X', color='r')
+    ax8.bar(bin_centers, counts_y, width=width, label='Y', color='g')
+    ax8.bar(bin_centers + width, counts_z, width=width, label='Z', color='b')
 
     # Add markers for the first element of each component
-    first_errors = [x[0], y[0], z[0]]
-    colors = ['r', 'g', 'b']
-    labels = ['x[0]', 'y[0]', 'z[0]']
-    marker_height = max(counts_x.max(), counts_y.max(), counts_z.max()) * 1.05
-
-    for val, c, lbl in zip(first_errors, colors, labels):
-        ax8.scatter(val, marker_height, color=c, marker='o', s=50, edgecolors='k', zorder=5, label=f'{lbl} marker')
+    # first_errors = [x[0], y[0], z[0]]
+    # colors = ['r', 'g', 'b']
+    # labels = ['x[0]', 'y[0]', 'z[0]']
+    # marker_height = max(counts_x.max(), counts_y.max(), counts_z.max()) * 1.05
+    #
+    # for val, c, lbl in zip(first_errors, colors, labels):
+    #     ax8.scatter(val, marker_height, color=c, marker='o', s=50, edgecolors='k', zorder=5, label=f'{lbl} marker')
 
     # To avoid duplicate legend labels, combine and deduplicate
     handles, labels = ax8.get_legend_handles_labels()
     unique = dict(zip(labels, handles))
     ax8.legend(unique.values(), unique.keys())
 
-    ax8.set_title('Histogram of Positions (Grouped Bars)')
+    # ax8.set_title('Histogram of Positions (Grouped Bars)')
     ax8.legend()
     ax8.grid(True)
 
@@ -396,26 +413,27 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
     # Width of each bar
     width_v = (bin_edges_v[1] - bin_edges_v[0]) / 4
     bin_centers_v = (bin_edges_v[:-1] + bin_edges_v[1:]) / 2
-    ax9 = fig.add_subplot(3, 3, 9)
+    fig9 = plt.figure()
+    ax9 = fig9.add_subplot()
     ax9.bar(bin_centers_v - width_v, counts_vx, width=width_v, label='vx', color='r')
     ax9.bar(bin_centers_v, counts_vy, width=width_v, label='vy', color='g')
     ax9.bar(bin_centers_v + width_v, counts_vz, width=width_v, label='vz', color='b')
 
     # Add markers for the first element of each component
-    first_errors = [vx[0], vy[0], vz[0]]
-    colors = ['r', 'g', 'b']
-    labels = ['vx[0]', 'vy[0]', 'vz[0]']
-    marker_height = max(counts_vx.max(), counts_vy.max(), counts_vz.max()) * 1.05
-
-    for val, c, lbl in zip(first_errors, colors, labels):
-        ax9.scatter(val, marker_height, color=c, marker='o', s=50, edgecolors='k', zorder=5, label=f'{lbl} marker')
+    # first_errors = [vx[0], vy[0], vz[0]]
+    # colors = ['r', 'g', 'b']
+    # labels = ['vx[0]', 'vy[0]', 'vz[0]']
+    # marker_height = max(counts_vx.max(), counts_vy.max(), counts_vz.max()) * 1.05
+    #
+    # for val, c, lbl in zip(first_errors, colors, labels):
+    #     ax9.scatter(val, marker_height, color=c, marker='o', s=50, edgecolors='k', zorder=5, label=f'{lbl} marker')
 
     # To avoid duplicate legend labels, combine and deduplicate
     handles, labels = ax9.get_legend_handles_labels()
     unique = dict(zip(labels, handles))
     ax9.legend(unique.values(), unique.keys())
 
-    ax9.set_title('Histogram of Velocities (Grouped Bars)')
+    # ax9.set_title('Histogram of Velocities (Grouped Bars)')
     ax9.legend()
     ax9.grid(True)
 
