@@ -5,14 +5,14 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 
 # ---- Load data ----
-file_path = 'CR3BP_Horizontal Lyapunov Orbits_GROUND_CONSTRAINED_BASIN_HOPPINGmeta_data.csv'
+file_path = 'CR3BP_Horizontal Lyapunov Orbits_GROUND_SGDmeta_data.csv'
 data = pd.read_csv(file_path)
 data['POS_RMSE'] *= 149597871
-data = data[data['LAMBDA_DIST'] == 1e-3]
+# data = data[data['LAMBDA_DIST'] == 1e-3]
 
 # ---- Bin centers (NOT edges) ----
-lambda_f_centers  = np.array([1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1, 1e2, 1e3, 1e4])  # physics weight (x)
-lambda_rho_centers = np.array([1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1])            # range weight (y)
+lambda_f_centers  = np.array([1e-3, 1e-2, 1e-1, 1e0, 1e1, 1e2])  # physics weight (x)
+lambda_rho_centers = np.array([1e-5, 1e-4, 1e-3, 1e-2, 1e-1])            # range weight (y)
 
 def edges_from_log_centers(centers: np.ndarray) -> np.ndarray:
     """
@@ -72,7 +72,7 @@ heat = (binned
         .reindex(index=row_index, columns=col_index))
 
 # Normalize color scale
-norm = mcolors.Normalize(vmax=0.005 * 149597871)
+norm = mcolors.Normalize(vmax=0.002 * 149597871)
 
 # ---- Plot ----
 plt.figure(figsize=(9, 5))
