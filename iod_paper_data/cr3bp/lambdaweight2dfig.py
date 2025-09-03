@@ -21,7 +21,7 @@ mean_rmse = df.groupby('param_combo')['POS_RMSE'].mean().reset_index()
 mean_rmse = mean_rmse.rename(columns={'POS_RMSE': 'mean_rmse'})
 
 # Select top n combinations with lowest mean RMSE
-n = 5
+n = 25
 top_combos = mean_rmse.nsmallest(n, 'mean_rmse')['param_combo']
 
 # Filter the original df to only include these top combinations

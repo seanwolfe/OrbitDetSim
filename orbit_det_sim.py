@@ -801,7 +801,7 @@ def run_sim_runnumbers_MPI_getIOD_data_bychunk_eme(config):
                 df.to_parquet(base_path + '.parquet', index=False)
 
 
-            vis = True
+            vis = False
             if vis:
                 #######################
                 # for visualization
@@ -1042,12 +1042,12 @@ def run_IOD_testing(config):
                               'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
                               'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
                               'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': 1e3, 'STEPSIZE': 10, 'NUMBER_OF_ITERATIONS': 500, 'TEMPERATURE': 1000,
+                              'PHYSICS_WEIGHT': 1e-2, 'STEPSIZE': 10, 'NUMBER_OF_ITERATIONS': 500, 'TEMPERATURE': 1000,
                               'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000,
-                              'MAX_ITERATiONS': 20000, 'WEIGHT_SCALE_FACTOR': 1e0,
+                              'MAX_ITERATiONS': 20000, 'WEIGHT_SCALE_FACTOR': 1e-6,
                               'G_TOLERANCE': 1e-15, 'MAX_NFEV': 1000,
                               'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 4}
+                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': run_idx}
                 if config['orbit'] == 'Horizontal Lyapunov Orbits':
                     data = pielm_cgn.generate_data(config, parameters)
                 elif config['orbit'] == 'Halo Orbits':
@@ -1063,11 +1063,11 @@ def run_IOD_testing(config):
                 parameters = {'NUMBER_OF_OBSERVATIONS': 10, 'OBSERVATION_TIME_FRACTION': 0.5, 'TIME_DELTA': 0.5 * u.day,
                               'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
                               'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
-                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 100000, 'LEARNING_RATE': 1e-2,
-                              'PHYSICS_WEIGHT': 1e1, 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1,
-                              'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'G_TOLERANCE': 1e-15, 'WEIGHT_SCALE_FACTOR': 1e0,
+                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 5000, 'LEARNING_RATE': 1e-2,
+                              'PHYSICS_WEIGHT': 1e-4, 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1,
+                              'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'G_TOLERANCE': 1e-15, 'WEIGHT_SCALE_FACTOR': 1e-4,
                               'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 30
+                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': run_idx
                                }
                 if config['orbit'] == 'Horizontal Lyapunov Orbits':
                     data = pielm_cgs.generate_data(config, parameters)
@@ -1085,14 +1085,14 @@ def run_IOD_testing(config):
                               'TIME_DELTA': 0.5 * u.day,
                               'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
                               'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
-                              'HIDDEN_DIMENSION': 10, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': 1e3, 'LAMBDA_DIST':1e-1, 'STEPSIZE': np.power(10, float(1)),
-                              'NUMBER_OF_ITERATIONS': 100, 'TEMPERATURE': 1e-6,
+                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
+                              'PHYSICS_WEIGHT': 1e1, 'LAMBDA_DIST':1e1, 'STEPSIZE': np.power(10, float(1)),
+                              'NUMBER_OF_ITERATIONS': 100, 'TEMPERATURE': 1e-6, 'WEIGHT_SCALE_FACTOR': 1e-3,
                               'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000,
                               'MAX_ITERATiONS': 20000, 'TARGET_ACCEPT_RATE': 0.5, 'STEPWISE_FACTOR': 0.9,
-                              'G_TOLERANCE': 1e-15, 'MAX_NFEV': 100, 'WEIGHT_SCALE_FACTOR': 1e0,
-                              'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 87,
+                              'G_TOLERANCE': 1e-15, 'MAX_NFEV': 100, 'A_PERT': 1000, 'ECC_PERT': 0.2,
+                              'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
+                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': run_idx,
                               'MIN_RHO': 1e-4, 'MAX_RHO': 1e-1, 'MIN_RHO_DOT': -1.01e0, 'MAX_RHO_DOT': 1.01e0,
                               'DELTA_RHO': 1e-2, 'DELTA_RHO_DOT': 0.067, 'INITIAL_TRAJECTORIES': 1}
                 config['lambda'] = parameters['STEPSIZE']
@@ -1227,7 +1227,7 @@ def run_IOD_testing(config):
             local_master.append(parameters)
 
             df = pd.DataFrame(data_for_df)
-            util.iod_viz(df, results, positions, velocities, nlls_start, config, rmse_df)
+            # util.iod_viz(df, results, positions, velocities, nlls_start, config, rmse_df)
 
     # Convert local list to DataFrame
     df_local = pd.DataFrame(local_master)
@@ -1424,12 +1424,12 @@ def run_IOD_hyperparameter(config):
                               'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
                               'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
                               'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': 1e3, 'STEPSIZE': 10, 'NUMBER_OF_ITERATIONS': 500, 'TEMPERATURE': 1000,
+                              'PHYSICS_WEIGHT': combo[0], 'WEIGHT_SCALE_FACTOR': combo[1],
+                              'STEPSIZE': 10, 'NUMBER_OF_ITERATIONS': 500, 'TEMPERATURE': 1000,
                               'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000,
-                              'MAX_ITERATiONS': 20000,
-                              'G_TOLERANCE': 1e-15, 'MAX_NFEV': 1000,
+                              'MAX_ITERATiONS': 20000, 'G_TOLERANCE': 1e-15, 'MAX_NFEV': 1000,
                               'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 4}
+                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': run_idx}
                 config['lambda'] = parameters['PHYSICS_WEIGHT']
                 config['run_idx'] = run_idx
                 data = pielm_nstn.generate_data(config, parameters)
@@ -1441,13 +1441,14 @@ def run_IOD_hyperparameter(config):
                               'TIME_DELTA': 0.5 * u.day,
                               'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
                               'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
-                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 5000, 'LEARNING_RATE': 1e-2,
-                              'PHYSICS_WEIGHT': 1e3, 'STEPSIZE': 10, 'NUMBER_OF_ITERATIONS': 500, 'TEMPERATURE': 1000,
+                              'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 100000, 'LEARNING_RATE': 1e-2,
+                              'PHYSICS_WEIGHT': combo[0], 'WEIGHT_SCALE_FACTOR': combo[1],
+                              'STEPSIZE': 10, 'NUMBER_OF_ITERATIONS': 500, 'TEMPERATURE': 1000,
                               'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000,
                               'MAX_ITERATiONS': 20000,
                               'G_TOLERANCE': 1e-15, 'MAX_NFEV': 1000,
                               'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 4}
+                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': run_idx}
                 config['lambda'] = parameters['PHYSICS_WEIGHT']
                 config['run_idx'] = run_idx
                 data = pielm_nsts.generate_data(config, parameters)
@@ -1456,17 +1457,17 @@ def run_IOD_hyperparameter(config):
             elif dynamics == 'NBD' and observer == 'SPACE' and optimizer == 'CONSTRAINED_BASIN_HOPPING':
                 import PIELM_basinhopping_w_range_nbody as pielm_ctsn
                 parameters = {'NUMBER_OF_OBSERVATIONS': 1, 'OBSERVATION_TIME_FRACTION': 0.5,
-                              'TIME_DELTA': 1 * u.day,
+                              'TIME_DELTA': 0.5 * u.day,
                               'TOTAL_POINTS': 100, 'SAMPLING_METHOD': "uniform",
                               'LAYER_RATIOS': [(0., 1 / 3), (1 / 3, 2 / 3), (2 / 3, 1.)], 'INPUT_RANGE': (-1, 1),
                               'HIDDEN_DIMENSION': 100, 'NUMBER_OF_EPOCHS': 15000, 'LEARNING_RATE': 1e-1,
-                              'PHYSICS_WEIGHT': 1e0, 'LAMBDA_DIST':1e0, 'STEPSIZE': 1e0,
-                              'NUMBER_OF_ITERATIONS': 10, 'TEMPERATURE': 1e-6,
+                              'PHYSICS_WEIGHT': combo[0], 'LAMBDA_DIST': combo[2], 'WEIGHT_SCALE_FACTOR': combo[1],
+                              'STEPSIZE': 1e0, 'NUMBER_OF_ITERATIONS': 100, 'TEMPERATURE': 1e-6,
                               'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_FUNCTION_EVAL': 20000,
                               'MAX_ITERATiONS': 20000, 'TARGET_ACCEPT_RATE': 0.5, 'STEPWISE_FACTOR': 0.9,
                               'G_TOLERANCE': 1e-15, 'MAX_NFEV':100,
                               'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
-                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': 4,
+                              'ANOM_PERT': 15., 'ORBIT_TYPE': 'Horizontal Lyapunov Orbits', 'RUN_NUMBER': run_idx,
                               'MIN_RHO': 1e-4, 'MAX_RHO': 1e-1, 'MIN_RHO_DOT': -1.01e0, 'MAX_RHO_DOT': 1.01e0,
                               'DELTA_RHO': 1e-2, 'DELTA_RHO_DOT': 0.067, 'INITIAL_TRAJECTORIES':10}
                 config['lambda'] = parameters['TIME_DELTA']
@@ -1538,7 +1539,7 @@ def run_IOD_hyperparameter(config):
             local_master.append(parameters)
 
             df = pd.DataFrame(data_for_df)
-            # util.iod_viz(df, results, positions, velocities, nlls_start, config, rmse_df)
+            util.iod_viz(df, results, positions, velocities, nlls_start, config, rmse_df)
 
     # Convert local list to DataFrame
     df_local = pd.DataFrame(local_master)
@@ -1593,18 +1594,18 @@ size = comm.Get_size()
 
 # run_IOD_MPI(config)
 
-
 ###################################
 # Testing ground for IOD
 ##################################
 
-run_IOD_testing(config)
+# run_IOD_testing(config)
 
 ###################################
 # Hyperparameter tuning for IOD
 ##################################
 
-# run_IOD_hyperparameter(config)
+run_IOD_hyperparameter(config)
+
 ###################################
 # Single results file implementation
 ####################################

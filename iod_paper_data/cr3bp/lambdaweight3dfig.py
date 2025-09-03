@@ -22,17 +22,41 @@ mean_rmse = df.groupby('param_combo')['POS_RMSE'].mean().reset_index()
 mean_rmse = mean_rmse.rename(columns={'POS_RMSE': 'mean_rmse'})
 
 # Select top n combinations with lowest mean RMSE
-n = 10
+n = 20
 top_combos = mean_rmse.nsmallest(n, 'mean_rmse')['param_combo']
+
+# Compute mean RMSE of the top n candidates
+mean_of_top_n = mean_rmse.nsmallest(n, 'mean_rmse')['mean_rmse'].mean()
+print(f"Mean RMSE of the top {n} candidates: {mean_of_top_n:.2f} km")
 
 # Filter the original df to only include these top combinations
 top_df = df[df['param_combo'].isin(top_combos)]
 
 
+
 # Plot whisker/box plot
-plt.figure(figsize=(10, 6))
-sns.boxplot(x='POS_RMSE', y='param_combo', data=top_df, orient='h', showmeans=True)
+plt.figure()
+# Example boxplot
+ax = sns.boxplot(
+    x='POS_RMSE',
+    y='param_combo',
+    data=top_df,
+    orient='h',
+    showmeans=True,
+    meanprops={
+        "marker":"^",         # triangle
+        "markerfacecolor":"orange",
+        "markeredgecolor":"orange"
+    },
+    medianprops={
+        "color":"orange",
+        "linewidth":1
+    },
+    boxprops={
+        "facecolor":"none",   # no fill
+        "edgecolor":"black"
+    }
+)
 plt.xlabel('Position RMSE [km]')
-plt.ylabel('Hyperparameter Combination')
-plt.title(f'Top {n} Hyperparameter Combinations by Mean POS_RMSE')
+plt.ylabel(r'Hyperparameter Combination $(\lambda_f, c_{wb}, \lambda_{\rho})$')
 plt.show()

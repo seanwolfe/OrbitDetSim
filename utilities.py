@@ -58,13 +58,21 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
     indices.append(-1)
 
     positions_filtered = [pred_positions[i] for i in indices]  # shape: (E, len(indices), 3)
-    x_vals = [pos[:, 0] * config['AU_TO_M'] / config['KM_TO_M'] for pos in positions_filtered]  # (E, len(indices))
-    y_vals = [pos[:, 1] * config['AU_TO_M'] / config['KM_TO_M'] for pos in positions_filtered]
-    z_vals = [pos[:, 2] * config['AU_TO_M'] / config['KM_TO_M'] for pos in positions_filtered]
     epoch_vals = results['TRAINING_EPOCH'].iloc[indices]
     if config['dynamics'] == 'CR3BP':
         observation_epochs = iod_data["EPOCH(JDTDB)"].values * 5.02189e6 / config['SECONDS_PER_DAY']
-    true_positions = iod_data.loc[:, ["GEO_X(KM)", "GEO_Y(KM)", "GEO_Z(KM)"]].values * config['AU_TO_M'] / config['KM_TO_M']
+        x_vals = [pos[:, 0] * config['AU_TO_M'] / config['KM_TO_M'] for pos in positions_filtered]  # (E, len(indices))
+        y_vals = [pos[:, 1] * config['AU_TO_M'] / config['KM_TO_M'] for pos in positions_filtered]
+        z_vals = [pos[:, 2] * config['AU_TO_M'] / config['KM_TO_M'] for pos in positions_filtered]
+        true_positions = iod_data.loc[:, ["GEO_X(KM)", "GEO_Y(KM)", "GEO_Z(KM)"]].values * config['AU_TO_M'] / config[
+            'KM_TO_M']
+    else:
+        observation_epochs = iod_data["EPOCH(JDTDB)"].values
+        x_vals = [pos[:, 0] for pos in positions_filtered]  # (E, len(indices))
+        y_vals = [pos[:, 1] for pos in positions_filtered]
+        z_vals = [pos[:, 2] for pos in positions_filtered]
+        true_positions = iod_data.loc[:, ["GEO_X(KM)", "GEO_Y(KM)", "GEO_Z(KM)"]].values
+
     true_velocities = iod_data.loc[:, ["GEO_VX(KM/S)", "GEO_VY(KM/S)", "GEO_VZ(KM/S)"]].values
 
     ### x ###
@@ -259,13 +267,20 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
         label = 'SGD'
     else:
         label = 'BH+Range'
-    ax21.plot(*(pred_positions[-1][:, :2] * config['AU_TO_M'] / config['KM_TO_M']).T, label=label)
+
     # ax21.plot(*pred_positions[-2].T, label='Basin Hopping')
 
     ax21.plot(*true_positions[:, :2].T, label='True')
-    ax21.scatter(
-        *(iod_data.loc[:, ["SC_GEO_X(KM)_PHYS", "SC_GEO_Y(KM)_PHYS"]].values * config['AU_TO_M'] / config['KM_TO_M']).T,
-        label='Observer Position')
+    if config['dynamics'] == 'CR3BP':
+        ax21.plot(*(pred_positions[-1][:, :2] * config['AU_TO_M'] / config['KM_TO_M']).T, label=label)
+        ax21.scatter(
+            *(iod_data.loc[:, ["SC_GEO_X(KM)_PHYS", "SC_GEO_Y(KM)_PHYS"]].values * config['AU_TO_M'] / config['KM_TO_M']).T,
+            label='Observer Position')
+    else:
+        ax21.plot(*(pred_positions[-1][:, :2]).T, label=label)
+        ax21.scatter(
+            *(iod_data.loc[:, ["SC_GEO_X(KM)_PHYS", "SC_GEO_Y(KM)_PHYS"]].values).T,
+            label='Observer Position')
 
     # true_rmse = rmse_df.loc[:, ['TRUE_X', 'TRUE_Y', 'TRUE_Z']].values
     # bh_pos_rmse = rmse_df.loc[:, ['IOD_X', 'IOD_Y', 'IOD_Z']].values
@@ -338,8 +353,9 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
             ast_epoch,
             config['time_between_frames'],
             num_frames)
-        ax7.plot(*pred_positions[-1].T, label='Predicted Pos')
-        ax7.plot(*asteroid_eme[:3, :], label='N-body Integrated', linestyle='--', linewidth=3)
+
+        ax7.plot(*pred_positions[-1][:, :2].T, label='Predicted Pos')
+        ax7.plot(*asteroid_eme[:2, :], label='N-body Integrated', linestyle='--', linewidth=3)
         # ax7.plot(*asteroid_2bd_position.T, label='2-body Integrated', linestyle='--', linewidth=3)
 
     ax7.set_xlabel('X [KM]')
@@ -348,10 +364,16 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
     ax7.set_aspect('equal')
     ax7.legend()
 
-    true_v_rmse = rmse_df.loc[:, ['TRUE_VX', 'TRUE_VY', 'TRUE_VZ']].values * 29.8
-    nlls_vel_rmse = rmse_df.loc[:, ['IOD_VX_NLLS', 'IOD_VY_NLLS', 'IOD_VZ_NLLS']].values * 29.8
-    true_rmse = rmse_df.loc[:, ['TRUE_X', 'TRUE_Y', 'TRUE_Z']].values * config['AU_TO_M'] / config['KM_TO_M']
-    pos_rmse = rmse_df.loc[:, ['IOD_X_NLLS', 'IOD_Y_NLLS', 'IOD_Z_NLLS']].values * config['AU_TO_M'] / config['KM_TO_M']
+    if config['dynamics'] == 'CR3BP':
+        true_v_rmse = rmse_df.loc[:, ['TRUE_VX', 'TRUE_VY', 'TRUE_VZ']].values * 29.8
+        nlls_vel_rmse = rmse_df.loc[:, ['IOD_VX_NLLS', 'IOD_VY_NLLS', 'IOD_VZ_NLLS']].values * 29.8
+        true_rmse = rmse_df.loc[:, ['TRUE_X', 'TRUE_Y', 'TRUE_Z']].values * config['AU_TO_M'] / config['KM_TO_M']
+        pos_rmse = rmse_df.loc[:, ['IOD_X_NLLS', 'IOD_Y_NLLS', 'IOD_Z_NLLS']].values * config['AU_TO_M'] / config['KM_TO_M']
+    else:
+        true_v_rmse = rmse_df.loc[:, ['TRUE_VX', 'TRUE_VY', 'TRUE_VZ']].values
+        nlls_vel_rmse = rmse_df.loc[:, ['IOD_VX_NLLS', 'IOD_VY_NLLS', 'IOD_VZ_NLLS']].values
+        true_rmse = rmse_df.loc[:, ['TRUE_X', 'TRUE_Y', 'TRUE_Z']].values
+        pos_rmse = rmse_df.loc[:, ['IOD_X_NLLS', 'IOD_Y_NLLS', 'IOD_Z_NLLS']].values
 
 
     errors_xyz = np.abs(true_rmse - pos_rmse)
@@ -759,21 +781,32 @@ def viz_geo_and_secr(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, m
             # ax2.plot(*x_axis, color='black')
             # ax2.plot(*y_axis, color='black')
             # ax2.plot(*z_axis, color='black')
-
-        else:
-            pass
             # non-detecting spacecraft trajectory and position at detection
-            # spacecraft_pos_j = spacecraft.get_spacecraft_pos(traj_index) * (configs['AU_TO_M'] / configs['KM_TO_M'])
+            spacecraft_pos_j = spacecraft.get_spacecraft_pos(traj_index) * (configs['AU_TO_M'] / configs['KM_TO_M'])
 
-            # sc_pos_j = spacecraft.matched_trajectory * (configs['AU_TO_M'] / configs['KM_TO_M'])
+            sc_pos_j = spacecraft.matched_trajectory * (configs['AU_TO_M'] / configs['KM_TO_M'])
 
             # plot trajectory up until detection instant
-            # ax.plot(sc_pos_j[:traj_index, 0], sc_pos_j[:traj_index, 1], sc_pos_j[:traj_index, 2], color=colors[i],
-            #         zorder=15)
-            # ax.scatter(*spacecraft.get_spacecraft_pos(0) * (configs['AU_TO_M'] / configs['KM_TO_M']), s=20,
-            #            color=colors[i], label='Initial pos sc' + str(i),
-            #            zorder=20, marker='^')
-            # ax.scatter(*spacecraft_pos_j, s=20, color=colors[i], label='Detection instant sc ' + str(i), zorder=20)
+            ax.plot(sc_pos_j[:traj_index, 0], sc_pos_j[:traj_index, 1], sc_pos_j[:traj_index, 2], color=colors[i],
+                    zorder=15)
+            ax.scatter(*spacecraft.get_spacecraft_pos(0) * (configs['AU_TO_M'] / configs['KM_TO_M']), s=20,
+                       color=colors[i], label='Initial pos sc' + str(i),
+                       zorder=20, marker='^')
+            ax.scatter(*spacecraft_pos_j, s=20, color=colors[i], label='Detection instant sc ' + str(i), zorder=20)
+
+        else:
+            # non-detecting spacecraft trajectory and position at detection
+            spacecraft_pos_j = spacecraft.get_spacecraft_pos(traj_index) * (configs['AU_TO_M'] / configs['KM_TO_M'])
+
+            sc_pos_j = spacecraft.matched_trajectory * (configs['AU_TO_M'] / configs['KM_TO_M'])
+
+            # plot trajectory up until detection instant
+            ax.plot(sc_pos_j[:traj_index, 0], sc_pos_j[:traj_index, 1], sc_pos_j[:traj_index, 2], color=colors[i],
+                    zorder=15)
+            ax.scatter(*spacecraft.get_spacecraft_pos(0) * (configs['AU_TO_M'] / configs['KM_TO_M']), s=20,
+                       color=colors[i], label='Initial pos sc' + str(i),
+                       zorder=20, marker='^')
+            ax.scatter(*spacecraft_pos_j, s=20, color=colors[i], label='Detection instant sc ' + str(i), zorder=20)
 
     # plot integration results
     ax2.scatter(spacecraft_geo[0, 0], spacecraft_geo[1, 0], spacecraft_geo[2, 0], color=colors[-1], s=30,
