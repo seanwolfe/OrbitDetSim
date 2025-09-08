@@ -1,16 +1,7 @@
-from astropy import units as u
 from astropy.time import Time, TimeDelta
-from poliastro.bodies import Earth
-from poliastro.twobody import Orbit
-from poliastro.plotting.static import StaticOrbitPlotter
-from poliastro.twobody.propagation import propagate
-import matplotlib.pyplot as plt
 import numpy as np
-from astropy.coordinates import EarthLocation, AltAz, ITRS, GCRS, SkyCoord, Angle
-from typing import Callable, List, Literal, Tuple, Union
+from typing import List, Literal, Tuple, Union
 import torch
-from torch.autograd.functional import jacobian
-from scipy.optimize import least_squares
 from scipy.optimize import basinhopping
 import pandas as pd
 import spiceypy as spice
@@ -101,7 +92,7 @@ def generate_data(config, parameters):
 
     sin_ra_meas, cos_ra_meas, sin_dec_meas, cos_dec_meas = torch.sin(ra_m), torch.cos(ra_m), torch.sin(dec_m), torch.cos(dec_m)
 
-    return ([sin_ra_meas, cos_ra_meas, sin_dec_meas, cos_dec_meas], torch.tensor(observer_positions, dtype=torch.float32),
+    return ([sin_ra_meas, cos_ra_meas, sin_dec_meas, cos_dec_meas], observer_positions,
             observation_epochs, positions, velocities, ra, dec, sigma_ra_deg, sigma_dec_deg, file_path, observer_velocities)
 
 

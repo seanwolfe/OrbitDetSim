@@ -1539,7 +1539,7 @@ def run_IOD_hyperparameter(config):
             local_master.append(parameters)
 
             df = pd.DataFrame(data_for_df)
-            util.iod_viz(df, results, positions, velocities, nlls_start, config, rmse_df)
+            # util.iod_viz(df, results, positions, velocities, nlls_start, config, rmse_df)
 
     # Convert local list to DataFrame
     df_local = pd.DataFrame(local_master)
