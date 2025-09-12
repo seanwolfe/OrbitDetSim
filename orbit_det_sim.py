@@ -985,7 +985,7 @@ def run_IOD_testing(config):
                               'TIME_DELTA': 0.0000000001 * u.day,
                               'TOTAL_POINTS': 300, 'SAMPLING_METHOD': "uniform",
                               'LAYER_RATIOS': [(0., 1 / 10000), (1 / 10000, 9999 / 10000), (9999 / 10000, 1.)],
-                              'INPUT_RANGE': (-1, 1),
+                              'INPUT_RANGE': (-1, 1), 'WEIGHT_SCALE_FACTOR': 1e0,
                               'HIDDEN_DIMENSION': 20, 'NUMBER_OF_EPOCHS': 100000, 'LEARNING_RATE': 1e-2,
                               'PHYSICS_WEIGHT': 1e2, 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1,
                               'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_NFEV': 100,
@@ -1002,10 +1002,10 @@ def run_IOD_testing(config):
                               'TIME_DELTA': 0.0000000001 * u.day,
                               'TOTAL_POINTS': 300, 'SAMPLING_METHOD': "uniform",
                               'LAYER_RATIOS': [(0., 1 / 10000), (1 / 10000, 9999 / 10000), (9999 / 10000, 1.)],
-                              'INPUT_RANGE': (-1, 1),
+                              'INPUT_RANGE': (-1, 1), 'WEIGHT_SCALE_FACTOR': 1.0e0,
                               'HIDDEN_DIMENSION': 20, 'NUMBER_OF_EPOCHS': 50000, 'LEARNING_RATE': 1e-1,
                               'PHYSICS_WEIGHT': 1e0, 'STEPSIZE': 1, 'NUMBER_OF_ITERATIONS': 50, 'TEMPERATURE': 1,
-                              'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_NFEV': 100,
+                              'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15, 'MAX_NFEV': 1000,
                               'A_PERT': 1000, 'ECC_PERT': 0.2, 'INC_PERT': 15., 'RAAN_PERT': 15., 'ARGPER_PERT': 15.,
                               'ANOM_PERT': 15.}
                 config['lambda'] = parameters['PHYSICS_WEIGHT']
@@ -1019,7 +1019,7 @@ def run_IOD_testing(config):
                               'TIME_DELTA': 0.0000000001 * u.day,
                               'TOTAL_POINTS': 300, 'SAMPLING_METHOD': "uniform",
                               'LAYER_RATIOS': [(0., 1 / 10000), (1 / 10000, 9999 / 10000), (9999 / 10000, 1.)],
-                              'INPUT_RANGE': (-1, 1),
+                              'INPUT_RANGE': (-1, 1), 'WEIGHT_SCALE_FACTOR': 1e0,
                               'HIDDEN_DIMENSION': 20, 'NUMBER_OF_EPOCHS': 50000, 'LEARNING_RATE': 1e-1,
                               'PHYSICS_WEIGHT': 1e2, 'LAMBDA_DIST': 1e-7, 'STEPSIZE': 10e-5,
                               'NUMBER_OF_ITERATIONS': 100, 'TEMPERATURE': 10e-8,
@@ -1598,13 +1598,13 @@ size = comm.Get_size()
 # Testing ground for IOD
 ##################################
 
-# run_IOD_testing(config)
+run_IOD_testing(config)
 
 ###################################
 # Hyperparameter tuning for IOD
 ##################################
 
-run_IOD_hyperparameter(config)
+# run_IOD_hyperparameter(config)
 
 ###################################
 # Single results file implementation

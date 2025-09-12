@@ -403,8 +403,8 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
     # Dimensions
     H_size = parameters['HIDDEN_DIMENSION']  # hidden layer size
     # Fake precomputed hidden layer activations and derivatives
-    W = (2 * torch.rand(H_size, 1) - 1) * configuration['WEIGHT_SCALE_FACTOR']
-    b = (2 * torch.rand(H_size) - 1) * configuration['WEIGHT_SCALE_FACTOR']
+    W = (2 * torch.rand(H_size, 1) - 1) * parameters['WEIGHT_SCALE_FACTOR']
+    b = (2 * torch.rand(H_size) - 1) * parameters['WEIGHT_SCALE_FACTOR']
 
     data_losses = []
     physics_losses = []

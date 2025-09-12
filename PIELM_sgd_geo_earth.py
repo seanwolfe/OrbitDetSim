@@ -423,7 +423,7 @@ def run(data, config, parameters):
     obs_mask = np.isin(colloc_points, data[2])
     obs_indices = np.where(obs_mask)[0]
 
-    elm = ELM(parameters['HIDDEN_DIMENSION'], c_normalization=c, config=config)
+    elm = ELM(parameters['HIDDEN_DIMENSION'], c_normalization=c, config=parameters)
 
     start = time.time()
     data_df, positions, velocities, nlls_start, final_positions, final_velocities = train(elm,

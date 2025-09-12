@@ -103,7 +103,7 @@ base_filename: 'fig_num_spacecraft_data'
 ##############################################
 seed: 42
 normalization_ratio: 1
-gaussian_std_scale: 10
+gaussian_std_scale: 1
 
 
 
@@ -112,13 +112,13 @@ gaussian_std_scale: 10
 # Running the PIELM IOD simulation - Testing ground
 ##############################################
 n_runs_test: 100
-dynamics: 'NBD'
-orbit: 'Horizontal Lyapunov Orbits'
-observer: 'SPACE'
+dynamics: '2BD'
+orbit: 'GEO'
+observer: 'GROUND'
 optimizer: 'CONSTRAINED_BASIN_HOPPING'
 SYSTEM_MASS_PARAMETER: 3.0404e-6
 ADD_NOISE: 1
-error_file_dir: 'Error_files'
+error_file_dir: 'Error_files_cbh_geo_uniform'
 
 
 # Hyperparameter tuning
