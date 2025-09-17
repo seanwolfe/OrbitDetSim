@@ -1,4 +1,4 @@
-from astropy.time import Time, TimeDelta
+from astropy.time import Time
 import numpy as np
 from typing import List, Literal, Tuple, Union
 import torch
@@ -23,7 +23,7 @@ def generate_data(config, parameters):
     all_files = util.get_all_files(config['IOD_folder_path'], config['save_format'])
     run_number = parameters['RUN_NUMBER']
     file_path = all_files[run_number]
-    print(file_path)
+    # print(file_path)
     iod_data = util.read_IOD_data_geo(file_path, config)
 
     sin_ra_meas = torch.tensor(iod_data['SIN_RA_PHYS'].values, dtype=torch.float32)
@@ -135,8 +135,10 @@ def sample_time_points(
     domain_end = tN + delta
     layer_bounds = [(t0 - delta, t0), (t0, tN), (tN, tN + delta)]
 
-    mean = t0 + (tN - t0) / 2
-    std = (tN - t0) / config['gaussian_std_scale']
+
+    mean = t0.value + (tN.value - t0.value) / 2
+    std = (tN.value - t0.value) / config['gaussian_std_scale']
+
 
     # Number of additional points to sample
     n_obs = len(observation_epochs)
@@ -149,7 +151,7 @@ def sample_time_points(
         samples = []
         while len(samples) < n_sample:
             x = rng.normal(loc=mean, scale=std)
-            if domain_start <= x <= domain_end:
+            if domain_start.value <= x <= domain_end.value:
                 samples.append(x)
         additional_samples = np.array(samples)
 
@@ -198,8 +200,13 @@ def sample_time_points(
         additional_samples = np.concatenate(all_samples) if all_samples else np.array([])
 
     # Combine with observation epochs and sort
-    combined = np.concatenate([observation_epochs, additional_samples])
-    return np.sort(combined)
+    if method == 'gaussian':
+        combined = np.concatenate([[observation.value for observation in observation_epochs], additional_samples])
+        time_combined = Time(combined, format='jd', scale='tdb')
+        return np.sort(time_combined)
+    else:
+        combined = np.concatenate([observation_epochs, additional_samples])
+        return np.sort(combined)
 
 
 def epoch_normalization(epoch, z_range, configuration):
@@ -564,7 +571,7 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
 
             return beta_best.view(-1)
 
-        def take_initial_step(self, n_init=10):
+        def take_initial_step(self, n_init=1):
             """
             Sample n_init initial trajectories and pick the one
             minimizing Jacobi constant variation.
@@ -923,7 +930,7 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
         delta_rho_dot=parameters['DELTA_RHO_DOT'],
     )
 
-    beta0 = mystep.take_initial_step(n_init=parameters['INITIAL_TRAJECTORIES'])
+    beta0 = mystep.take_initial_step()
 
     # Basin hopping configuration
     options = {"ftol": parameters['F_TOLERANCE'], "gtol": parameters['G_TOLERANCE'],
@@ -938,7 +945,7 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
     start = time.time()
     # Run basin hopping
     res2 = basinhopping(func, beta0, minimizer_kwargs=minimizer_kwargs, niter=parameters['NUMBER_OF_ITERATIONS'],
-                       stepsize=parameters['STEPSIZE'], T=parameters['TEMPERATURE'], callback=callback, take_step=mystep, disp=True)
+                        T=parameters['TEMPERATURE'], callback=callback, take_step=mystep, disp=False)
     end = time.time()
 
     beta_tensor_nlls = np.asarray(res2.x).reshape(q, H_size)

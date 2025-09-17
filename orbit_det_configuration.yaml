@@ -111,14 +111,14 @@ gaussian_std_scale: 1
 ###############################################
 # Running the PIELM IOD simulation - Testing ground
 ##############################################
-n_runs_test: 100
+n_runs_test: 4
 dynamics: '2BD'
 orbit: 'GEO'
 observer: 'GROUND'
-optimizer: 'CONSTRAINED_BASIN_HOPPING'
+optimizer: 'NLLS'
 SYSTEM_MASS_PARAMETER: 3.0404e-6
 ADD_NOISE: 1
-error_file_dir: 'Error_files_cbh_geo_uniform'
+error_file_dir: 'Error_files_nlls_space_gaussian'
 
 
 # Hyperparameter tuning

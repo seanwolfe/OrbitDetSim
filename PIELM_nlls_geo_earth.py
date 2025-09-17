@@ -2,12 +2,9 @@ from astropy import units as u
 from astropy.time import Time
 from poliastro.bodies import Earth
 from poliastro.twobody import Orbit
-from poliastro.plotting.static import StaticOrbitPlotter
-from poliastro.twobody.propagation import propagate
-import matplotlib.pyplot as plt
 import numpy as np
 from astropy.coordinates import EarthLocation, AltAz, ITRS, GCRS, SkyCoord, Angle
-from typing import Callable, List, Literal, Tuple, Union
+from typing import List, Literal, Tuple, Union
 import torch
 from torch.autograd.functional import jacobian
 from scipy.optimize import least_squares
@@ -236,6 +233,9 @@ def sample_time_points(
     Returns:
         np.ndarray of sampled time points, including observation_epochs.
     """
+
+    epochs_value = [Time(dt, scale='tdb').jd for dt in observation_epochs]
+
     if config is None:
         config = {}
     rng = np.random.default_rng(config["seed"])
@@ -244,8 +244,11 @@ def sample_time_points(
     domain_end = tN + delta
     layer_bounds = [(t0 - delta, t0), (t0, tN), (tN, tN + delta)]
 
-    mean = t0 + (tN - t0) / 2
-    std = (tN - t0) / config['gaussian_std_scale']
+
+
+    mean = epochs_value[0] + (epochs_value[-1] - epochs_value[0]) / 2
+    std = (epochs_value[-1] - epochs_value[0]) / config['gaussian_std_scale']
+
 
     # Number of additional points to sample
     n_obs = len(observation_epochs)
@@ -256,9 +259,11 @@ def sample_time_points(
     # Sample additional time points
     if method == "gaussian":
         samples = []
+        domain_start_gau = epochs_value[0] - delta.value
+        domain_end_gau = epochs_value[-1] + delta.value
         while len(samples) < n_sample:
             x = rng.normal(loc=mean, scale=std)
-            if domain_start <= x <= domain_end:
+            if domain_start_gau <= x <= domain_end_gau:
                 samples.append(x)
         additional_samples = np.array(samples)
 
@@ -307,8 +312,19 @@ def sample_time_points(
         additional_samples = np.concatenate(all_samples) if all_samples else np.array([])
 
     # Combine with observation epochs and sort
-    combined = np.concatenate([observation_epochs, additional_samples])
-    return np.sort(combined)
+    if method == 'gaussian':
+        combined = np.concatenate([epochs_value, additional_samples])
+        time_combined = [Time(combine, format='jd', scale='utc') for combine in combined]
+        sorted = np.sort(time_combined)
+        sorted_format = []
+        for t in sorted:
+            t.format = "datetime"
+            sorted_format.append(t)
+
+        return sorted_format
+    else:
+        combined = np.concatenate([observation_epochs, additional_samples])
+        return np.sort(combined)
 
 
 def epoch_normalization(epoch, z_range, configuration):
@@ -360,6 +376,8 @@ def run(data, config, parameters):
     epochs_nd_norm_reshaped_tensor = torch.tensor(epochs_nd_norm, dtype=torch.float32).unsqueeze(1)  # as a 2D tensor
 
     # get the indices where observations are
+    print(colloc_points)
+    print(data[2])
     obs_mask = np.isin(colloc_points, data[2])
     obs_indices = np.where(obs_mask)[0]
 
@@ -550,7 +568,7 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
         fun=residual_np,
         x0=beta0,
         jac=jacobian_np,
-        verbose=2,
+        verbose=0,
         method='trf',  # or 'trf', depending on structure
         xtol=parameters['X_TOLERANCE'],
         ftol=parameters['F_TOLERANCE'],

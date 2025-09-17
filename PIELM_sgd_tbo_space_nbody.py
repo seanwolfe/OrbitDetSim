@@ -175,6 +175,7 @@ def sample_time_points(
     Returns:
         np.ndarray of sampled time points, including observation_epochs.
     """
+
     if config is None:
         config = {}
     rng = np.random.default_rng(config["seed"])
@@ -183,8 +184,10 @@ def sample_time_points(
     domain_end = tN + delta
     layer_bounds = [(t0 - delta, t0), (t0, tN), (tN, tN + delta)]
 
-    mean = t0 + (tN - t0) / 2
-    std = (tN - t0) / config['gaussian_std_scale']
+
+    mean = t0.value + (tN.value - t0.value) / 2
+    std = (tN.value - t0.value) / config['gaussian_std_scale']
+
 
     # Number of additional points to sample
     n_obs = len(observation_epochs)
@@ -197,7 +200,7 @@ def sample_time_points(
         samples = []
         while len(samples) < n_sample:
             x = rng.normal(loc=mean, scale=std)
-            if domain_start <= x <= domain_end:
+            if domain_start.value <= x <= domain_end.value:
                 samples.append(x)
         additional_samples = np.array(samples)
 
@@ -246,8 +249,13 @@ def sample_time_points(
         additional_samples = np.concatenate(all_samples) if all_samples else np.array([])
 
     # Combine with observation epochs and sort
-    combined = np.concatenate([observation_epochs, additional_samples])
-    return np.sort(combined)
+    if method == 'gaussian':
+        combined = np.concatenate([[observation.value for observation in observation_epochs], additional_samples])
+        time_combined = Time(combined, format='jd', scale='tdb')
+        return np.sort(time_combined)
+    else:
+        combined = np.concatenate([observation_epochs, additional_samples])
+        return np.sort(combined)
 
 
 def epoch_normalization(epoch, z_range, configuration):
@@ -533,7 +541,7 @@ def train(model, epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_po
         loss.backward()
         optimizer.step()
 
-        if epoch % 100 == 0:
+        if epoch % 100000 == 0:
             print(f"Epoch {epoch}: Data Loss = {data_loss.item():.4e}, Physics Loss = {phys_loss.item():.4e}")
 
 
