@@ -31,8 +31,9 @@ def generate_iod_file(file_path, final_pos, final_vel, true_pos, true_vel, epoch
     tx, ty, tz = true_pos[:, 0], true_pos[:, 1], true_pos[:, 2]
     tvx, tvy, tvz = true_vel[:, 0], true_vel[:, 1], true_vel[:, 2]
 
-    print(len(fx))
-    print(len(tx))
+    if len(tx) > len(fx):
+        tx, ty, tz = true_pos[:-1, 0], true_pos[:-1, 1], true_pos[:-1, 2]
+        tvx, tvy, tvz = true_vel[:-1, 0], true_vel[:-1, 1], true_vel[:-1, 2]
 
     data = {
         "EPOCHS": epochs,

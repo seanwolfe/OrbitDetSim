@@ -310,6 +310,8 @@ def run(data, config, parameters):
 
 
 def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions, colloc_epochs, c, configuration, parameters, observer_velocity):
+    viz_flag = bool(configuration.get('visualization_flag', 0))
+
     L = configuration['AU_TO_M'] / configuration['KM_TO_M']  # Length scale in km
     G_km = (configuration['GRAVITATIONAL_CONSTANT'] / configuration['KM_TO_M'] ** 3)
     sys_mass = configuration['SUN_MASS'] + configuration['MOON_MASS'] + configuration['EARTH_MASS']
@@ -797,8 +799,10 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
         Y_pred_obs_km = Y_pred_obs * L
         Y_dot_pred_obs = Y_dot_pred[obs_indices] * L / T
 
-        positions.append(Y_pred_obs_km.detach().cpu().numpy())
-        velocities.append(Y_dot_pred_obs.detach().cpu().numpy())
+        if viz_flag:
+            positions.append(Y_pred_obs_km.detach().cpu().numpy())
+            velocities.append(Y_dot_pred_obs.detach().cpu().numpy())
+
         if first[0] == 0:
             nlls_start[0] = total_its[0]
             first[0] = 1
@@ -896,9 +900,10 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
 
         weighted_dist_res = lambda_dist * distance_penalty(Y_pred)
 
-        data_losses.append(obs_residual.item())
-        physics_losses.append(lambda_phys * physics_residual.item())
-        range_losses.append(weighted_dist_res.item())
+        if viz_flag:
+            data_losses.append(obs_residual.item())
+            physics_losses.append(lambda_phys * physics_residual.item())
+            range_losses.append(weighted_dist_res.item())
 
         return obs_residual + lambda_phys * physics_residual + weighted_dist_res
 
@@ -954,8 +959,9 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
 
     Y_pred_obs_nlls = Y_pred_nlls[obs_indices]
     Y_dot_pred_obs_nlls = Y_dot_pred_nlls[obs_indices]
-    positions[-1] = ((Y_pred_obs_nlls * L).detach().cpu().numpy())
-    velocities[-1] = (Y_dot_pred_obs_nlls * L / T).detach().cpu().numpy()
+    if viz_flag:
+        positions[-1] = ((Y_pred_obs_nlls * L).detach().cpu().numpy())
+        velocities[-1] = (Y_dot_pred_obs_nlls * L / T).detach().cpu().numpy()
     # print(res.x)
 
     # for error measurement purposes
@@ -990,7 +996,9 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
     final_positions = [final_positions_all_nlls, final_positions_all_nlls]
     final_velocities = [final_velocities_all_nlls, final_velocities_all_nlls]
 
-    epochss = np.arange(total_its[0])
-    data = {"TRAINING_EPOCH": epochss, "DATA_LOSS": data_losses, "PHYSICS_LOSS": physics_losses, "RANGE_LOSS": range_losses}
-
-    return pd.DataFrame(data), positions, velocities, nlls_start[0], final_positions, final_velocities, end - start
+    if viz_flag:
+        epochss = np.arange(total_its[0])
+        data = {"TRAINING_EPOCH": epochss, "DATA_LOSS": data_losses, "PHYSICS_LOSS": physics_losses, "RANGE_LOSS": range_losses}
+        return pd.DataFrame(data), positions, velocities, nlls_start[0], final_positions, final_velocities, end - start
+    else:
+        return [], [], [], nlls_start[0], final_positions, final_velocities, end - start
