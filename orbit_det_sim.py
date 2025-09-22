@@ -987,7 +987,7 @@ def run_IOD_testing(config):
                 import PIELM_sgd_geo_earth as pielm_2gg
                 parameters = {'NUMBER_OF_OBSERVATIONS': 260, 'OBSERVATION_TIME_FRACTION': 0.5,
                               'TIME_DELTA': 0.0000000001 * u.day,
-                              'TOTAL_POINTS': 300, 'SAMPLING_METHOD': "lhs",
+                              'TOTAL_POINTS': 300, 'SAMPLING_METHOD': "gaussian",
                               'LAYER_RATIOS': [(0., 1 / 10000), (1 / 10000, 9999 / 10000), (9999 / 10000, 1.)],
                               'INPUT_RANGE': (-1, 1), 'WEIGHT_SCALE_FACTOR': 1e0,
                               'HIDDEN_DIMENSION': 20, 'NUMBER_OF_EPOCHS': 100000, 'LEARNING_RATE': 1e-2,
@@ -1018,7 +1018,7 @@ def run_IOD_testing(config):
                     data, config, parameters)
 
             elif dynamics == '2BD' and orbit=='GEO' and observer == 'GROUND' and optimizer == 'CONSTRAINED_BASIN_HOPPING':
-                import PIELM_basinhopping_w_range_geo_earth as pielm_2ggcb
+                from PIELMs import PIELM_basinhopping_w_range_geo_earth as pielm_2ggcb
                 parameters = {'NUMBER_OF_OBSERVATIONS': 260, 'OBSERVATION_TIME_FRACTION': 0.5,
                               'TIME_DELTA': 0.0000000001 * u.day,
                               'TOTAL_POINTS': 300, 'SAMPLING_METHOD': "gaussian",
@@ -1375,6 +1375,7 @@ def run_IOD_hyperparameter_run_par_resumable(config):
     for (combo, run_idx) in task_stream():
         # skip if already completed
         if task_key(combo, run_idx) in already_done:
+        #if True:
             continue
 
         if run_idx == n_runs - 1:
@@ -1537,6 +1538,307 @@ def run_IOD_hyperparameter_run_par_resumable(config):
     return
 
 
+def run_IOD_hyperparameter_run_par_resumable_bhcolloc(config):
+    # --- MPI setup ---
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    size = comm.Get_size()
+
+    if rank == 0:
+        print("Starting...")
+
+    viz_flag = bool(config.get('visualization_flag', 0))
+
+    # --- Hyperparam grids (don't materialize huge lists more than needed) ---
+    p1 = config['range_step']
+    p2 = config['range_rate_step']
+    p3 = config.get('temperature', [])
+    p4 = config['colloc_ratio']
+    p5 = config['delta_tf']
+    optimizer = config['optimizer']
+
+    if optimizer == 'CONSTRAINED_BASIN_HOPPING':
+        combo_iter = itertools.product(p1, p2, p3, p4, p5)
+    else:
+        combo_iter = itertools.product(p1, p2)
+
+    n_runs = int(config['n_runs_test'])
+
+    # --- Helpers ----------------------------------------------------------------
+    def task_stream():
+        """Yield (combo, run_idx) without ever building a giant list."""
+        idx = 0
+        for combo in combo_iter:
+            for r in range(n_runs):
+                if idx % size == rank:
+                    yield combo, r
+                idx += 1
+
+    # Unique output names
+    os.makedirs(config['error_file_dir'], exist_ok=True)
+    meta_basename = f"{config['dynamics']}_{config['orbit']}_{config['observer']}_{config['optimizer']}"
+    final_meta_path = os.path.join(config['error_file_dir'], meta_basename + "_meta_data.csv")
+    rank_meta_path = os.path.join(config['error_file_dir'], f"{meta_basename}_rank{rank}.csv")
+
+    # --- Determine already-completed keys (so we can resume) --------------------
+    def key_of(row):
+        """Return the canonical numeric key tuple for a row or CSV dict row."""
+        return (
+            float(row.get("DELTA_RHO", 0) or 0),
+            float(row.get("DELTA_RHO_DOT", 0) or 0),
+            float(row.get("TEMPERATURE", 0) or 0),
+            float(row.get("LAYER_RATIOS", 0) or 0),
+            float(row.get("TIME_DELTA_DAYS", 0) or 0),
+            int(row.get("RUN_NUMBER", 0) or 0),
+        )
+
+    def read_completed_keys(paths):
+        done = set()
+        for p in paths:
+            if not os.path.exists(p):
+                continue
+            try:
+                with open(p, "r", newline="") as f:
+                    rdr = csv.DictReader(f)
+                    for row in rdr:
+                        done.add(key_of(row))
+            except Exception:
+                # ignore partially written/empty files
+                pass
+        return done
+
+    # include both the global merged file and this rank's partial file
+    already_done = read_completed_keys([final_meta_path, rank_meta_path])
+
+    # Prepare writer (append mode)
+    rank_header = [
+        # --- all parameters ---
+        "NUMBER_OF_OBSERVATIONS",
+        "TIME_DELTA_DAYS",  # numeric version of TIME_DELTA
+        "TOTAL_POINTS",
+        "SAMPLING_METHOD",
+        "LAYER_RATIOS",  # JSON string
+        "INPUT_RANGE",  # JSON string
+        "HIDDEN_DIMENSION",
+        "PHYSICS_WEIGHT",
+        "LAMBDA_DIST",
+        "WEIGHT_SCALE_FACTOR",
+        "NUMBER_OF_ITERATIONS",
+        "TEMPERATURE",
+        "X_TOLERANCE",
+        "F_TOLERANCE",
+        "MAX_FUNCTION_EVAL",
+        "MAX_ITERATiONS",  # keep your exact key spelling
+        "G_TOLERANCE",
+        "RUN_NUMBER",
+        "MIN_RHO",
+        "MAX_RHO",
+        "MIN_RHO_DOT",
+        "MAX_RHO_DOT",
+        "DELTA_RHO",
+        "DELTA_RHO_DOT",
+
+        # --- identifiers ---
+        "RUN_NUMBER",
+
+        # --- metrics/extras ---
+        "POS_RMSE",
+        "VEL_RMSE",
+        "COMPUTATION_TIME_SEC",
+        "OPTIMAL_BH_ITERATION",
+        "FILE_USED",
+        "SAVED_AS",
+    ]
+
+    rank_file_exists = os.path.exists(rank_meta_path)
+    need_header = (not rank_file_exists) or (os.path.getsize(rank_meta_path) == 0)
+
+    rank_fh = open(rank_meta_path, "a", newline="")
+    rank_writer = csv.DictWriter(rank_fh, fieldnames=rank_header)
+    if need_header:
+        rank_writer.writeheader()
+
+    def task_key(combo, run_idx):
+        """Return the numeric key matching read_completed_keys() shape."""
+        dr = float(combo[0])
+        drd = float(combo[1]) if len(combo) > 1 else 0.0
+        t = float(combo[2]) if len(combo) > 2 else 0.0
+        lr = float(combo[3]) if len(combo) > 3 else 0.0
+        dtf = float(combo[4]) if len(combo) > 4 else 0.0
+        return (dr, drd, t, lr, dtf, int(run_idx))
+
+    # --- Main streamed work loop -----------------------------------------------
+    for (combo, run_idx) in task_stream():
+        # skip if already completed
+        if task_key(combo, run_idx) in already_done:
+            continue
+
+        if run_idx == n_runs - 1:
+            print(f"[Rank {rank}] Running hyperparameter combo {combo}, run={run_idx + 1}", flush=True)
+
+        # --------- CASE SWITCH (unchanged logic, just use `combo`) --------------
+        dynamics, orbit, observer, optimizer = config['dynamics'], config['orbit'], config['observer'], config['optimizer']
+
+        # You can keep your original blocks; only show one as example for brevity:
+        if dynamics == 'NBD' and observer == 'SPACE' and optimizer == 'CONSTRAINED_BASIN_HOPPING':
+            import PIELM_basinhopping_w_range_nbody as pielm_ctsn
+
+            m_2 = combo[3]
+            m_12 = (1 - m_2) / 2
+            parameters = {
+                'NUMBER_OF_OBSERVATIONS': 16,
+                'TIME_DELTA': combo[4] * u.day,
+                'TOTAL_POINTS': 100,
+                'SAMPLING_METHOD': "uniform",
+                'LAYER_RATIOS': [(0., m_12), (m_12, m_12 + m_2), (m_12 + m_2, 1.)],
+                'INPUT_RANGE': (-1, 1),
+                'HIDDEN_DIMENSION': 100,
+                'PHYSICS_WEIGHT': 1e2,
+                'LAMBDA_DIST': 1e-3,
+                'WEIGHT_SCALE_FACTOR': 1e-2,
+                'NUMBER_OF_ITERATIONS': 2,
+                'TEMPERATURE': combo[2],
+                'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15,
+                'MAX_FUNCTION_EVAL': 1000, 'MAX_ITERATiONS': 1000,
+                'G_TOLERANCE': 1e-15, 'RUN_NUMBER': run_idx,
+                'MIN_RHO': 0.0006684587122, 'MAX_RHO': 0.06684587122,
+                'MIN_RHO_DOT': -0.05033557046, 'MAX_RHO_DOT': 0.05033557046,
+                'DELTA_RHO': combo[0], 'DELTA_RHO_DOT': combo[1]
+            }
+            if viz_flag:
+                config['lambda'] = parameters['TIME_DELTA']
+                config['run_idx'] = run_idx
+            data = pielm_ctsn.generate_data(config, parameters)
+            results, positions, velocities, nlls_start, final_pos, final_vel, true_pos, true_vel, epochs, comp_time, optimal_bh = pielm_ctsn.run(data, config, parameters)
+
+        # (Keep all your other elif blocks exactly as you have them)
+        # ------------------------------------------------------------------------
+
+        # Build output filename for the per-run IOD CSV (unchanged)
+        def combo_to_string_local(c): return "_" + "_".join(str(x) for x in c)
+        combo_str = combo_to_string_local(combo)
+        file_used = data[9]
+        file_name = f"{dynamics}_{orbit}_{observer}_{optimizer}_run_{run_idx}{combo_str}.csv"
+
+        os.makedirs(config['error_file_dir'], exist_ok=True)
+        file_path = os.path.join(config['error_file_dir'], file_name)
+
+        # Generate IOD file and RMSEs
+        rmse_df = util.generate_iod_file(file_path, final_pos, final_vel, true_pos, true_vel, epochs)
+
+        pos_rmse = float(np.sqrt(((rmse_df[["IOD_X","IOD_Y","IOD_Z"]].values - rmse_df[["TRUE_X","TRUE_Y","TRUE_Z"]].values) ** 2).mean()))
+        vel_rmse = float(np.sqrt(((rmse_df[["IOD_VX","IOD_VY","IOD_VZ"]].values - rmse_df[["TRUE_VX","TRUE_VY","TRUE_VZ"]].values) ** 2).mean()))
+
+        def params_to_row(parameters, run_idx, extras):
+            """
+            Build a flat row dict for CSV:
+            - includes ALL parameters (normalized)
+            - adds metrics/extras (pos_rmse, etc.)
+            """
+            row = {}
+
+            for k, v in parameters.items():
+                # Normalize astropy quantities
+                if isinstance(v, u.Quantity):
+                    # choose canonical units per key
+                    if k == "TIME_DELTA":
+                        row["TIME_DELTA_DAYS"] = v.to(u.day).value  # numeric float
+                    else:
+                        # generic: store value in SI if you prefer
+                        row[k] = v.to_base_units().value
+                    continue
+
+                # numpy scalars
+                if isinstance(v, (np.floating, np.integer)):
+                    row[k] = v.item()
+                    continue
+
+                # plain scalars
+                if isinstance(v, (int, float)):
+                    row[k] = v
+                    continue
+
+                # arrays / sequences -> JSON
+                if isinstance(v, (list, tuple, np.ndarray)):
+                    if k == "LAYER_RATIOS":
+                        row[k] = v[1][1] - v[1][0]
+                    else:
+                        row[k] = json.dumps(v if not isinstance(v, np.ndarray) else v.tolist())
+                    continue
+
+                # everything else as string
+                row[k] = str(v)
+
+            # Ensure RUN_NUMBER and RUN_IDX exist and are ints
+            row["RUN_NUMBER"] = int(parameters.get("RUN_NUMBER", run_idx))
+
+            # Attach extras/metrics (already numeric/strings)
+            row.update(extras)
+            return row
+
+        def build_extras(pos_rmse, vel_rmse, comp_time, optimal_bh, file_used, file_name):
+            return {
+                "POS_RMSE": float(pos_rmse),
+                "VEL_RMSE": float(vel_rmse),
+                "COMPUTATION_TIME_SEC": float(comp_time),
+                "OPTIMAL_BH_ITERATION": float(optimal_bh),
+                "FILE_USED": str(file_used),
+                "SAVED_AS": str(file_name),
+            }
+
+        extras = build_extras(pos_rmse, vel_rmse, comp_time, optimal_bh, file_used, file_name)
+        row = params_to_row(parameters, run_idx, extras)
+
+        # Write immediately
+        rank_writer.writerow(row)
+        rank_fh.flush()
+        os.fsync(rank_fh.fileno())
+
+        # Optional: visualize only in dev runs
+        if viz_flag:
+            # ... your existing viz code here (unchanged) ...
+            pass
+
+        # Free large objects deterministically
+        del results, positions, velocities, nlls_start
+        del final_pos, final_vel, true_pos, true_vel, epochs, rmse_df, data
+        gc.collect()
+
+    # Close our per-rank file
+    rank_fh.close()
+
+    # --------- Merge (rank 0) ---------------------------------------------------
+    comm.Barrier()
+    if rank == 0:
+        # Find all rank csvs + any previous global file; merge & de-dup on key
+        rank_files = glob.glob(os.path.join(config['error_file_dir'], f"{meta_basename}_rank*.csv"))
+
+        rows, seen = [], set()
+
+        sources = ([final_meta_path] if os.path.exists(final_meta_path) else []) + rank_files
+
+        for src in sources:
+            try:
+                with open(src, "r", newline="") as f:
+                    rdr = csv.DictReader(f)
+
+                    for r in rdr:
+                        k = key_of(r)
+                        if k not in seen:
+                            rows.append(r)
+                            seen.add(k)
+            except Exception:
+                pass
+
+        # Write merged final file
+        with open(final_meta_path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=rank_header)
+            w.writeheader()
+            w.writerows(rows)
+
+    comm.Barrier()
+    return
+
 def run_IOD_hyperparameter_run_par(config):
     # --- MPI setup ---
     comm = MPI.COMM_WORLD
@@ -1612,7 +1914,7 @@ def run_IOD_hyperparameter_run_par(config):
                 data, config, parameters)
 
         elif dynamics == '2BD' and orbit=='GEO' and observer == 'GROUND' and optimizer == 'CONSTRAINED_BASIN_HOPPING':
-            import PIELM_basinhopping_w_range_geo_earth as pielm_2ggcb
+            from PIELMs import PIELM_basinhopping_w_range_geo_earth as pielm_2ggcb
             parameters = {'NUMBER_OF_OBSERVATIONS': 260, 'OBSERVATION_TIME_FRACTION': 0.5,
                           'TIME_DELTA': 0.0000000001 * u.day,
                           'TOTAL_POINTS': 300, 'SAMPLING_METHOD': "uniform",
@@ -1922,7 +2224,7 @@ def run_IOD_hyperparameter(config):
                     data, config, parameters)
 
             elif dynamics == '2BD' and orbit=='GEO' and observer == 'GROUND' and optimizer == 'CONSTRAINED_BASIN_HOPPING':
-                import PIELM_basinhopping_w_range_geo_earth as pielm_2ggcb
+                from PIELMs import PIELM_basinhopping_w_range_geo_earth as pielm_2ggcb
                 parameters = {'NUMBER_OF_OBSERVATIONS': 260, 'OBSERVATION_TIME_FRACTION': 0.5,
                               'TIME_DELTA': 0.0000000001 * u.day,
                               'TOTAL_POINTS': 300, 'SAMPLING_METHOD': "uniform",
@@ -2209,7 +2511,8 @@ size = comm.Get_size()
 
 # run_IOD_hyperparameter(config)  # only parallel over combos
 # run_IOD_hyperparameter_run_par(config)  # parallel over combos and runs
-run_IOD_hyperparameter_run_par_resumable(config)  # par over combos and runs, visualization flag, can continue from where you left off
+# run_IOD_hyperparameter_run_par_resumable(config)  # par over combos and runs, visualization flag, can continue from where you left off
+run_IOD_hyperparameter_run_par_resumable_bhcolloc(config)
 
 ###################################
 # Single results file implementation
