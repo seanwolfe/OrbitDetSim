@@ -1232,6 +1232,110 @@ def get_sc_state_from_sc1_position(detected_pop, config):
     return detected_pop
 
 
+def get_scs_initial_states(detected_pop, config):
+    """
+    For each detection row in `detected_pop`:
+      • Rebuild formation from saved SC1 initial position
+      • Match the detecting spacecraft position at the first detection instant to formation.orbit
+      • (Augment DataFrame) write detecting sc GEO_ECLIP columns, LPF index, epoch
+      • Additionally: for *every* spacecraft j, match its position at the same
+        detection instant to formation.orbit and read GEO_EME [km, km/s] state.
+    Returns:
+      (aug_df, all_sc_geo_eme_list, detecting_ids)
+        - aug_df: augmented DataFrame (same as before)
+        - all_sc_geo_eme_list: list of arrays, each (num_sc, 6), ordered by sc ID (1..num_sc)
+        - detecting_ids: list of detecting spacecraft IDs (1-based)
+    """
+
+    out_df = detected_pop.copy(deep=True)
+
+    # Accumulators for DataFrame fields
+    closest_indices = []
+    sc_epochs = []
+    det_geo_eclip_states = []
+
+    # Extra returns
+    all_sc_geo_eclip_list = []  # per-row: array (num_sc, 6)
+    detecting_ids = []
+
+    # Convenience: columns we read from formation.orbit for GEO_EME state
+    eme_cols = ["GEO_EME_X_(km)", "GEO_EME_Y_(km)", "GEO_EME_Z_(km)",
+                "GEO_EME_Vx_(km/s)", "GEO_EME_Vy_(km/s)", "GEO_EME_Vz_(km/s)"]
+
+    for kdx, detection in out_df.iterrows():
+        # 1) Recreate formation from saved SC1 initial pos
+        formation = Formation(config)
+        sc1_ini_index = formation.get_index_from_pos(detection['spacecraft_1_ini_pos'])
+        formation.recall_formation(sc1_ini_index, config)
+        formation.match_spacecraft_trajectory(int(detection['total_length']), config)
+
+        # 2) Detecting spacecraft ID (1-based, from MultiIndex third level)
+        sc_id_detect = int(detection.name[2])
+        detecting_ids.append(sc_id_detect)
+        detecting_spacecraft = formation.spacecraft[sc_id_detect - 1]
+
+        # sample index of first detection for this row
+        idx0 = int(detection['min_nonnegative'])
+
+        # 3) Detecting s/c desired position at detection instant (SECR→km for matching)
+        desired_sc_pos_km = detecting_spacecraft.matched_trajectory[idx0, :] * (config['AU_TO_M'] / 1000.0)
+
+        # 4) Match to formation.orbit ‘SUN_EARTH_CO_*’ positions to get the LPF index
+        possible_positions = formation.orbit.loc[:, ['SUN_EARTH_CO_X_(km)',
+                                                     'SUN_EARTH_CO_Y_(km)',
+                                                     'SUN_EARTH_CO_Z_(km)']].to_numpy()
+        dists = np.linalg.norm(possible_positions - desired_sc_pos_km, axis=1)
+        closest_position_index = int(np.argmin(dists))
+        closest_indices.append(closest_position_index)
+
+        # 5) Read detecting s/c GEO_EME state from that row, convert to GEO_ECLIP for DataFrame columns
+        geo_eme_state_detect = formation.orbit.loc[
+            formation.orbit.index[closest_position_index], eme_cols
+        ].to_numpy(dtype=float)
+
+        # Your code put GEO_ECLIP in the DF; keep doing that for compatibility
+        geo_eclip_state_detect = eme_to_ecliptic_batch(geo_eme_state_detect)
+        det_geo_eclip_states.append(geo_eclip_state_detect)
+
+        # Epoch (string)
+        sc_time = formation.orbit.loc[formation.orbit.index[closest_position_index], "Time"]
+        sc_epochs.append(sc_time.strftime("%Y-%m-%d %H:%M:%S"))
+
+        # 6) Now expand the *same* matching logic to EVERY spacecraft
+        sc_states_geo_eclip = []  # will be (num_sc, 6), ordered by spacecraft ID (1..N)
+
+        for jdx, sc in enumerate(formation.spacecraft, start=1):
+            # position of spacecraft j at the same detection instant idx0
+            desired_pos_j_km = sc.matched_trajectory[idx0, :] * (config['AU_TO_M'] / 1000.0)
+
+            # match to orbit table just like above (per spacecraft j)
+            dists_j = np.linalg.norm(possible_positions - desired_pos_j_km, axis=1)
+            idx_match_j = int(np.argmin(dists_j))
+
+            # read GEO_EME state at that matched row
+            geo_eme_state_j = formation.orbit.loc[
+                formation.orbit.index[idx_match_j], eme_cols
+            ].to_numpy(dtype=float)
+
+            geo_eclip_state_detect_j = eme_to_ecliptic_batch(geo_eme_state_j)
+
+            sc_states_geo_eclip.append(geo_eclip_state_detect_j)
+
+        all_sc_geo_eclip = np.vstack(sc_states_geo_eclip)  # (num_sc, 6)
+        all_sc_geo_eclip_list.append(all_sc_geo_eclip)
+
+    # 7) Write the detecting s/c info back into the DataFrame (no chained assignment)
+    out_df.loc[:, 'detecting_sc_lpf_orbit_index'] = closest_indices
+    out_df.loc[:, 'sc_epoch'] = sc_epochs
+
+    det_geo_eclip = np.vstack(det_geo_eclip_states)
+    out_df.loc[:, ['GEO_ECLIP_X_(km)', 'GEO_ECLIP_Y_(km)', 'GEO_ECLIP_Z_(km)',
+                   'GEO_ECLIP_Vx_(km/s)', 'GEO_ECLIP_Vy_(km/s)', 'GEO_ECLIP_Vz_(km/s)']] = det_geo_eclip
+
+    # Return: augmented DF, per-row all-s/c GEO_EME arrays, and detecting IDs
+    return out_df, all_sc_geo_eclip_list, detecting_ids
+
+
 def ms_to_aud(states):
     # Argument parser to get the config file path
     parser = argparse.ArgumentParser(description="Run the spacecraft simulation")

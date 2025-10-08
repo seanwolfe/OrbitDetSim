@@ -56,10 +56,10 @@ minimoon_column_names: [ "Object id", "Julian Date", "Distance", "Helio q", "Hel
 # minimoon_master_file_path: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb/minimoon_master_new.csv'
 # minimoon_master_file_path: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb_testset/minimoon_master_new_testset.csv'
 minimoon_master_file_path: 'minimoon_files_oorb_testset/minimoon_master_new_testset.csv'
-num_spacecraft: 1
+num_spacecraft: 4
 number_of_runs: 4  # number of runs per minimoon (the formation is reinitiallized each time)
 # number_of_process: 1  # number of processes to use when usen multiprocess for parallel implementation
-output_df_file_name: 'results/spacecraft_1/spacecraft_1_runs_4'
+output_df_file_name: 'results/initial_tests'
 number_of_rows_per_part: 10000000
 save_format: 'csv' # csv or parquet, also needs to be specified when expecting to read files
 
@@ -125,6 +125,14 @@ error_file_dir: 'Error_files_sgd_geo_gaussian'
 physics_weight: [1.0e-4, 1.0e-3, 1.0e-2, 1.0e-1, 1.0e+0, 1.0e+1, 1.0e+2]
 c_wb: [1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 1.0e-1]
 range_weight: [1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 1.0e-1, 1.0e+0, 1.0e+1]
+
+
+###################################
+# Running the overall OD algorithm
+##################################
+num_od_runs: 1
+od_file_dir: 'OD_results'
+
 
 
 ####################################################
