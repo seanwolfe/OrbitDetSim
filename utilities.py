@@ -1257,6 +1257,7 @@ def get_scs_initial_states(detected_pop, config):
     # Extra returns
     all_sc_geo_eclip_list = []  # per-row: array (num_sc, 6)
     detecting_ids = []
+    all_sc_boresights_list = []
 
     # Convenience: columns we read from formation.orbit for GEO_EME state
     eme_cols = ["GEO_EME_X_(km)", "GEO_EME_Y_(km)", "GEO_EME_Z_(km)",
@@ -1303,7 +1304,7 @@ def get_scs_initial_states(detected_pop, config):
 
         # 6) Now expand the *same* matching logic to EVERY spacecraft
         sc_states_geo_eclip = []  # will be (num_sc, 6), ordered by spacecraft ID (1..N)
-
+        sc_boresights = []
         for jdx, sc in enumerate(formation.spacecraft, start=1):
             # position of spacecraft j at the same detection instant idx0
             desired_pos_j_km = sc.matched_trajectory[idx0, :] * (config['AU_TO_M'] / 1000.0)
@@ -1320,9 +1321,14 @@ def get_scs_initial_states(detected_pop, config):
             geo_eclip_state_detect_j = eme_to_ecliptic_batch(geo_eme_state_j)
 
             sc_states_geo_eclip.append(geo_eclip_state_detect_j)
+            sc_boresights.append(sc.boresight)
 
         all_sc_geo_eclip = np.vstack(sc_states_geo_eclip)  # (num_sc, 6)
         all_sc_geo_eclip_list.append(all_sc_geo_eclip)
+
+        all_sc_boresights = np.vstack(sc_boresights)  # (num_sc, 3)
+        all_sc_boresights_list.append(all_sc_boresights)
+
 
     # 7) Write the detecting s/c info back into the DataFrame (no chained assignment)
     out_df.loc[:, 'detecting_sc_lpf_orbit_index'] = closest_indices
@@ -1333,7 +1339,7 @@ def get_scs_initial_states(detected_pop, config):
                    'GEO_ECLIP_Vx_(km/s)', 'GEO_ECLIP_Vy_(km/s)', 'GEO_ECLIP_Vz_(km/s)']] = det_geo_eclip
 
     # Return: augmented DF, per-row all-s/c GEO_EME arrays, and detecting IDs
-    return out_df, all_sc_geo_eclip_list, detecting_ids
+    return out_df, all_sc_geo_eclip_list, detecting_ids, all_sc_boresights_list
 
 
 def ms_to_aud(states):

@@ -299,10 +299,10 @@ def run_sim_runnumbers_MPI_getIOD(config):
         print(f"[rank {rank}] {src_base}: chunk size = {len(my_chunk)}", flush=True)
         comm.Barrier()
 
-        detected_appended_pop_chunk, all_sc_states, detecting_id = util.get_scs_initial_states(my_chunk, config)
-
+        detected_appended_pop_chunk, all_sc_states, detecting_id, boresights = util.get_scs_initial_states(my_chunk, config)
 
         # ---------- process my rows ----------
+        zdx = 0
         for _, detected_minimoon in detected_appended_pop_chunk.iterrows():
 
             mm_id = detected_minimoon.name[1]
@@ -414,6 +414,56 @@ def run_sim_runnumbers_MPI_getIOD(config):
                 df.to_csv(base_path + ".csv", index=False)
             if save_format in ('parquet', 'both') and not os.path.exists(base_path + ".parquet"):
                 df.to_parquet(base_path + ".parquet", index=False)
+
+            # -----------------------
+            # Build row of master file
+            # -----------------------
+
+            # final asteroid epoch (jdtdb)
+            final_ae = epochs[-1]
+
+            # final asteroid helio state
+            final_ha = asteroid_integrated_states[:, -1]
+
+            # final earth helio state
+            final_eha = asteroid_earth_states[:, -1]
+
+            # final spacecraft epoch
+            in_et = sp.str2et(sc_epoch)
+            in_jdtdb = sp.unitim(in_et, 'ET', 'JDTDB')
+            final_se = in_jdtdb + total_window_s / config['SECONDS_PER_DAY']
+
+            # detecting s/c id
+            final_did = int(sc_id)
+
+            # other spacecraft final helio states
+            sc_states = all_sc_states[zdx]
+            final_hsc = []
+            for fdx in range(0, len(sc_states)):
+                # Spacecraft initial GEO-ecliptic state
+                sc_geo_eci_fdx = sc_states[fdx, :]
+
+                # Convert to heliocentric for integration
+                sc_helio_ini_fdx = sc_geo_eci_fdx - sun_geo_state
+
+                # Integrate spacecraft in heliocentric frame
+                sc_int_states_fdx, earth_states_fdx = nbody.integrate_n_body(
+                    sc_helio_ini_fdx, sc_epoch, total_window_s,
+                    config['time_between_frames'], type="SPACECRAFT"
+                )
+
+                final_hsc.append(sc_int_states_fdx[:, -1])
+
+            all_final_hsc = np.vstack(final_hsc)
+
+            # final earth helio state using spacecraft epochs
+            final_hesc = earth_states_fdx[:, -1]
+
+            # current attitudes of sc
+            final_sc_boresights = boresights[zdx]
+
+            zdx += 1
+
 
         # All ranks finished their rows for this file
         comm.Barrier()
@@ -783,9 +833,9 @@ def run_overall_OD(master, config):
         os.makedirs(vis_dir, exist_ok=True)
         do_detection = (len(_non_hidden_entries(vis_dir)) == 0)
         if do_detection:
-            print(f"[Stage: detection] {vis_dir} is EMPTY → run detection")
+            print(f"[Stage: detection] {vis_dir} is EMPTY - run detection")
         else:
-            print(f"[Stage: detection] {vis_dir} is NOT empty → skip detection")
+            print(f"[Stage: detection] {vis_dir} is NOT empty - skip detection")
     else:
         do_detection = None
     do_detection = comm.bcast(do_detection, root=0)

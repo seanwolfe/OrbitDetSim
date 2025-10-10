@@ -8,7 +8,6 @@ spice.furnsh("de430.bsp")
 spice.furnsh('naif0012.tls')
 
 
-
 def integrate_n_body(object_state, epoch, end_time, time_interval, type):
     # Argument parser to get the config file path
     parser = argparse.ArgumentParser(description="Run the spacecraft simulation")
