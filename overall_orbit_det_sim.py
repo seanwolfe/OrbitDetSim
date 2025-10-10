@@ -419,6 +419,9 @@ def run_sim_runnumbers_MPI_getIOD(config):
             # Build row of master file
             # -----------------------
 
+            # final asteroid
+            final_a = detected_minimoon.name[1]
+
             # final asteroid epoch (jdtdb)
             final_ae = epochs[-1]
 
@@ -461,6 +464,8 @@ def run_sim_runnumbers_MPI_getIOD(config):
 
             # current attitudes of sc
             final_sc_boresights = boresights[zdx]
+
+            # build and output df
 
             zdx += 1
 
