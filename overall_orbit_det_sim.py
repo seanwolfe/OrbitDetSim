@@ -12,7 +12,6 @@ import spiceypy as sp
 import utilities as util
 import n_body_integrator as nbody
 import argparse
-import itertools
 import json
 import csv
 import gc
@@ -603,68 +602,89 @@ def run_sim_runnumbers_MPI_getIOD(config):
 
 
 def run_IOD(config):
+
     # --- MPI setup ---
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     size = comm.Get_size()
 
-    if rank == 0:
-        print("Starting IOD...")
-
     viz_flag = bool(config.get('visualization_flag', 0))
 
+    # Paths
+    iod_dir   = util._iod_dir(config)
+    master_fn = os.path.join(iod_dir, "MASTER_IOD.csv")
+    if rank == 0 and not os.path.exists(master_fn):
+        print(f"[Stage: IOD Solve] No MASTER_IOD.csv at {master_fn} → skip")
+    comm.Barrier()
+    if not os.path.exists(master_fn):
+        return
 
-    n_runs = int(config['n_runs_test'])
+    # Rank 0: inspect master; broadcast row count / columns
+    if rank == 0:
+        try:
+            _head = pd.read_csv(master_fn, nrows=1)
+            n_rows = sum(1 for _ in open(master_fn, "r", encoding="utf-8")) - 1
+            cols   = list(_head.columns)
+            print(f"[Stage: IOD Solve] MASTER rows = {n_rows}")
+        except Exception as e:
+            print(f"[Stage: IOD Solve] Failed to inspect MASTER: {e}")
+            n_rows, cols = 0, None
+    else:
+        n_rows, cols = 0, None
 
-    # --- Helpers ----------------------------------------------------------------
-    def task_stream():
-        """Yield (combo, run_idx) without ever building a giant list."""
-        idx = 0
-        for r in range(n_runs):
-            if idx % size == rank:
-                yield combo, r
-            idx += 1
+    n_rows = comm.bcast(n_rows, root=0)
+    if n_rows <= 0:
+        return
+    cols = comm.bcast(cols, root=0)
 
-    # Unique output names
-    os.makedirs(config['error_file_dir'], exist_ok=True)
-    meta_basename = f"{config['dynamics']}_{config['orbit']}_{config['observer']}_{config['optimizer']}"
-    final_meta_path = os.path.join(config['error_file_dir'], meta_basename + "_meta_data.csv")
-    rank_meta_path = os.path.join(config['error_file_dir'], f"{meta_basename}_rank{rank}.csv")
+    # Round-robin assignment (one run per row)
+    my_indices = list(range(n_rows))[rank::size]
 
-    # --- Determine already-completed keys (so we can resume) --------------------
-    def key_of(row):
-        """Return the canonical numeric key tuple for a row or CSV dict row."""
-        return (
-            int(row.get("RUN_NUMBER", 0) or 0),
-        )
+    # Resume markers (per MASTER row)
+    stage3_done_dir = os.path.join(iod_dir, "iod_stage3_done")
+    if rank == 0:
+        os.makedirs(stage3_done_dir, exist_ok=True)
+    comm.Barrier()
 
-    def read_completed_keys(paths):
-        done = set()
-        for p in paths:
-            if not os.path.exists(p):
-                continue
-            try:
-                with open(p, "r", newline="") as f:
-                    rdr = csv.DictReader(f)
-                    for row in rdr:
-                        done.add(key_of(row))
-            except Exception:
-                # ignore partially written/empty files
-                pass
-        return done
+    def row_uid_from_saved_as(saved_as_str: str):
+        s = str(saved_as_str or "")
+        if not s.strip():
+            return None
+        first = s.split(";")[0].strip()
+        if not first:
+            return None
+        return os.path.splitext(os.path.basename(first))[0]
 
-    # include both the global merged file and this rank's partial file
-    already_done = read_completed_keys([final_meta_path, rank_meta_path])
+    def done_marker_path(uid: str, row_index: int):
+        # Use a stable UID; fall back to the row index to avoid collisions
+        safe_uid = uid if (uid and str(uid).strip()) else f"rowidx_{row_index}"
+        return os.path.join(stage3_done_dir, f"{safe_uid}.done")
 
-    # Prepare writer (append mode)
-    rank_header = [
-        # --- all parameters ---
+    def is_done(uid: str, row_index: int) -> bool:
+        return os.path.exists(done_marker_path(uid, row_index))
+
+    # Load MASTER once for reading (workers)
+    df_master = pd.read_csv(master_fn)
+
+    # Column order spec (final write order)
+    detection_block = [
+        "ID_AST","EPOCH_AST(jdtdb)","HELIO_AST(kms)","EARTH_HELIO_EA(kms)",
+        "EPOCH_SC(jdtdb)","DETECTING_SC_ID",
+        "HELIO_SC_1(kms)","HELIO_SC_2(kms)","HELIO_SC_3(kms)","HELIO_SC_4(kms)",
+        "EARTH_HELIO_SE(kms)",
+        "POINTING_SC_1","POINTING_SC_2","POINTING_SC_3","POINTING_SC_4",
+    ]
+    # Keep IOD_DATA_SAVED_AS immediately after context block
+    saved_as_col = ["IOD_DATA_SAVED_AS"]
+
+    # Parameter block (flattened; TIME_DELTA -> TIME_DELTA_DAYS)
+    param_block = [
         "NUMBER_OF_OBSERVATIONS",
-        "TIME_DELTA_DAYS",  # numeric version of TIME_DELTA
+        "TIME_DELTA_DAYS",
         "TOTAL_POINTS",
         "SAMPLING_METHOD",
-        "LAYER_RATIOS",  # JSON string
-        "INPUT_RANGE",  # JSON string
+        "LAYER_RATIOS",
+        "INPUT_RANGE",
         "HIDDEN_DIMENSION",
         "PHYSICS_WEIGHT",
         "LAMBDA_DIST",
@@ -674,254 +694,621 @@ def run_IOD(config):
         "X_TOLERANCE",
         "F_TOLERANCE",
         "MAX_FUNCTION_EVAL",
-        "MAX_ITERATiONS",  # keep your exact key spelling
+        "MAX_ITERATiONS",
         "G_TOLERANCE",
-        "RUN_NUMBER",
         "MIN_RHO",
         "MAX_RHO",
         "MIN_RHO_DOT",
         "MAX_RHO_DOT",
         "DELTA_RHO",
         "DELTA_RHO_DOT",
-
-        # --- identifiers ---
-        "RUN_NUMBER",
-
-        # --- metrics/extras ---
-        "POS_RMSE",
-        "VEL_RMSE",
-        "COMPUTATION_TIME_SEC",
-        "OPTIMAL_BH_ITERATION",
-        "FILE_USED",
-        "SAVED_AS",
     ]
 
-    rank_file_exists = os.path.exists(rank_meta_path)
-    need_header = (not rank_file_exists) or (os.path.getsize(rank_meta_path) == 0)
+    # Metrics / outputs block
+    metrics_block = [
+        "POS_RMSE","VEL_RMSE","COMPUTATION_TIME_SEC","OPTIMAL_BH_ITERATION",
+        "IOD_RESULT_SAVED_AS",
+    ]
 
-    rank_fh = open(rank_meta_path, "a", newline="")
-    rank_writer = csv.DictWriter(rank_fh, fieldnames=rank_header)
-    if need_header:
-        rank_writer.writeheader()
+    # Internal keys we never write to MASTER
+    internal_skip_keys = {"_row_index", "MASTER_UID", "MASTER_ROW_INDEX", "FILE_USED"}
 
-    def task_key(combo, run_idx):
-        """Return the numeric key matching read_completed_keys() shape."""
-        dr = float(combo[0])
-        drd = float(combo[1]) if len(combo) > 1 else 0.0
-        t = float(combo[2]) if len(combo) > 2 else 0.0
-        lr = float(combo[3]) if len(combo) > 3 else 0.0
-        dtf = float(combo[4]) if len(combo) > 4 else 0.0
-        return (dr, drd, t, lr, dtf, int(run_idx))
+    # Each rank collects updates like: {"_row_index": m_idx, ..., "IOD_RESULT_SAVED_AS": ...}
+    updates = []
+    processed = skipped = errors = 0
 
-    # --- Main streamed work loop -----------------------------------------------
-    for (combo, run_idx) in task_stream():
-        # skip if already completed
-        if task_key(combo, run_idx) in already_done:
+    for m_idx in my_indices:
+        row = df_master.iloc[m_idx]
+        saved_as = str(row.get("IOD_DATA_SAVED_AS", "") or "")
+        master_uid = row_uid_from_saved_as(saved_as)
+        safe_uid = master_uid if (master_uid and str(master_uid).strip()) else f"rowidx_{m_idx}"
+
+        # resume-skip (per row)
+        if is_done(master_uid, m_idx):
+            skipped += 1
             continue
 
-        if run_idx == n_runs - 1:
-            print(f"[Rank {rank}] Running hyperparameter combo {combo}, run={run_idx + 1}", flush=True)
+        try:
+            # ------------------- YOUR IOD PIPELINE (single run) -------------------
+            dynamics, orbit, observer, optimizer = (
+                config['dynamics'], config['orbit'], config['observer'], config['optimizer']
+            )
 
-        # --------- CASE SWITCH (unchanged logic, just use `combo`) --------------
-        dynamics, orbit, observer, optimizer = config['dynamics'], config['orbit'], config['observer'], config['optimizer']
+            if dynamics == 'NBD' and observer == 'SPACE' and optimizer == 'CONSTRAINED_BASIN_HOPPING':
+                import PIELM_basinhopping_w_range_nbody as pielm_ctsn
 
-        # You can keep your original blocks; only show one as example for brevity:
-        if dynamics == 'NBD' and observer == 'SPACE' and optimizer == 'CONSTRAINED_BASIN_HOPPING':
-            import PIELM_basinhopping_w_range_nbody as pielm_ctsn
+                # Fixed parameters you provided
+                m_2  = 0.1
+                m_12 = (1.0 - m_2) / 2.0
 
-            m_2 = combo[3]
-            m_12 = (1 - m_2) / 2
-            parameters = {
-                'NUMBER_OF_OBSERVATIONS': 16,
-                'TIME_DELTA': combo[4] * u.day,
-                'TOTAL_POINTS': 100,
-                'SAMPLING_METHOD': "uniform",
-                'LAYER_RATIOS': [(0., m_12), (m_12, m_12 + m_2), (m_12 + m_2, 1.)],
-                'INPUT_RANGE': (-1, 1),
-                'HIDDEN_DIMENSION': 100,
-                'PHYSICS_WEIGHT': 1e2,
-                'LAMBDA_DIST': 1e-3,
-                'WEIGHT_SCALE_FACTOR': 1e-2,
-                'NUMBER_OF_ITERATIONS': 2,
-                'TEMPERATURE': combo[2],
-                'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15,
-                'MAX_FUNCTION_EVAL': 1000, 'MAX_ITERATiONS': 1000,
-                'G_TOLERANCE': 1e-15, 'RUN_NUMBER': run_idx,
-                'MIN_RHO': 0.0006684587122, 'MAX_RHO': 0.06684587122,
-                'MIN_RHO_DOT': -0.05033557046, 'MAX_RHO_DOT': 0.05033557046,
-                'DELTA_RHO': combo[0], 'DELTA_RHO_DOT': combo[1]
-            }
-            if viz_flag:
-                config['lambda'] = parameters['TIME_DELTA']
-                config['run_idx'] = run_idx
-            data = pielm_ctsn.generate_data(config, parameters)
-            results, positions, velocities, nlls_start, final_pos, final_vel, true_pos, true_vel, epochs, comp_time, optimal_bh = pielm_ctsn.run(data, config, parameters)
+                parameters = {
+                    'NUMBER_OF_OBSERVATIONS': 16,
+                    'TIME_DELTA': 0.6 * u.day,
+                    'TOTAL_POINTS': 250,
+                    'SAMPLING_METHOD': "uniform",
+                    'LAYER_RATIOS': [(0., m_12), (m_12, m_12 + m_2), (m_12 + m_2, 1.)],
+                    'INPUT_RANGE': (-1, 1),
+                    'HIDDEN_DIMENSION': 250,
+                    'PHYSICS_WEIGHT': 1e3,
+                    'LAMBDA_DIST': 1e-2,
+                    'WEIGHT_SCALE_FACTOR': 1e-2,
+                    'NUMBER_OF_ITERATIONS': 20,
+                    'TEMPERATURE': 1e8,
+                    'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15,
+                    'MAX_FUNCTION_EVAL': 1000,
+                    'MAX_ITERATiONS': 1000,
+                    'G_TOLERANCE': 1e-15,
+                    'MIN_RHO': 0.0006684587122,
+                    'MAX_RHO': 0.06684587122,
+                    'MIN_RHO_DOT': -0.05033557046,
+                    'MAX_RHO_DOT':  0.05033557046,
+                    'DELTA_RHO': 6.68459e-8,
+                    'DELTA_RHO_DOT': 0.00167785234,
+                }
 
-        # (Keep all your other elif blocks exactly as you have them)
-        # ------------------------------------------------------------------------
+                if viz_flag:
+                    config['lambda'] = parameters['TIME_DELTA']
 
-        # Build output filename for the per-run IOD CSV (unchanged)
-        def combo_to_string_local(c): return "_" + "_".join(str(x) for x in c)
-        combo_str = combo_to_string_local(combo)
-        file_used = data[9]
-        file_name = f"{dynamics}_{orbit}_{observer}_{optimizer}_run_{run_idx}{combo_str}.csv"
+                # Build data from MASTER row (uses new master logic)
+                data = pielm_ctsn.generate_data(config, parameters, master_row=row)
 
-        os.makedirs(config['error_file_dir'], exist_ok=True)
-        file_path = os.path.join(config['error_file_dir'], file_name)
+                (results, positions, velocities, nlls_start,
+                 final_pos, final_vel, true_pos, true_vel,
+                 epochs, comp_time, optimal_bh) = pielm_ctsn.run(data, config, parameters)
+            else:
+                # Add other branches unchanged if needed
+                raise NotImplementedError("Add other solver branches as in your code.")
 
-        # Generate IOD file and RMSEs
-        rmse_df = util.generate_iod_file(file_path, final_pos, final_vel, true_pos, true_vel, epochs)
+            # ------- Compute metrics & write unique per-row result file -------
+            out_dir = config['error_file_dir']
+            os.makedirs(out_dir, exist_ok=True)
 
-        pos_rmse = float(np.sqrt(((rmse_df[["IOD_X","IOD_Y","IOD_Z"]].values - rmse_df[["TRUE_X","TRUE_Y","TRUE_Z"]].values) ** 2).mean()))
-        vel_rmse = float(np.sqrt(((rmse_df[["IOD_VX","IOD_VY","IOD_VZ"]].values - rmse_df[["TRUE_VX","TRUE_VY","TRUE_VZ"]].values) ** 2).mean()))
+            # Unique filename per MASTER row (avoid overwrite)
+            base_name = f"{safe_uid}__{config['dynamics']}_{config['orbit']}_{config['observer']}_{config['optimizer']}.csv"
+            file_name = base_name
+            file_path = os.path.join(out_dir, file_name)
+            ctr = 1
+            while os.path.exists(file_path):
+                file_name = f"{safe_uid}__{config['dynamics']}_{config['orbit']}_{config['observer']}_{config['optimizer']}__{ctr}.csv"
+                file_path = os.path.join(out_dir, file_name)
+                ctr += 1
 
-        def params_to_row(parameters, run_idx, extras):
-            """
-            Build a flat row dict for CSV:
-            - includes ALL parameters (normalized)
-            - adds metrics/extras (pos_rmse, etc.)
-            """
-            row = {}
+            rmse_df = util.generate_iod_file(file_path, final_pos, final_vel, true_pos, true_vel, epochs)
 
-            for k, v in parameters.items():
-                # Normalize astropy quantities
-                if isinstance(v, u.Quantity):
-                    # choose canonical units per key
-                    if k == "TIME_DELTA":
-                        row["TIME_DELTA_DAYS"] = v.to(u.day).value  # numeric float
-                    else:
-                        # generic: store value in SI if you prefer
-                        row[k] = v.to_base_units().value
-                    continue
+            pos_rmse = float(np.sqrt(((rmse_df[["IOD_X","IOD_Y","IOD_Z"]].values - rmse_df[["TRUE_X","TRUE_Y","TRUE_Z"]].values) ** 2).mean()))
+            vel_rmse = float(np.sqrt(((rmse_df[["IOD_VX","IOD_VY","IOD_VZ"]].values - rmse_df[["TRUE_VX","TRUE_VY","TRUE_VZ"]].values) ** 2).mean()))
 
-                # numpy scalars
-                if isinstance(v, (np.floating, np.integer)):
-                    row[k] = v.item()
-                    continue
+            # ---- Flatten parameters to columns (TIME_DELTA → TIME_DELTA_DAYS) ----
+            def params_to_update(parameters):
+                upd = {}
+                for k, v in parameters.items():
+                    if isinstance(v, u.Quantity):
+                        if k == "TIME_DELTA":
+                            upd["TIME_DELTA_DAYS"] = v.to(u.day).value
+                        else:
+                            upd[k] = v.to_base_units().value
+                        continue
+                    if isinstance(v, (np.floating, np.integer)):
+                        upd[k] = v.item(); continue
+                    if isinstance(v, (int, float)):
+                        upd[k] = v; continue
+                    if isinstance(v, (list, tuple, np.ndarray)):
+                        if k == "LAYER_RATIOS":
+                            upd[k] = v[1][1] - v[1][0]
+                        else:
+                            upd[k] = json.dumps(v if not isinstance(v, np.ndarray) else v.tolist())
+                        continue
+                    upd[k] = str(v)
+                return upd
 
-                # plain scalars
-                if isinstance(v, (int, float)):
-                    row[k] = v
-                    continue
-
-                # arrays / sequences -> JSON
-                if isinstance(v, (list, tuple, np.ndarray)):
-                    if k == "LAYER_RATIOS":
-                        row[k] = v[1][1] - v[1][0]
-                    else:
-                        row[k] = json.dumps(v if not isinstance(v, np.ndarray) else v.tolist())
-                    continue
-
-                # everything else as string
-                row[k] = str(v)
-
-            # Ensure RUN_NUMBER and RUN_IDX exist and are ints
-            row["RUN_NUMBER"] = int(parameters.get("RUN_NUMBER", run_idx))
-
-            # Attach extras/metrics (already numeric/strings)
-            row.update(extras)
-            return row
-
-        def build_extras(pos_rmse, vel_rmse, comp_time, optimal_bh, file_used, file_name):
-            return {
+            upd = {
+                "_row_index": int(m_idx),                 # internal key for placement
+                # (MASTER_* kept internal, not written)
                 "POS_RMSE": float(pos_rmse),
                 "VEL_RMSE": float(vel_rmse),
                 "COMPUTATION_TIME_SEC": float(comp_time),
                 "OPTIMAL_BH_ITERATION": float(optimal_bh),
-                "FILE_USED": str(file_used),
-                "SAVED_AS": str(file_name),
+                "IOD_RESULT_SAVED_AS": str(file_name),
             }
+            upd.update(params_to_update(parameters))
 
-        extras = build_extras(pos_rmse, vel_rmse, comp_time, optimal_bh, file_used, file_name)
-        row = params_to_row(parameters, run_idx, extras)
+            updates.append(upd)
+            processed += 1
 
-        # Write immediately
-        rank_writer.writerow(row)
-        rank_fh.flush()
-        os.fsync(rank_fh.fileno())
-
-        # Optional: visualize only in dev runs
-        if viz_flag:
-            # ... your existing viz code here (unchanged) ...
-            pass
-
-        # Free large objects deterministically
-        del results, positions, velocities, nlls_start
-        del final_pos, final_vel, true_pos, true_vel, epochs, rmse_df, data
-        gc.collect()
-
-    # Close our per-rank file
-    rank_fh.close()
-
-    # --------- Merge (rank 0) ---------------------------------------------------
-    comm.Barrier()
-    if rank == 0:
-        # Find all rank csvs + any previous global file; merge & de-dup on key
-        rank_files = glob.glob(os.path.join(config['error_file_dir'], f"{meta_basename}_rank*.csv"))
-
-        rows, seen = [], set()
-
-        sources = ([final_meta_path] if os.path.exists(final_meta_path) else []) + rank_files
-
-        for src in sources:
-            try:
-                with open(src, "r", newline="") as f:
-                    rdr = csv.DictReader(f)
-
-                    for r in rdr:
-                        k = key_of(r)
-                        if k not in seen:
-                            rows.append(r)
-                            seen.add(k)
-            except Exception:
+            if viz_flag:
                 pass
 
-        # Write merged final file
-        with open(final_meta_path, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=rank_header)
-            w.writeheader()
-            w.writerows(rows)
+            del (results, positions, velocities, nlls_start,
+                 final_pos, final_vel, true_pos, true_vel, epochs, rmse_df, data)
+            gc.collect()
+
+        except Exception:
+            # Do not mark .done here; committing happens only after master write
+            errors += 1
+            continue
+
+    # ===== Gather updates to rank 0, write MASTER in-place with order, then commit markers =====
+    gathered = comm.gather(updates, root=0)
+    committed_uids = None  # list to broadcast (uids derived again to write markers)
+
+    if rank == 0:
+        all_updates = [f for chunk in gathered for f in chunk]
+
+        if all_updates:
+            # Reload master to minimize race
+            df = pd.read_csv(master_fn)
+
+            # Ensure columns exist (avoid adding internal skip keys)
+            new_cols = set().union(*(set(d.keys()) for d in all_updates)) - set(internal_skip_keys)
+            missing = [c for c in new_cols if c not in df.columns]
+            for c in missing:
+                # Guess dtype: strings for these, else NaN numeric
+                if c in ("SAMPLING_METHOD","INPUT_RANGE","IOD_RESULT_SAVED_AS"):
+                    df[c] = ""
+                else:
+                    df[c] = np.nan
+
+            # Apply updates row-by-row
+            for upd in all_updates:
+                ri = upd["_row_index"]
+                for k, v in upd.items():
+                    if k in internal_skip_keys:
+                        continue
+                    df.at[ri, k] = v
+
+            # Column reordering:
+            current_cols = list(df.columns)
+
+            # Start with detection block (keep only those that exist)
+            ordered = [c for c in detection_block if c in current_cols]
+
+            # Then IOD_DATA_SAVED_AS if present
+            ordered += [c for c in saved_as_col if c in current_cols]
+
+            # Then parameter block (in given order)
+            ordered += [c for c in param_block if c in current_cols]
+
+            # Then metrics block
+            ordered += [c for c in metrics_block if c in current_cols]
+
+            # Finally, any leftover columns not in the ordered list
+            leftovers = [c for c in current_cols if c not in set(ordered)]
+            # Explicitly drop internal columns if they somehow exist
+            leftovers = [c for c in leftovers if c not in internal_skip_keys and c not in ("MASTER_UID","MASTER_ROW_INDEX","FILE_USED")]
+
+            final_cols = ordered + leftovers
+            df = df[final_cols]
+
+            # Atomic write-back
+            tmp = master_fn + ".tmp"
+            df.to_csv(tmp, index=False)
+            os.replace(tmp, master_fn)
+
+            # After successful write, collect committed UIDs for marker creation
+            # (derive from MASTER rows themselves)
+            committed_uids = []
+            for upd in all_updates:
+                ri = upd["_row_index"]
+                saved_as_val = df.loc[ri, "IOD_DATA_SAVED_AS"] if "IOD_DATA_SAVED_AS" in df.columns else ""
+                uid = row_uid_from_saved_as(saved_as_val)
+                safe_uid = uid if (uid and str(uid).strip()) else f"rowidx_{ri}"
+                committed_uids.append(safe_uid)
+        else:
+            committed_uids = []
+
+    # Broadcast committed list; workers create .done files now (commit-after-write)
+    committed_uids = comm.bcast(committed_uids, root=0)
+    for uid in committed_uids:
+        try:
+            marker_path = os.path.join(stage3_done_dir, f"{uid}.done")
+            with open(marker_path, "w") as f:
+                json.dump({"uid": uid, "status": "ok"}, f)
+        except Exception:
+            pass
+
+    if rank == 0:
+        print(f"[Stage: IOD Solve] updated_rows={len(committed_uids)}, processed={processed}, skipped={skipped}, errors={errors}")
 
     comm.Barrier()
     return
 
 
-def _visible_dir(config):
-    num_sc = int(config['num_spacecraft'])
-    root   = os.path.abspath(config['visible_files_folder'])
-    return os.path.join(root, f"spacecraft_{num_sc}")
+def run_OD(config):
+    """
+    Stage 4: Orbit Determination (OD)
+    - Round-robin split of MASTER rows across MPI ranks
+    - For each row: while-loop over time until end condition
+    - Initialize from IOD outputs on the first step
+    - Append per-step results to a unique OD log file
+    - After finishing a row, rank 0 updates MASTER with OD summary and log path,
+      then commits per-row .done markers (commit-after-write)
+
+    Expected config keys (with defaults if absent):
+      - error_file_dir: directory for OD logs (same place you store IOD result CSVs)
+      - od_duration_days: duration of the OD simulation window (default: 1.0 day)
+      - od_step_seconds: time step in seconds (default: 600)
+      - od_max_steps: optional hard cap on steps (default: None)
+      - visualization_flag: (0/1) to allow you to toggle plotting/extra dumps
+    """
+
+    # --- MPI setup ---
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    size = comm.Get_size()
+
+    # Paths & MASTER
+    iod_dir   = util._iod_dir(config)
+    master_fn = os.path.join(iod_dir, "MASTER_IOD.csv")
+    if rank == 0 and not os.path.exists(master_fn):
+        print(f"[Stage: OD] No MASTER_IOD.csv at {master_fn} → skip")
+    comm.Barrier()
+    if not os.path.exists(master_fn):
+        return
+
+    # Rank 0: inspect MASTER and broadcast row count
+    if rank == 0:
+        try:
+            _head = pd.read_csv(master_fn, nrows=1)
+            n_rows = sum(1 for _ in open(master_fn, "r", encoding="utf-8")) - 1
+            print(f"[Stage: OD] MASTER rows = {n_rows}")
+        except Exception as e:
+            print(f"[Stage: OD] Failed to inspect MASTER: {e}")
+            n_rows = 0
+    else:
+        n_rows = 0
+
+    n_rows = comm.bcast(n_rows, root=0)
+    if n_rows <= 0:
+        return
+
+    # Round-robin assignment
+    my_indices = list(range(n_rows))[rank::size]
+
+    # Resume markers (commit-after-write; separate dir from Stage 3)
+    od_done_dir = os.path.join(iod_dir, "iod_stage4_od_done")
+    if rank == 0:
+        os.makedirs(od_done_dir, exist_ok=True)
+    comm.Barrier()
+
+    # Helpers
+    def uid_from_saved_as(saved_as_str: str, fallback_idx: int):
+        s = str(saved_as_str or "")
+        if s.strip():
+            first = s.split(";")[0].strip()
+            if first:
+                return os.path.splitext(os.path.basename(first))[0]
+        return f"rowidx_{fallback_idx}"
+
+    def done_marker_path(uid: str):
+        return os.path.join(od_done_dir, f"{uid}.done")
+
+    def is_done(uid: str) -> bool:
+        return os.path.exists(done_marker_path(uid))
+
+    def make_unique_filename(out_dir: str, base: str, ext: str = ".csv"):
+        """Return a unique path like '<out_dir>/<base>.csv', or <base>__1.csv, ..."""
+        name = f"{base}{ext}"
+        path = os.path.join(out_dir, name)
+        k = 1
+        while os.path.exists(path):
+            name = f"{base}__{k}{ext}"
+            path = os.path.join(out_dir, name)
+            k += 1
+        return path, name
+
+    # Load MASTER (workers)
+    df_master = pd.read_csv(master_fn)
+
+    # OD config
+    out_dir = config.get('od_file_dir', os.path.join(iod_dir, "od_outputs"))
+    os.makedirs(out_dir, exist_ok=True)
+
+    od_duration_days = float(config.get('od_duration_days', 1.0))
+    od_max_steps     = config.get('od_max_steps', None)
+    od_max_steps     = int(od_max_steps) if (od_max_steps is not None) else None
+
+    # Columns we’ll add/update in MASTER (we’ll enforce a nice order on write)
+    od_metrics_cols = [
+        "OD_RESULT_SAVED_AS",      # per-row OD time-series log filename
+        "OD_FINAL_TIME_JDTDB",     # final epoch reached (jdtdb)
+        "OD_N_STEPS",              # number of OD steps performed
+        "OD_LAST_POS_RMSE",        # last-step position RMSE [km] or your chosen units
+        "OD_LAST_VEL_RMSE",        # last-step velocity RMSE [km/s]
+    ]
+
+    # Collect per-rank updates to MASTER rows
+    updates = []
+    processed = skipped = errors = 0
+
+    for m_idx in my_indices:
+        row = df_master.iloc[m_idx]
+
+        # Derive a stable UID for this master row (same scheme as Stage 3)
+        saved_as_str = str(row.get("IOD_DATA_SAVED_AS", "") or "")
+        uid = uid_from_saved_as(saved_as_str, m_idx)
+
+        # Resume: skip if already fully done
+        if is_done(uid):
+            skipped += 1
+            continue
+
+        try:
+            # --------------------------
+            # Initialization (first step)
+            # --------------------------
+            # Epochs
+            try:
+                # Prefer SC epoch if present; else asteroid epoch
+                t0_jdtdb = float(row.get("EPOCH_AST(jdtdb)", np.nan))
+            except Exception:
+                t0_jdtdb = np.nan
+            if not np.isfinite(t0_jdtdb):
+                raise RuntimeError("Cannot determine initial epoch (EPOCH_AST missing).")
+
+            # End time and step size
+            t_end   = t0_jdtdb + od_duration_days
+
+            # Load IOD result to initialize OD (from Stage 3)
+            iod_result_name = str(row.get("IOD_RESULT_SAVED_AS", "") or "")
+            if not iod_result_name.strip():
+                # If user wants OD to initialize from raw IOD_DATA_SAVED_AS (time series) instead,
+                # you can fallback. We keep it strict here:
+                raise FileNotFoundError("IOD_RESULT_SAVED_AS missing in MASTER row; cannot initialize OD.")
+            iod_result_path = os.path.join(out_dir, iod_result_name)
+            if not os.path.exists(iod_result_path):
+                # If files are elsewhere, adjust to your layout.
+                # Alternatively store absolute paths in IOD_RESULT_SAVED_AS.
+                raise FileNotFoundError(f"IOD result file not found: {iod_result_path}")
+
+            # TODO: load your IOD outputs for initialization
+            # Example (replace with your actual loader):
+            # iod_init = util.load_iod_result(iod_result_path)
+            # x0_est, P0_est = iod_init['x_est'], iod_init['P_est']  # state & covariance (example)
+            # x_true0       = iod_init.get('x_true', None)          # if available
+            # For now, use placeholders:
+            x0_est  = None    # TODO: replace with real estimate
+            P0_est  = None    # TODO: replace with real covariance
+            x_true0 = None    # TODO: replace with truth if available
+
+            # Prepare per-row OD log (unique filename, no overwrite)
+            base = f"{uid}__OD_{config['dynamics']}_{config['orbit']}_{config['observer']}_{config['optimizer']}"
+            od_log_path, od_log_name = make_unique_filename(out_dir, base, ".csv")
+
+            # Open OD log and write header
+            with open(od_log_path, "w", newline="") as f_log:
+                log_writer = csv.writer(f_log)
+                # Minimal suggested columns; extend as needed for your analysis
+                log_writer.writerow([
+                    "STEP_INDEX",
+                    "EPOCH_JDTDB",
+                    # estimated state vector (flatten as comma-separated strings if needed)
+                    "X_EST",             # stringified state estimate
+                    "P_EST_TRACE",       # scalar or compact representation
+                    # true state, if available
+                    "X_TRUE",
+                    # control/attitude targets, if applicable
+                    "ATTITUDE_CMD",
+                    # errors/metrics
+                    "POS_RMSE",
+                    "VEL_RMSE",
+                ])
+
+                # ----------------------------------------------------------
+                # Time loop
+                # ----------------------------------------------------------
+                step_idx = 0
+                t_cur = t0_jdtdb
+
+                # Working state (initialize from IOD)
+                x_est = x0_est
+                P_est = P0_est
+                x_true = x_true0
+
+                last_pos_rmse = np.nan
+                last_vel_rmse = np.nan
+
+                while True:
+                    # End condition
+                    if t_cur > t_end:
+                        break
+                    if od_max_steps is not None and step_idx >= od_max_steps:
+                        break
+
+                    if step_idx == 0:
+                        # -------------- INITIALIZATION STEP ---------------
+                        # TODO: any one-time initialization for your OD filter (e.g., set process noise, etc.)
+                        # Example:
+                        # od_state = od.init_filter(x0_est, P0_est, config)
+                        # (We keep using x_est, P_est variables directly here.)
+                        pass
+                    else:
+                        # -------------- REGULAR OD STEP -------------------
+                        # 1) Generate measurements at time t_cur for this master row
+                        #    (You can use MASTER columns and/or per-row IOD_DATA_SAVED_AS to drive geometry)
+                        # TODO: implement your measurement generation:
+                        # meas = util.generate_od_measurements(row, t_cur, config)
+                        meas = None
+
+                        # 2) Propagate the filter to t_cur + dt and update with measurements
+                        # TODO: implement your OD step:
+                        # x_est, P_est = od.run_step(x_est, P_est, meas, config, t_cur, dt=dt_day)
+                        # Optionally also maintain a truth model for diagnostics:
+                        # x_true = truth.propagate(x_true, dt_day, config) if x_true is not None else None
+                        pass
+
+                    # -------------- Post-step metrics & logging ----------
+                    # TODO: compute RMSE (pos/vel) at this step if truth is available and uncertainty
+                    # Example placeholders:
+                    # last_pos_rmse, last_vel_rmse = util.compute_rmse(x_est, x_true)
+                    # If not available, keep NaN or compute innovation-based proxies.
+                    # For now, they remain as is.
+
+                    # -------------- Attitude / Slew Planning (optional) --
+                    # TODO: plan pointing/attitude for next step, if needed:
+                    # att_cmd = util.plan_attitude(x_est, row, t_cur, config)
+                    att_cmd = ""
+
+                    # TODO: get time update
+                    dt_day = 0.01
+
+                    # TODO: get state of system after slew
+                    # asteroid state, both true and predicted
+                    # formation s/c states
+
+                    # TODO: update state of the system
 
 
-def _iod_dir(config):
-    num_sc = int(config['num_spacecraft'])
-    root   = os.path.abspath(config['IOD_folder_path'])
-    return os.path.join(root, f"spacecraft_{num_sc}")
+                    # -------------- Log the step -------------------------
+                    # Stringify vectors/matrices compactly to keep CSV readable:
+                    def _vec_to_str(v):
+                        if v is None:
+                            return ""
+                        try:
+                            arr = np.asarray(v).ravel()
+                            return ",".join(f"{float(x):.9g}" for x in arr)
+                        except Exception:
+                            return str(v)
 
+                    def _mat_trace(m):
+                        if m is None:
+                            return np.nan
+                        try:
+                            a = np.asarray(m)
+                            return float(np.trace(a))
+                        except Exception:
+                            return np.nan
 
-def _non_hidden_entries(path):
-    return [e for e in os.scandir(path) if not e.name.startswith('.')]
+                    log_writer.writerow([
+                        step_idx,
+                        f"{t_cur:.9f}",
+                        _vec_to_str(x_est),
+                        _mat_trace(P_est),
+                        _vec_to_str(x_true),
+                        att_cmd,
+                        f"{last_pos_rmse:.9g}" if np.isfinite(last_pos_rmse) else "",
+                        f"{last_vel_rmse:.9g}" if np.isfinite(last_vel_rmse) else "",
+                    ])
 
+                    # -------------- Update time/state for next loop ------
+                    t_cur += dt_day
+                    step_idx += 1
 
-def _source_basenames_in_visible(vis_dir, save_format):
-    # Prefer your util if available; otherwise glob by format(s)
-    try:
-        files = util.get_all_files(vis_dir, save_format)
-    except Exception:
-        import glob
-        files = []
-        if save_format in ('csv', 'both'):
-            files += glob.glob(os.path.join(vis_dir, '*.csv'))
-        if save_format in ('parquet', 'both'):
-            files += glob.glob(os.path.join(vis_dir, '*.parquet'))
-    files = sorted(files)
-    bases = [os.path.splitext(os.path.basename(p))[0] for p in files]
-    return bases
+            # At this point, the OD row is complete; prepare MASTER update
+            upd = {
+                "_row_index": int(m_idx),
+                "OD_RESULT_SAVED_AS": od_log_name,
+                "OD_FINAL_TIME_JDTDB": float(t_cur - dt_day),  # last time step we wrote
+                "OD_N_STEPS": int(step_idx),
+                "OD_LAST_POS_RMSE": float(last_pos_rmse) if np.isfinite(last_pos_rmse) else np.nan,
+                "OD_LAST_VEL_RMSE": float(last_vel_rmse) if np.isfinite(last_vel_rmse) else np.nan,
+            }
+            updates.append(upd)
+            processed += 1
+
+            # tidy
+            gc.collect()
+
+        except Exception as e:
+            # Don’t mark done here; only after MASTER commit
+            errors += 1
+            # Optional: you could write a per-row error note:
+            # with open(os.path.join(od_done_dir, f"{uid}.err"), "w") as fe:
+            #     fe.write(str(e))
+            continue
+
+    # ===== Gather updates → rank 0 writes MASTER (ordered) → broadcast committed UIDs → write .done =====
+    gathered = comm.gather(updates, root=0)
+    committed_uids = None
+
+    if rank == 0:
+        all_updates = [u for chunk in gathered for u in chunk]
+
+        if all_updates:
+            # Reload MASTER to minimize race
+            df = pd.read_csv(master_fn)
+
+            # Make sure OD columns exist (add missing)
+            for c in od_metrics_cols:
+                if c not in df.columns:
+                    # choose dtype: strings for *_SAVED_AS, else numeric
+                    if c.endswith("_SAVED_AS"):
+                        df[c] = ""
+                    else:
+                        df[c] = np.nan
+
+            # Apply updates
+            for upd in all_updates:
+                ri = upd["_row_index"]
+                for k, v in upd.items():
+                    if k == "_row_index":
+                        continue
+                    df.at[ri, k] = v
+
+            # Optional: reorder columns — keep existing order but put OD columns at the end,
+            # or place them after your metrics. If you want a strict order, add it here.
+            # We’ll append OD columns after whatever currently exists and isn’t OD:
+            existing_cols = list(df.columns)
+            non_od = [c for c in existing_cols if c not in od_metrics_cols]
+            final_cols = non_od + [c for c in od_metrics_cols if c in df.columns]
+            df = df[final_cols]
+
+            # Atomic write-back
+            tmp = master_fn + ".tmp"
+            df.to_csv(tmp, index=False)
+            os.replace(tmp, master_fn)
+
+            # Build UIDs of committed rows (from MASTER rows themselves)
+            committed_uids = []
+            for upd in all_updates:
+                ri = upd["_row_index"]
+                saved_as_val = df.loc[ri, "IOD_DATA_SAVED_AS"] if "IOD_DATA_SAVED_AS" in df.columns else ""
+                uid_i = uid_from_saved_as(saved_as_val, ri)
+                committed_uids.append(uid_i)
+        else:
+            committed_uids = []
+
+    # Broadcast committed list; workers create .done files now (commit-after-write)
+    committed_uids = comm.bcast(committed_uids, root=0)
+    for uid in committed_uids:
+        try:
+            with open(done_marker_path(uid), "w") as f:
+                json.dump({"uid": uid, "status": "ok"}, f)
+        except Exception:
+            pass
+
+    if rank == 0:
+        print(f"[Stage: OD] committed_rows={len(committed_uids)}, processed={processed}, skipped={skipped}, errors={errors}")
+
+    comm.Barrier()
+    return
+
 
 
 def run_overall_OD(master, config):
     # --- MPI setup ---
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
+    size = comm.Get_size()
 
     if rank == 0:
         print("Starting...")
@@ -929,10 +1316,10 @@ def run_overall_OD(master, config):
     # -------------------------
     # Stage 1: Detection (skip if visible/spacecraft_X not empty)
     # -------------------------
-    vis_dir = _visible_dir(config)
+    vis_dir = util._visible_dir(config)
     if rank == 0:
         os.makedirs(vis_dir, exist_ok=True)
-        do_detection = (len(_non_hidden_entries(vis_dir)) == 0)
+        do_detection = (len(util._non_hidden_entries(vis_dir)) == 0)
         if do_detection:
             print(f"[Stage: detection] {vis_dir} is EMPTY - run detection")
         else:
@@ -948,13 +1335,13 @@ def run_overall_OD(master, config):
     # -------------------------
     # Stage 2: IOD Data Generation
     # -------------------------
-    iod_dir = _iod_dir(config)
+    iod_dir = util._iod_dir(config)
     save_format = config.get('save_format', 'csv')
 
     if rank == 0:
         os.makedirs(iod_dir, exist_ok=True)
 
-        bases = _source_basenames_in_visible(vis_dir, save_format)
+        bases = util._source_basenames_in_visible(vis_dir, save_format)
         # If no detection inputs exist, there is nothing to do here.
         if len(bases) == 0:
             do_iod = False
@@ -979,10 +1366,72 @@ def run_overall_OD(master, config):
         comm.Barrier()
 
     #-----------------------
-    # Stage 3: Running IOD
+    # Stage 3: Running IOD (skip if MASTER rows already committed)
     #-----------------------
+    if rank == 0:
+        master_path = os.path.join(iod_dir, "MASTER_IOD.csv")
+        stage3_done_dir = os.path.join(iod_dir, "iod_stage3_done")
+
+        if not os.path.exists(master_path):
+            do_stage3 = False
+            msg3 = f"[Stage: IOD Solve] No MASTER_IOD.csv in {iod_dir} → skip"
+        else:
+            # Derive per-row UIDs exactly like run_IOD and see how many are done
+
+            try:
+                dfm = pd.read_csv(master_path)
+                n_rows = len(dfm)
+                if n_rows == 0:
+                    do_stage3 = False
+                    msg3 = f"[Stage: IOD Solve] MASTER_IOD.csv has 0 rows → skip"
+                else:
+                    # helper to derive uid from IOD_DATA_SAVED_AS with fallback
+                    def uid_for_row(row_idx, saved_as_value):
+                        s = str(saved_as_value or "")
+                        uid = None
+                        if s.strip():
+                            first = s.split(";")[0].strip()
+                            if first:
+                                uid = os.path.splitext(os.path.basename(first))[0]
+                        return uid if (uid and str(uid).strip()) else f"rowidx_{row_idx}"
+
+                    # ensure marker dir exists
+                    os.makedirs(stage3_done_dir, exist_ok=True)
+
+                    # count how many rows have a done marker
+                    done_count = 0
+                    for i, saved_as in enumerate(dfm.get("IOD_DATA_SAVED_AS", pd.Series([None]*n_rows))):
+                        uid = uid_for_row(i, saved_as)
+                        marker = os.path.join(stage3_done_dir, f"{uid}.done")
+                        if os.path.exists(marker):
+                            done_count += 1
+
+                    do_stage3 = (done_count < n_rows)
+                    msg3 = (f"[Stage: IOD Solve] {'RUN' if do_stage3 else 'SKIP'} — "
+                            f"{done_count}/{n_rows} rows committed in {stage3_done_dir}")
+            except Exception as e:
+                do_stage3 = False
+                msg3 = f"[Stage: IOD Solve] Failed to inspect MASTER_IOD.csv: {e}"
+        print(msg3)
+    else:
+        do_stage3 = None
+
+    do_stage3 = comm.bcast(do_stage3, root=0)
+
+    if do_stage3:
+        run_IOD(config)
+    else:
+        comm.Barrier()
+
+
+    #-----------------
+    # Stage 4: Run the OD
+    #------------------
+
+    run_OD(master)
 
     return
+
 
 
 

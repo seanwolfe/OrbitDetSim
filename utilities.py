@@ -1959,3 +1959,34 @@ def ecliptic_to_eme_single_posvel(state_vectors_ecliptic):
     # Stack back into 6×N
     state_vectors_eme = np.stack((pos_eme, vel_eme)).reshape(-1)
     return state_vectors_eme
+
+
+def _visible_dir(config):
+    num_sc = int(config['num_spacecraft'])
+    root   = os.path.abspath(config['visible_files_folder'])
+    return os.path.join(root, f"spacecraft_{num_sc}")
+
+
+def _iod_dir(config):
+    num_sc = int(config['num_spacecraft'])
+    root   = os.path.abspath(config['IOD_folder_path'])
+    return os.path.join(root, f"spacecraft_{num_sc}")
+
+
+def _non_hidden_entries(path):
+    return [e for e in os.scandir(path) if not e.name.startswith('.')]
+
+
+def _source_basenames_in_visible(vis_dir, save_format):
+    # Prefer your util if available; otherwise glob by format(s)
+    try:
+        files = util.get_all_files(vis_dir, save_format)
+    except Exception:
+        files = []
+        if save_format in ('csv', 'both'):
+            files += glob.glob(os.path.join(vis_dir, '*.csv'))
+        if save_format in ('parquet', 'both'):
+            files += glob.glob(os.path.join(vis_dir, '*.parquet'))
+    files = sorted(files)
+    bases = [os.path.splitext(os.path.basename(p))[0] for p in files]
+    return bases
