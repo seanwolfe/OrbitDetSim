@@ -150,36 +150,92 @@ def run_sim_runnumbers_MPI_getIOD(config):
         visible_files_folder/spacecraft_{num_spacecraft}
     and produces IOD files into:
         IOD_folder_path/spacecraft_{num_spacecraft}
-    Skips already-completed source files via a DONE marker per source,
-    and skips per-row outputs that already exist.
+    Also appends a single MASTER_IOD.csv (resumable, duplicate-safe).
     """
+    # assumes your modules are already imported somewhere above:
+    # util, nbody, sp (SPICE), etc.
+
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     size = comm.Get_size()
 
     # ---------- paths / config ----------
-    num_sc = int(config['num_spacecraft'])
+    num_sc   = int(config['num_spacecraft'])
     vis_root = os.path.abspath(config['visible_files_folder'])
     vis_dir  = os.path.join(vis_root, f"spacecraft_{num_sc}")           # INPUTS
     iod_root = os.path.abspath(config['IOD_folder_path'])
     iod_dir  = os.path.join(iod_root, f"spacecraft_{num_sc}")           # OUTPUTS
     save_format = config.get('save_format', 'csv')  # 'csv' | 'parquet' | 'both'
 
-    # Create output directory once
+    # Master CSV + per-row done markers (for resumability)
+    master_name = "MASTER_IOD.csv"
+    master_path = os.path.join(iod_dir, master_name)
+    master_done_dir = os.path.join(iod_dir, "master_rows")
+
     if rank == 0:
         os.makedirs(iod_dir, exist_ok=True)
+        os.makedirs(master_done_dir, exist_ok=True)
         if not os.path.isdir(vis_dir):
             raise FileNotFoundError(f"Visible files dir not found: {vis_dir}")
     comm.Barrier()
 
+    # ---------- master column schema ----------
+    # Dynamic columns for the spacecraft-dependent sections
+    helio_sc_cols = [f"HELIO_SC_{i+1}(kms)" for i in range(num_sc)]
+    pointing_cols = [f"POINTING_SC_{i+1}"   for i in range(num_sc)]
+
+    master_columns = (
+            ["ID_AST",
+             "EPOCH_AST(jdtdb)",
+             "HELIO_AST(kms)",
+             "EARTH_HELIO_EA(kms)",
+             "EPOCH_SC(jdtdb)",
+             "DETECTING_SC_ID"]
+            + helio_sc_cols
+            + ["EARTH_HELIO_SE(kms)"]
+            + pointing_cols
+            + ["IOD_DATA_SAVED_AS"]  # <-- NEW
+    )
+
+    # Helpers for serialization (CSV-safe and lightweight)
+    def serialize_vec(v):
+        """1D array-like -> 'v0,v1,...' """
+        return ",".join(f"{float(x):.16g}" for x in np.asarray(v).ravel())
+
+    def serialize_mat(M):
+        """2D array-like -> 'r0;r1;...' where r = 'c0,c1,...' """
+        A = np.asarray(M)
+        if A.ndim == 1:
+            return serialize_vec(A)
+        return ";".join(serialize_vec(row) for row in A)
+
+    def write_master_header_if_needed():
+        if not os.path.exists(master_path):
+            # create with header
+            df_empty = pd.DataFrame(columns=master_columns)
+            df_empty.to_csv(master_path, index=False)
+
+    def master_row_done_path(row_uid):
+        # row_uid = 'minimoon-{mm_id}_sc-{sc_id}_index-{idx0}_{src_base}'
+        return os.path.join(master_done_dir, f"{row_uid}.done")
+
+    def master_row_already_done(row_uid):
+        return os.path.exists(master_row_done_path(row_uid))
+
+    def mark_master_row_done(row_uid):
+        with open(master_row_done_path(row_uid), "w") as f:
+            f.write("ok\n")
+
+    # Ensure header exists
+    if rank == 0:
+        write_master_header_if_needed()
+    comm.Barrier()
+
     # ---------- list inputs on rank 0, then broadcast ----------
     if rank == 0:
-        # Collect detection files only from the spacecraft_{num_sc} subdir
-        # If you keep mixed formats, adjust your util accordingly or just glob both.
         if hasattr(util, 'get_all_files'):
             all_files = util.get_all_files(vis_dir, save_format)
         else:
-            # Fallback glob (csv/parquet/both)
             patterns = []
             if save_format in ('csv', 'both'):
                 patterns.append(os.path.join(vis_dir, "*.csv"))
@@ -204,11 +260,9 @@ def run_sim_runnumbers_MPI_getIOD(config):
         return os.path.splitext(os.path.basename(path))[0]
 
     def done_marker_path(basename):
-        # mark completion for this source file
         return os.path.join(iod_dir, f".done_{basename}.json")
 
     def outputs_for_source_exist(basename):
-        """Count outputs already written for this source basename."""
         counts = {}
         if save_format in ('csv', 'both'):
             counts['csv'] = len(glob.glob(os.path.join(iod_dir, f"*_{basename}.csv")))
@@ -217,7 +271,6 @@ def run_sim_runnumbers_MPI_getIOD(config):
         return counts
 
     def row_outputs_exist(base_path):
-        """Check if outputs for a single row exist (depending on save_format)."""
         csv_exists = os.path.exists(base_path + ".csv")
         pq_exists  = os.path.exists(base_path + ".parquet")
         if save_format == 'csv':
@@ -251,17 +304,14 @@ def run_sim_runnumbers_MPI_getIOD(config):
 
         # ---------- rank 0 reads & prepares detected rows, then splits ----------
         if rank == 0:
-            # Read detection "master" file
             run_data = util.read_master(file_i, config)
 
-            # Compute min_nonnegative index (or NaN)
             run_data["min_nonnegative"] = run_data["values"].apply(
                 lambda x: min(x) if np.any(np.asarray(x) >= 0) else np.nan
             )
 
             detected_pop = run_data[~np.isnan(run_data["min_nonnegative"])]
 
-            # If nothing to produce, write DONE marker and continue
             if len(detected_pop) == 0:
                 with open(done_marker_path(src_base), "w") as f:
                     json.dump({
@@ -272,10 +322,9 @@ def run_sim_runnumbers_MPI_getIOD(config):
                         "num_rows_parquet": 0
                     }, f, indent=2)
                 print(f"[IOD] No detections. Marked DONE for {os.path.basename(file_i)}", flush=True)
-                # broadcast an empty-chunks signal
                 chunks = [detected_pop] * size
+                expected_rows = 0
             else:
-                # split detected_pop rows into ~equal chunks
                 idx_splits = np.array_split(np.arange(len(detected_pop)), size)
                 chunks = [
                     detected_pop.iloc[idxs] if len(idxs) else detected_pop.iloc[0:0]
@@ -288,7 +337,7 @@ def run_sim_runnumbers_MPI_getIOD(config):
 
         expected_rows = comm.bcast(expected_rows, root=0)
 
-        # ---------- scatter chunks (manual send/recv to keep DataFrames) ----------
+        # ---------- scatter chunks ----------
         if rank == 0:
             for dest in range(1, size):
                 comm.send(chunks[dest], dest=dest, tag=77)
@@ -299,176 +348,223 @@ def run_sim_runnumbers_MPI_getIOD(config):
         print(f"[rank {rank}] {src_base}: chunk size = {len(my_chunk)}", flush=True)
         comm.Barrier()
 
-        detected_appended_pop_chunk, all_sc_states, detecting_id, boresights = util.get_scs_initial_states(my_chunk, config)
+        # -------- per-rank buffer of master rows (list of dicts) --------
+        master_rows_buffer = []
 
-        # ---------- process my rows ----------
-        zdx = 0
-        for _, detected_minimoon in detected_appended_pop_chunk.iterrows():
+        if len(my_chunk) > 0:
 
-            mm_id = detected_minimoon.name[1]
-            sc_id = detected_minimoon.name[2]
-            idx0  = int(detected_minimoon['min_nonnegative'])
+            # get spacecraft initial states / boresights aligned to my_chunk
+            detected_appended_pop_chunk, all_sc_states, detecting_id, boresights = util.get_scs_initial_states(my_chunk, config)
 
-            # Build base output path for this row
-            file_name = f"minimoon-{mm_id}_sc-{sc_id}_index-{idx0}_{src_base}"
-            base_path = os.path.join(iod_dir, file_name)
+            # ---------- process my rows ----------
+            zdx = 0
+            for _, detected_minimoon in detected_appended_pop_chunk.iterrows():
 
-            # Skip if this row already done (all required formats exist)
-            if row_outputs_exist(base_path):
-                continue
+                mm_id = detected_minimoon.name[1]
+                sc_id = detected_minimoon.name[2]
+                idx0  = int(detected_minimoon['min_nonnegative'])
 
-            # ---- heavy computations (same as your original code) ----
-            orbit_path = os.path.join(config['minimoon_files_folder'], f"{mm_id}.csv")
-            orbit = pd.read_csv(orbit_path, sep=' ', header=0, names=config['minimoon_column_names'])
+                file_name = f"minimoon-{mm_id}_sc-{sc_id}_index-{idx0}_{src_base}"
+                base_path = os.path.join(iod_dir, file_name)
+                row_uid   = file_name  # used for master BEJCT_ID + dedupe
 
-            # asteroid @ first detection index
-            asteroid_state_helio = orbit.loc[idx0, ['Helio x','Helio y','Helio z','Helio vx','Helio vy','Helio vz']].values
-            asteroid_state_helio[:3] *= (config['AU_TO_M'] / config['KM_TO_M'])
-            asteroid_state_helio[3:] *= (config['AU_TO_M'] / config['KM_TO_M'] / config['SECONDS_PER_DAY'])
-            asteroid_epoch = orbit.loc[idx0, 'Julian Date']
+                # If this specific row was already appended to master in a previous run, skip early
+                # (we also skip heavy work if per-row outputs already exist)
+                if master_row_already_done(row_uid) and row_outputs_exist(base_path):
+                    continue
 
-            num_frames = int(config['number_of_frames'])
-            step_days  = config['time_between_frames'] / config['SECONDS_PER_DAY']
-            epochs = asteroid_epoch + step_days * np.arange(num_frames)
-            total_window_s = num_frames * config['time_between_frames']
+                # ---- heavy computations (kept as in your original flow) ----
+                orbit_path = os.path.join(config['minimoon_files_folder'], f"{mm_id}.csv")
+                orbit = pd.read_csv(orbit_path, sep=' ', header=0, names=config['minimoon_column_names'])
 
-            # Integrate asteroid
-            asteroid_integrated_states, asteroid_earth_states = nbody.integrate_n_body(
-                asteroid_state_helio, asteroid_epoch, total_window_s,
-                config['time_between_frames'], type="ASTEROID"
-            )
-            asteroid_state = util.helio_eclip_to_sun_earth_corotating_batch_full(
-                asteroid_integrated_states, asteroid_earth_states
-            )
+                asteroid_state_helio = orbit.loc[idx0, ['Helio x','Helio y','Helio z','Helio vx','Helio vy','Helio vz']].values
+                asteroid_state_helio[:3] *= (config['AU_TO_M'] / config['KM_TO_M'])
+                asteroid_state_helio[3:] *= (config['AU_TO_M'] / config['KM_TO_M'] / config['SECONDS_PER_DAY'])
+                asteroid_epoch = orbit.loc[idx0, 'Julian Date']
 
-            # Spacecraft initial GEO-ecliptic state
-            sc_geo_eci = detected_minimoon[['GEO_ECLIP_X_(km)','GEO_ECLIP_Y_(km)','GEO_ECLIP_Z_(km)',
-                                            'GEO_ECLIP_Vx_(km/s)','GEO_ECLIP_Vy_(km/s)','GEO_ECLIP_Vz_(km/s)']].to_numpy()
-            sc_epoch   = detected_minimoon['sc_epoch']
+                num_frames = int(config['number_of_frames'])
+                step_days  = config['time_between_frames'] / config['SECONDS_PER_DAY']
+                epochs = asteroid_epoch + step_days * np.arange(num_frames)
+                total_window_s = num_frames * config['time_between_frames']
 
-            # Convert to heliocentric for integration
-            sun_geo_state = sp.spkgeo(10, sp.str2et(sc_epoch), "ECLIPJ2000", 399)[0]
-            sc_helio_ini  = sc_geo_eci - sun_geo_state
-
-            # Integrate spacecraft in heliocentric frame
-            sc_int_states, earth_states = nbody.integrate_n_body(
-                sc_helio_ini, sc_epoch, total_window_s,
-                config['time_between_frames'], type="SPACECRAFT"
-            )
-            sc_secr = util.helio_eclip_to_sun_earth_corotating_batch_full(sc_int_states, earth_states)
-
-            # Convert both to GEO ecliptic (asteroid-time)
-            sc_geo  = util.sun_earth_corotating_to_geo_eclip_batch_full(sc_secr, asteroid_earth_states)
-            ast_geo = util.sun_earth_corotating_to_geo_eclip_batch_full(asteroid_state, asteroid_earth_states)
-
-            # Then to GEO EME
-            sc_geo_eme  = util.ecliptic_to_eme_batch(sc_geo)
-            ast_geo_eme = util.ecliptic_to_eme_batch(ast_geo)
-
-            # Apparent RA/Dec (geometry)
-            x_rel = ast_geo_eme[0, :] - sc_geo_eme[0, :]
-            y_rel = ast_geo_eme[1, :] - sc_geo_eme[1, :]
-            z_rel = ast_geo_eme[2, :] - sc_geo_eme[2, :]
-            r_xy = np.hypot(x_rel, y_rel)
-            r    = np.sqrt(r_xy**2 + z_rel**2)
-            eps  = 1e-12
-            sin_ra  = y_rel / np.maximum(r_xy, eps)
-            cos_ra  = x_rel / np.maximum(r_xy, eps)
-            sin_dec = z_rel / np.maximum(r, eps)
-
-            # Physically-sound branch (asteroid-time spacecraft integration)
-            sc_secr_ini = sc_secr[:, 0]
-            earth_helio_ini = asteroid_earth_states[:, 0]
-            sc_helio_ini_state = util.sun_earth_corotating_to_helio_eclip_single(sc_secr_ini, earth_helio_ini)
-            sc_helio_states, asteroid_earth_states_2 = nbody.integrate_n_body(
-                sc_helio_ini_state, asteroid_epoch, total_window_s,
-                config['time_between_frames'], type="SPACECRAFT-ASTEROIDTIME"
-            )
-            sc_eme_states = util.helio_eclip_to_geo_eme_batch(sc_helio_states, asteroid_earth_states)
-
-            x_rel_p = ast_geo_eme[0, :] - sc_eme_states[0, :]
-            y_rel_p = ast_geo_eme[1, :] - sc_eme_states[1, :]
-            z_rel_p = ast_geo_eme[2, :] - sc_eme_states[2, :]
-            r_xy_p  = np.hypot(x_rel_p, y_rel_p)
-            r_p     = np.sqrt(r_xy_p**2 + z_rel_p**2)
-            sin_ra_p  = y_rel_p / np.maximum(r_xy_p, eps)
-            cos_ra_p  = x_rel_p / np.maximum(r_xy_p, eps)
-            sin_dec_p = z_rel_p / np.maximum(r_p, eps)
-
-            # Assemble dataframe
-            data = np.array([
-                epochs,
-                ast_geo_eme[0,:], ast_geo_eme[1,:], ast_geo_eme[2,:],
-                ast_geo_eme[3,:], ast_geo_eme[4,:], ast_geo_eme[5,:],
-                sc_geo_eme[0,:],  sc_geo_eme[1,:],  sc_geo_eme[2,:],
-                sc_geo_eme[3,:],  sc_geo_eme[4,:],  sc_geo_eme[5,:],
-                sin_ra, cos_ra, sin_dec,
-                sc_eme_states[0,:], sc_eme_states[1,:], sc_eme_states[2,:],
-                sc_eme_states[3,:], sc_eme_states[4,:], sc_eme_states[5,:],
-                sin_ra_p, cos_ra_p, sin_dec_p
-            ]).T
-            df = pd.DataFrame(data, columns=config['IOD_data_columns_geo_and_phys'])
-
-            # Write outputs (skip missing types intelligently)
-            if save_format in ('csv', 'both') and not os.path.exists(base_path + ".csv"):
-                df.to_csv(base_path + ".csv", index=False)
-            if save_format in ('parquet', 'both') and not os.path.exists(base_path + ".parquet"):
-                df.to_parquet(base_path + ".parquet", index=False)
-
-            # -----------------------
-            # Build row of master file
-            # -----------------------
-
-            # final asteroid
-            final_a = detected_minimoon.name[1]
-
-            # final asteroid epoch (jdtdb)
-            final_ae = epochs[-1]
-
-            # final asteroid helio state
-            final_ha = asteroid_integrated_states[:, -1]
-
-            # final earth helio state
-            final_eha = asteroid_earth_states[:, -1]
-
-            # final spacecraft epoch
-            in_et = sp.str2et(sc_epoch)
-            in_jdtdb = sp.unitim(in_et, 'ET', 'JDTDB')
-            final_se = in_jdtdb + total_window_s / config['SECONDS_PER_DAY']
-
-            # detecting s/c id
-            final_did = int(sc_id)
-
-            # other spacecraft final helio states
-            sc_states = all_sc_states[zdx]
-            final_hsc = []
-            for fdx in range(0, len(sc_states)):
-                # Spacecraft initial GEO-ecliptic state
-                sc_geo_eci_fdx = sc_states[fdx, :]
-
-                # Convert to heliocentric for integration
-                sc_helio_ini_fdx = sc_geo_eci_fdx - sun_geo_state
-
-                # Integrate spacecraft in heliocentric frame
-                sc_int_states_fdx, earth_states_fdx = nbody.integrate_n_body(
-                    sc_helio_ini_fdx, sc_epoch, total_window_s,
-                    config['time_between_frames'], type="SPACECRAFT"
+                asteroid_integrated_states, asteroid_earth_states = nbody.integrate_n_body(
+                    asteroid_state_helio, asteroid_epoch, total_window_s,
+                    config['time_between_frames'], type="ASTEROID"
+                )
+                asteroid_state = util.helio_eclip_to_sun_earth_corotating_batch_full(
+                    asteroid_integrated_states, asteroid_earth_states
                 )
 
-                final_hsc.append(sc_int_states_fdx[:, -1])
+                sc_geo_eci = detected_minimoon[['GEO_ECLIP_X_(km)','GEO_ECLIP_Y_(km)','GEO_ECLIP_Z_(km)',
+                                                'GEO_ECLIP_Vx_(km/s)','GEO_ECLIP_Vy_(km/s)','GEO_ECLIP_Vz_(km/s)']].to_numpy()
+                sc_epoch   = detected_minimoon['sc_epoch']
 
-            all_final_hsc = np.vstack(final_hsc)
+                sun_geo_state = sp.spkgeo(10, sp.str2et(sc_epoch), "ECLIPJ2000", 399)[0]
+                sc_helio_ini  = sc_geo_eci - sun_geo_state
 
-            # final earth helio state using spacecraft epochs
-            final_hesc = earth_states_fdx[:, -1]
+                sc_int_states, earth_states = nbody.integrate_n_body(
+                    sc_helio_ini, sc_epoch, total_window_s,
+                    config['time_between_frames'], type="SPACECRAFT"
+                )
+                sc_secr = util.helio_eclip_to_sun_earth_corotating_batch_full(sc_int_states, earth_states)
 
-            # current attitudes of sc
-            final_sc_boresights = boresights[zdx]
+                sc_geo  = util.sun_earth_corotating_to_geo_eclip_batch_full(sc_secr, asteroid_earth_states)
+                ast_geo = util.sun_earth_corotating_to_geo_eclip_batch_full(asteroid_state, asteroid_earth_states)
 
-            # build and output df
+                sc_geo_eme  = util.ecliptic_to_eme_batch(sc_geo)
+                ast_geo_eme = util.ecliptic_to_eme_batch(ast_geo)
 
-            zdx += 1
+                x_rel = ast_geo_eme[0, :] - sc_geo_eme[0, :]
+                y_rel = ast_geo_eme[1, :] - sc_geo_eme[1, :]
+                z_rel = ast_geo_eme[2, :] - sc_geo_eme[2, :]
+                r_xy = np.hypot(x_rel, y_rel)
+                r    = np.sqrt(r_xy**2 + z_rel**2)
+                eps  = 1e-12
+                sin_ra  = y_rel / np.maximum(r_xy, eps)
+                cos_ra  = x_rel / np.maximum(r_xy, eps)
+                sin_dec = z_rel / np.maximum(r, eps)
 
+                sc_secr_ini = sc_secr[:, 0]
+                earth_helio_ini = asteroid_earth_states[:, 0]
+                sc_helio_ini_state = util.sun_earth_corotating_to_helio_eclip_single(sc_secr_ini, earth_helio_ini)
+                sc_helio_states, asteroid_earth_states_2 = nbody.integrate_n_body(
+                    sc_helio_ini_state, asteroid_epoch, total_window_s,
+                    config['time_between_frames'], type="SPACECRAFT-ASTEROIDTIME"
+                )
+                sc_eme_states = util.helio_eclip_to_geo_eme_batch(sc_helio_states, asteroid_earth_states)
+
+                x_rel_p = ast_geo_eme[0, :] - sc_eme_states[0, :]
+                y_rel_p = ast_geo_eme[1, :] - sc_eme_states[1, :]
+                z_rel_p = ast_geo_eme[2, :] - sc_eme_states[2, :]
+                r_xy_p  = np.hypot(x_rel_p, y_rel_p)
+                r_p     = np.sqrt(r_xy_p**2 + z_rel_p**2)
+                sin_ra_p  = y_rel_p / np.maximum(r_xy_p, eps)
+                cos_ra_p  = x_rel_p / np.maximum(r_xy_p, eps)
+                sin_dec_p = z_rel_p / np.maximum(r_p, eps)
+
+                # Assemble per-row IOD dataframe (unchanged)
+                data = np.array([
+                    epochs,
+                    ast_geo_eme[0,:], ast_geo_eme[1,:], ast_geo_eme[2,:],
+                    ast_geo_eme[3,:], ast_geo_eme[4,:], ast_geo_eme[5,:],
+                    sc_geo_eme[0,:],  sc_geo_eme[1,:],  sc_geo_eme[2,:],
+                    sc_geo_eme[3,:],  sc_geo_eme[4,:],  sc_geo_eme[5,:],
+                    sin_ra, cos_ra, sin_dec,
+                    sc_eme_states[0,:], sc_eme_states[1,:], sc_eme_states[2,:],
+                    sc_eme_states[3,:], sc_eme_states[4,:], sc_eme_states[5,:],
+                    sin_ra_p, cos_ra_p, sin_dec_p
+                ]).T
+                df = pd.DataFrame(data, columns=config['IOD_data_columns_geo_and_phys'])
+
+                # Write per-row outputs (respects save_format)
+                if save_format in ('csv', 'both') and not os.path.exists(base_path + ".csv"):
+                    df.to_csv(base_path + ".csv", index=False)
+                if save_format in ('parquet', 'both') and not os.path.exists(base_path + ".parquet"):
+                    df.to_parquet(base_path + ".parquet", index=False)
+
+                saved_files = []
+                if os.path.exists(base_path + ".parquet"):
+                    saved_files.append(os.path.basename(base_path) + ".parquet")
+                if os.path.exists(base_path + ".csv"):
+                    saved_files.append(os.path.basename(base_path) + ".csv")
+                saved_as_str = ";".join(saved_files) if saved_files else ""
+
+                # -----------------------
+                # Build values for MASTER
+                # -----------------------
+                # final asteroid id
+                final_a = mm_id
+
+                # final asteroid epoch (jdtdb) -> last epoch
+                final_ae = float(epochs[-1])
+
+                # final asteroid helio state (6)
+                final_ha = asteroid_integrated_states[:, -1]
+
+                # final earth helio state (6) at asteroid-time
+                final_eha = asteroid_earth_states[:, -1]
+
+                # detecting spacecraft epoch (jdtdb)
+                in_et = sp.str2et(sc_epoch)
+                in_jdtdb = sp.unitim(in_et, 'ET', 'JDTDB')
+                final_se = float(in_jdtdb + total_window_s / config['SECONDS_PER_DAY'])
+
+                # detecting s/c id
+                final_did = int(sc_id)
+
+                # all spacecraft initial states for this detection (geo-ecl), size = num_sc x 6
+                sc_states = all_sc_states[zdx]  # matrix [num_sc, 6]
+
+                final_hsc_list = []
+                for fdx in range(0, len(sc_states)):
+                    sc_geo_eci_fdx = sc_states[fdx, :]
+                    sc_helio_ini_fdx = sc_geo_eci_fdx - sun_geo_state
+                    sc_int_states_fdx, earth_states_fdx = nbody.integrate_n_body(
+                        sc_helio_ini_fdx, sc_epoch, total_window_s,
+                        config['time_between_frames'], type="SPACECRAFT"
+                    )
+                    final_hsc_list.append(sc_int_states_fdx[:, -1])
+
+                all_final_hsc = np.vstack(final_hsc_list)   # shape [num_sc, 6]
+
+                # final earth helio (spacecraft-time integration) — use last available
+                final_hesc = earth_states_fdx[:, -1]
+
+                # spacecraft boresights for this detection (length num_sc, each vector)
+                final_sc_boresights = boresights[zdx]  # iterable length num_sc
+
+                # -----------------------
+                # Construct master row
+                # -----------------------
+                # Skip if this row_uid already marked done (dedupe on resume)
+                if not master_row_already_done(row_uid):
+                    row_dict = {
+                        "ID_AST": final_a,
+                        "EPOCH_AST(jdtdb)": f"{final_ae:.16f}",
+                        "HELIO_AST(kms)": serialize_vec(final_ha),
+                        "EARTH_HELIO_EA(kms)": serialize_vec(final_eha),
+                        "EPOCH_SC(jdtdb)": f"{final_se:.16f}",
+                        "DETECTING_SC_ID": int(final_did),
+                        "EARTH_HELIO_SE(kms)": serialize_vec(final_hesc),
+                        "IOD_DATA_SAVED_AS": saved_as_str,  # <-- NEW
+                    }
+
+                    # Insert HELIO_SC_i
+                    for i in range(num_sc):
+                        key = f"HELIO_SC_{i+1}(kms)"
+                        row_dict[key] = serialize_vec(all_final_hsc[i, :]) if i < all_final_hsc.shape[0] else ""
+
+                    # Insert POINTING_SC_i
+                    for i in range(num_sc):
+                        key = f"POINTING_SC_{i+1}"
+                        # boresight might be vector or None
+                        bs = final_sc_boresights[i] if i < len(final_sc_boresights) else None
+                        row_dict[key] = serialize_vec(bs) if bs is not None else ""
+
+                    # Ensure columns order and fill missing keys with ""
+                    ordered_row = {col: row_dict.get(col, "") for col in master_columns}
+                    master_rows_buffer.append((row_uid, ordered_row))  # keep uid alongside data
+
+                zdx += 1
+
+        # -------- send per-rank buffers to rank 0 for a single append --------
+        gathered = comm.gather(master_rows_buffer, root=0)
+
+        if rank == 0:
+            # flatten list of (uid, row) pairs
+            all_items = [item for chunk in gathered for item in chunk]  # [(uid, row_dict), ...]
+            if all_items:
+                # filter out any already-done uids
+                filtered_items = [(uid, row) for (uid, row) in all_items if not master_row_already_done(uid)]
+                if filtered_items:
+                    write_master_header_if_needed()
+                    rows_only = [row for (_, row) in filtered_items]
+                    df_master_append = pd.DataFrame(rows_only, columns=master_columns)
+                    df_master_append = df_master_append[master_columns]
+                    df_master_append.to_csv(master_path, mode="a", header=False, index=False)
+                    # mark each appended uid as done
+                    for (uid, _) in filtered_items:
+                        mark_master_row_done(uid)
 
         # All ranks finished their rows for this file
         comm.Barrier()
