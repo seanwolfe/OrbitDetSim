@@ -131,13 +131,13 @@ def unpack_angles(x, M):
     return thetas, phis
 
 
-def angles_to_pointings(x, p_agents, u_curr_agents, theta_s_list, M):
-    """Convert joint angles to u_agents (M,3)."""
+def angles_to_pointings(x, p_agents, u_curr_agents, theta_lower, theta_upper, M):
+    """Convert joint angles to u_agents (M,3) with per-agent bounds."""
     thetas, phis = unpack_angles(x, M)
     u_agents = np.zeros_like(u_curr_agents, dtype=float)
     for i in range(M):
-        # enforce bounds softly (optimizer should respect bounds anyway)
-        th = np.clip(thetas[i], 0.0, theta_s_list[i])
+        # enforce per-agent θ-bounds softly (optimizer also has hard bounds)
+        th = np.clip(thetas[i], theta_lower[i], theta_upper[i])
         ph = phis[i] % (2*np.pi)
         u_agents[i] = u_from_cap(u_curr_agents[i], th, ph)
     return u_agents
@@ -151,10 +151,12 @@ def make_cached_y(P_p, d_M, n_mc, seed):
 
 
 def objective_joint(x, p_hat, P_p, p_agents, u_curr_agents,
-                    theta_s_list, theta_h, d_M, kappa_sigma,
+                    theta_lower, theta_upper,
+                    theta_h, d_M, kappa_sigma,
                     y_cached):
     M = len(p_agents)
-    u_agents = angles_to_pointings(x, p_agents, u_curr_agents, theta_s_list, M)
+    u_agents = angles_to_pointings(x, p_agents, u_curr_agents, theta_lower, theta_upper, M)
+    # We maximize J, so objective is -J
     return -J_t_dual_coverage(
         p_hat, P_p, p_agents, u_agents,
         theta_h, d_M=d_M, kappa_sigma=kappa_sigma,
@@ -169,7 +171,49 @@ def finite_diff_grad(f, x, eps=1e-4):
         xp = x.copy(); xm = x.copy()
         xp[i] += eps; xm[i] -= eps
         g[i] = (f(xp) - f(xm)) / (2*eps)
-    return -g
+    return -g  # gradient of -J
+
+
+### NEW: helper to estimate theta_min and theta_max from the uncertainty ellipsoid
+def estimate_theta_bounds_from_ellipsoid(p_hat, P_p, p_agents, u_curr_agents,
+                                         d_M, n_shell=400, seed=12345):
+    """
+    For each spacecraft i:
+      - sample points on the Mahalanobis shell (||y|| = d_M) of the ellipsoid
+      - compute angular distance θ_i(p) between u_curr_i and direction to each point
+      - return θ_min_i, θ_max_i^{(ell)} over those samples
+    """
+    M = len(p_agents)
+    rng = np.random.default_rng(seed)
+
+    # Sample unit directions on the 3D sphere
+    dirs = rng.normal(size=(n_shell, 3))
+    dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
+
+    # Map to ellipsoid shell: p = p_hat + Lp * (d_M * dir)
+    Lp = np.linalg.cholesky(P_p)
+    y_shell = d_M * dirs
+    p_shell = (Lp @ y_shell.T).T + p_hat[None, :]   # (n_shell, 3)
+
+    theta_min = np.zeros(M)
+    theta_max = np.zeros(M)
+
+    for i in range(M):
+        p_i = p_agents[i]
+        u_i_curr = u_curr_agents[i] / np.linalg.norm(u_curr_agents[i])
+
+        r = p_shell - p_i[None, :]             # vectors from s/c to ellipsoid points
+        r_norm = np.linalg.norm(r, axis=1, keepdims=True)
+        r_unit = r / np.maximum(r_norm, 1e-12)
+
+        cos_theta = np.einsum('ij,j->i', r_unit, u_i_curr)
+        cos_theta = np.clip(cos_theta, -1.0, 1.0)
+        theta_vals = np.arccos(cos_theta)     # [0, π]
+
+        theta_min[i] = np.min(theta_vals)
+        theta_max[i] = np.max(theta_vals)
+
+    return theta_min, theta_max
 
 
 def optimize_pointing_lbfgs_joint(
@@ -180,49 +224,68 @@ def optimize_pointing_lbfgs_joint(
     n_restarts=3
 ):
     """
-    Joint L-BFGS-B over all agents’ (theta_i,phi_i).
+    Joint L-BFGS-B over all agents’ (theta_i,phi_i), with θ-bounds derived from
+    the uncertainty ellipsoid and slew constraints.
+
     Returns:
-      u_best (M,3), angles_best list[(theta,phi)], J_best
+      u_best (M,3), angles_best list[(theta,phi)], best_objective
+
+    If infeasible (slew too small to even reach the near edge of the ellipsoid
+    for any spacecraft), returns (None, None, 0.0).
     """
     rng = np.random.default_rng(seed)
     M = len(p_agents)
 
-    # cache MC points to smooth objective under finite diff
+    # --- NEW: estimate θ_min and θ_max^{(ell)} for each spacecraft ---
+    theta_min_ell, theta_max_ell = estimate_theta_bounds_from_ellipsoid(
+        p_hat, P_p, p_agents, u_curr_agents, d_M,
+        n_shell=400, seed=seed+999
+    )
+
+    # Effective upper bound: min(θ_max^{ell}, θ_s)
+    theta_upper = np.minimum(theta_max_ell, theta_s_list)
+    theta_lower = theta_min_ell.copy()  # "near edge" of ellipse
+
+    # Ensure lower bound non-negative (just in case)
+    theta_lower = np.maximum(theta_lower, 0.0)
+
+    # Feasibility check: if θ_s < θ_min^{ell} => can't reach the ellipse at all
+    infeasible_mask = theta_upper < theta_lower
+    if np.any(infeasible_mask):
+        print("Infeasible: for at least one spacecraft, slew limit is smaller "
+              "than the angle required to reach the near edge of the uncertainty ellipsoid.")
+        return None, None, 0.0
+
+    # cache MC points to smooth objective
     y_cached = make_cached_y(P_p, d_M, n_mc, seed=seed+123)
 
-    # bounds per agent
+    # bounds per agent in (θ, φ)
     bounds = []
     for i in range(M):
-        bounds.append((0.0, theta_s_list[i]))      # theta
-        bounds.append((0.0, 0.0001))             # phi
+        bounds.append((theta_lower[i], theta_upper[i]))    # theta_i
+        bounds.append((0.0, 2 * np.pi))                    # phi_i
 
     best = None
     best_J = np.inf
 
     for r in range(n_restarts):
-        # random init inside bounds
+        # random init inside θ-bounds
         x0 = np.zeros(2*M)
         for i in range(M):
-            x0[2*i]   = rng.uniform(0.0, theta_s_list[i])
+            x0[2*i]   = rng.uniform(theta_lower[i], theta_upper[i])
             x0[2*i+1] = rng.uniform(0.0, 2*np.pi)
 
         f = lambda z: objective_joint(
             z, p_hat, P_p, p_agents, u_curr_agents,
-            theta_s_list, theta_h, d_M, kappa_sigma, y_cached
+            theta_lower, theta_upper,
+            theta_h, d_M, kappa_sigma, y_cached
         )
 
         if SCIPY_OK:
-            # res = minimize(
-            #     f, x0, method="L-BFGS-B",
-            #     jac=lambda z: finite_diff_grad(f, z, eps=1e-4),
-            #     bounds=bounds,
-            #     options=dict(maxiter=60, ftol=1e-6)
-            # )
-
             res = minimize(
                 f, x0, method="L-BFGS-B",
                 bounds=bounds,
-                options=dict(maxiter=60, ftol=1e-10, disp=True)
+                options=dict(maxiter=60, ftol=1e-10, disp=False)
             )
             x_star = res.x
             J_star = res.fun
@@ -236,7 +299,7 @@ def optimize_pointing_lbfgs_joint(
                 x_star -= lr * g
                 # project to bounds
                 for i in range(M):
-                    x_star[2*i] = np.clip(x_star[2*i], 0.0, theta_s_list[i])
+                    x_star[2*i]   = np.clip(x_star[2*i], theta_lower[i], theta_upper[i])
                     x_star[2*i+1] = x_star[2*i+1] % (2*np.pi)
                 J_new = f(x_star)
                 if J_new < J_star:
@@ -251,10 +314,11 @@ def optimize_pointing_lbfgs_joint(
 
     # unpack best solution
     thetas_best, phis_best = unpack_angles(best, M)
-    u_best = angles_to_pointings(best, p_agents, u_curr_agents, theta_s_list, M)
+    u_best = angles_to_pointings(best, p_agents, u_curr_agents, theta_lower, theta_upper, M)
     angles_best = [(thetas_best[i], phis_best[i]) for i in range(M)]
 
     return u_best, angles_best, best_J
+
 
 def sample_agents_on_line(N, x_min=-5.0, x_max=5.0, y_line=0.0, seed=None):
     rng = np.random.default_rng(seed)
@@ -274,18 +338,15 @@ def mahalanobis_ellipse_points(mu, Sigma, d_mahal=3.0, num_pts=200):
     """
     Returns points on the ellipse defined by (x-mu)^T Sigma^{-1} (x-mu) = d_mahal^2
     """
-    # Eigen-decomposition of covariance
-    eigvals, eigvecs = np.linalg.eigh(Sigma)  # eigvals sorted ascending
-    eigvals = np.maximum(eigvals, 1e-12)      # safety against tiny/negative numeric issues
+    eigvals, eigvecs = np.linalg.eigh(Sigma)
+    eigvals = np.maximum(eigvals, 1e-12)
 
-    # Param angle
     t = np.linspace(0, 2*np.pi, num_pts)
-    circle = np.stack([np.cos(t), np.sin(t)], axis=0)  # shape (2, num_pts)
+    circle = np.stack([np.cos(t), np.sin(t)], axis=0)
 
-    # Scale circle to ellipse: sqrt(eigvals) * d_mahal along principal axes
-    axes_lengths = d_mahal * np.sqrt(eigvals)          # (2,)
-    ellipse_local = np.diag(axes_lengths) @ circle     # (2, num_pts)
-    ellipse_world = (eigvecs @ ellipse_local).T + mu   # (num_pts, 2)
+    axes_lengths = d_mahal * np.sqrt(eigvals)
+    ellipse_local = np.diag(axes_lengths) @ circle
+    ellipse_world = (eigvecs @ ellipse_local).T + mu
 
     return ellipse_world
 
@@ -298,8 +359,6 @@ def plot_fov_wedge(ax, agent_pos, pointing_angle, half_angle,
     """
     x0, y0 = agent_pos
 
-    # Base boresight direction: +y axis
-    # Direction vector for angle theta from +y:
     def dir_from_plus_y(theta):
         return np.array([np.sin(theta), np.cos(theta)])
 
@@ -309,15 +368,12 @@ def plot_fov_wedge(ax, agent_pos, pointing_angle, half_angle,
     left_pt  = agent_pos + ray_length * left_dir
     right_pt = agent_pos + ray_length * right_dir
 
-    # Draw rays
     ax.plot([x0, left_pt[0]],  [y0, left_pt[1]],  color=color, lw=lw)
     ax.plot([x0, right_pt[0]], [y0, right_pt[1]], color=color, lw=lw)
 
-    # Fill wedge triangle for visualization
     ax.fill([x0, left_pt[0], right_pt[0]],
             [y0, left_pt[1], right_pt[1]],
             color=color, alpha=alpha)
-
 
 
 # ============================================================
@@ -330,26 +386,27 @@ def main():
     # =======================
     M = 3
 
-    x_line_min, x_line_max = -6.0, 6.0
+    x_line_min, x_line_max = -1.0, 1.0
     y_line = 0.0
 
-    x_t_min, x_t_max = -4.0, 4.0
-    y_t_min, y_t_max = 3.0, 9.0
+    x_t_min, x_t_max = -2.0, 2.0
+    y_t_min, y_t_max = 1.0, 5.0
 
-    theta_h = np.deg2rad(5.0)
-    theta_s_list = np.array([np.deg2rad(360.0)] * M)
+    theta_h = np.deg2rad(2.5)
+    theta_s_list = np.array([np.deg2rad(90.0)] * M)
 
     rng = np.random.default_rng(0)
-    pointing_angles = np.deg2rad(rng.uniform(-25, 25, size=M))
+    pointing_angles = np.deg2rad(rng.uniform(-1, 1, size=M))
 
     # 2D covariance
-    P_p_2d = np.array([[0.8, 0.3],
-                       [0.3, 0.5]])
+    P_p_2d = np.array([[0.25, 0.1],
+                       [-0.1, 0.5]])
 
     d_mahal = 3.0
 
-    #seed = 1
-    seed = int(time.time())
+    # seed = int(time.time())
+    # print(seed)
+    seed = 1764104794
     # =======================
 
     # 2D positions
@@ -360,7 +417,7 @@ def main():
 
     # ----- Embed into 3D for optimizer -----
     p_agents = np.hstack([p_agents_2d, np.zeros((M,1))])           # (M,3)
-    p_hat = np.array([p_hat_2d[0], p_hat_2d[1], 0.0])             # (3,)
+    p_hat = np.array([p_hat_2d[0], p_hat_2d[1], 0.0])              # (3,)
 
     # Pad covariance to 3x3 (tiny z variance)
     P_p = np.array([[P_p_2d[0,0], P_p_2d[0,1], 0.0],
@@ -378,16 +435,19 @@ def main():
         p_hat, P_p, p_agents, u_curr_agents,
         theta_h, theta_s_list,
         d_M=d_mahal, kappa_sigma=100.0,
-        n_mc=20000, seed=seed, n_restarts=100
+        n_mc=20000, seed=seed, n_restarts=10
     )
 
-    print("Best J_t:", J_star)
+    if u_star is None:
+        print("No feasible solution given the slew angle constraints.")
+        return
+
+    print("Best objective (−J):", J_star)
     for i, (th, ph) in enumerate(ang_star):
         print(f"Agent {i}: theta={np.rad2deg(th):.2f} deg, phi={np.rad2deg(ph):.2f} deg")
         print("   u =", u_star[i])
 
     # Convert optimized 3D u back to planar pointing angles
-    # planar angle from +y axis: angle = atan2(u_x, u_y)
     pointing_angles_opt = np.arctan2(u_star[:,0], u_star[:,1])
 
     # ----- Plot -----
@@ -410,8 +470,8 @@ def main():
     ax.set_ylabel("y")
     ax.set_title("2D Agents with Optimized Dual-Coverage FOVs")
 
-    ax.set_xlim(x_line_min-1, x_line_max+1)
-    ax.set_ylim(y_line-1, y_t_max+3)
+    ax.set_xlim(x_line_min-5, x_line_max+5)
+    ax.set_ylim(y_line-1, y_t_max+8)
 
     plt.grid(alpha=0.25)
     plt.show()
@@ -419,4 +479,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
