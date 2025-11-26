@@ -435,7 +435,7 @@ def main():
         p_hat, P_p, p_agents, u_curr_agents,
         theta_h, theta_s_list,
         d_M=d_mahal, kappa_sigma=100.0,
-        n_mc=20000, seed=seed, n_restarts=10
+        n_mc=20000, seed=seed, n_restarts=100
     )
 
     if u_star is None:
