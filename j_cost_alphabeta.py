@@ -12,115 +12,6 @@ except Exception:
 # -----------------------------
 # Helpers: sampling + geometry
 # -----------------------------
-
-def sample_uniform_ball(n_samples, radius=1.0, dim=3, rng=None):
-    """Uniform samples inside a dim-D ball of given radius."""
-    if rng is None:
-        rng = np.random.default_rng()
-    x = rng.normal(size=(n_samples, dim))
-    x /= np.linalg.norm(x, axis=1, keepdims=True)
-    u = rng.random(n_samples)
-    r = radius * (u ** (1.0 / dim))
-    return x * r[:, None]
-
-
-def sigmoid(z):
-    return 1.0 / (1.0 + np.exp(-z))
-
-
-# -----------------------------------------------------------
-# Continuous FOV membership & dual coverage in whitened space
-# -----------------------------------------------------------
-
-def c_tilde_i(y_samples, Lp, p_hat, p_i, u_i, cos_theta_h, kappa_sigma):
-    """
-    c~_i(y) = sigma( kappa_sigma( ((p - p_i)/||p-p_i||)·u_i - cos(theta_h)) )
-    with p = Lp y + p_hat
-    """
-    p_samples = (Lp @ y_samples.T).T + p_hat[None, :]
-    v = p_samples - p_i[None, :]
-    v_norm = np.linalg.norm(v, axis=1, keepdims=True)
-    v_unit = v / np.maximum(v_norm, 1e-12)
-
-    cos_ang = np.einsum('ij,j->i', v_unit, u_i)
-    z = kappa_sigma * (cos_ang - cos_theta_h)
-    return sigmoid(z)
-
-
-def k2_tilde(y_samples, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma):
-    M = len(p_agents)
-    N = y_samples.shape[0]
-    C = np.zeros((M, N))
-    for i in range(M):
-        C[i] = c_tilde_i(y_samples, Lp, p_hat, p_agents[i], u_agents[i],
-                         cos_theta_h, kappa_sigma)
-
-    one_minus_C = 1.0 - C
-    prod_all = np.prod(one_minus_C, axis=0)
-
-    k2 = np.zeros(N)
-    for i in range(M):
-        for j in range(i+1, M):  # <-- i < j (no i=j terms)
-            denom = one_minus_C[i] * one_minus_C[j]
-            prod_excl = prod_all / np.maximum(denom, 1e-12)
-            k2 += C[i] * C[j] * prod_excl
-
-    return k2
-
-
-
-def J_t_dual_coverage(
-    p_hat, P_p, p_agents, u_agents,
-    theta_h, d_M=3.0, kappa_sigma=100.0,
-    n_mc=20000, seed=None, y_samples_cached=None
-):
-    """
-    Eq. (Jty1) Monte-Carlo estimate.
-    If y_samples_cached is provided, reuse the same MC points for smoother gradients.
-    """
-    rng = np.random.default_rng(seed)
-    Lp = np.linalg.cholesky(P_p)
-
-    if y_samples_cached is None:
-        y = sample_uniform_ball(n_mc, radius=d_M, dim=3, rng=rng)
-    else:
-        y = y_samples_cached
-        n_mc = y.shape[0]
-
-    y2 = np.sum(y**2, axis=1)
-    w = np.exp(-0.5 * y2)
-
-    cos_theta_h = np.cos(theta_h)
-    k2 = k2_tilde(y, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma)
-
-    V_ball = (4.0/3.0) * np.pi * d_M**3
-    integral_est = V_ball * np.mean(w * k2)
-
-    J = integral_est / ((2*np.pi)**1.5)
-    return J
-
-
-# -----------------------------------------
-# Joint L-BFGS-B optimization over all agents
-# -----------------------------------------
-def make_cached_y(P_p, d_M, n_mc, seed):
-    """Pre-draw y samples once to stabilize finite-diff gradients."""
-    rng = np.random.default_rng(seed)
-    y = sample_uniform_ball(n_mc, radius=d_M, dim=3, rng=rng)
-    return y
-
-
-def finite_diff_grad(f, x, eps=1e-4):
-    """Central finite-difference gradient."""
-    g = np.zeros_like(x)
-    for i in range(len(x)):
-        xp = x.copy(); xm = x.copy()
-        xp[i] += eps; xm[i] -= eps
-        g[i] = (f(xp) - f(xm)) / (2*eps)
-    return -g  # gradient of -J
-
-
-### NEW: helper to estimate theta_min and theta_max from the uncertainty ellipsoid
 def unpack_ab(x, M):
     """x = [alpha1,beta1,...,alphaM,betaM] -> arrays (M,)."""
     alphas = x[0::2]
@@ -158,6 +49,156 @@ def angles_to_pointings_ellipsoid(x, Lp, p_hat, p_agents, d_M):
     return u_agents
 
 
+def sample_uniform_ball(n_samples, radius=1.0, dim=3, rng=None):
+    """Uniform samples inside a dim-D ball of given radius."""
+    if rng is None:
+        rng = np.random.default_rng()
+    x = rng.normal(size=(n_samples, dim))
+    x /= np.linalg.norm(x, axis=1, keepdims=True)
+    u = rng.random(n_samples)
+    r = radius * (u ** (1.0 / dim))
+    return x * r[:, None]
+
+
+def orthonormal_basis_from_u(u):
+    """Two orthonormal vectors spanning plane normal to u."""
+    u = u / np.linalg.norm(u)
+    a = np.array([1.0, 0.0, 0.0])
+    if abs(np.dot(a, u)) > 0.9:
+        a = np.array([0.0, 1.0, 0.0])
+    e1 = a - np.dot(a, u) * u
+    e1 /= np.linalg.norm(e1)
+    e2 = np.cross(u, e1)
+    e2 /= np.linalg.norm(e2)
+    return e1, e2
+
+
+def u_from_cap(u_curr, theta, phi):
+    """Eq. (uit): candidate pointing vector on spherical cap around u_curr."""
+    u_curr = u_curr / np.linalg.norm(u_curr)
+    e1, e2 = orthonormal_basis_from_u(u_curr)
+    u_phi = np.cos(phi) * e1 + np.sin(phi) * e2
+    u_new = np.cos(theta) * u_curr + np.sin(theta) * u_phi
+    return u_new / np.linalg.norm(u_new)
+
+
+def sigmoid(z):
+    return 1.0 / (1.0 + np.exp(-z))
+
+
+# -----------------------------------------------------------
+# Continuous FOV membership & dual coverage in whitened space
+# -----------------------------------------------------------
+
+def c_tilde_i(y_samples, Lp, p_hat, p_i, u_i, cos_theta_h, kappa_sigma):
+    """
+    c~_i(y) = sigma( kappa_sigma( ((p - p_i)/||p-p_i||)·u_i - cos(theta_h)) )
+    with p = Lp y + p_hat
+    """
+    p_samples = (Lp @ y_samples.T).T + p_hat[None, :]
+    v = p_samples - p_i[None, :]
+    v_norm = np.linalg.norm(v, axis=1, keepdims=True)
+    v_unit = v / np.maximum(v_norm, 1e-12)
+
+    cos_ang = np.einsum('ij,j->i', v_unit, u_i)
+    z = kappa_sigma * (cos_ang - cos_theta_h)
+    return sigmoid(z)
+
+
+def k2_tilde(y_samples, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma):
+    """Eq. (k2ty) continuous dual coverage."""
+    M = len(p_agents)
+    N = y_samples.shape[0]
+    C = np.zeros((M, N))
+    for i in range(M):
+        C[i] = c_tilde_i(y_samples, Lp, p_hat, p_agents[i], u_agents[i],
+                         cos_theta_h, kappa_sigma)
+
+    one_minus_C = 1.0 - C
+    prod_all = np.prod(one_minus_C, axis=0)
+
+    k2 = np.zeros(N)
+    for i in range(M):
+        for j in range(i+1, M):  # <-- i < j (no i=j terms)
+            denom = one_minus_C[i] * one_minus_C[j]
+            prod_excl = prod_all / np.maximum(denom, 1e-12)
+            k2 += C[i] * C[j] * prod_excl
+
+    return k2
+
+
+def J_t_dual_coverage(
+    p_hat, P_p, p_agents, u_agents,
+    theta_h, d_M=3.0, kappa_sigma=100.0,
+    n_mc=20000, seed=None, y_samples_cached=None
+):
+    """
+    Eq. (Jty1) Monte-Carlo estimate.
+    If y_samples_cached is provided, reuse the same MC points for smoother gradients.
+    """
+    rng = np.random.default_rng(seed)
+    Lp = np.linalg.cholesky(P_p)
+
+    if y_samples_cached is None:
+        y = sample_uniform_ball(n_mc, radius=d_M, dim=3, rng=rng)
+    else:
+        y = y_samples_cached
+        n_mc = y.shape[0]
+
+    y2 = np.sum(y**2, axis=1)
+    w = np.exp(-0.5 * y2)
+
+    cos_theta_h = np.cos(theta_h)
+    k2 = k2_tilde(y, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma)
+
+    V_ball = (4.0/3.0) * np.pi * d_M**3
+    integral_est = V_ball * np.mean(w * k2)
+
+    J = integral_est / ((2*np.pi)**1.5)
+    return J
+
+
+# -----------------------------------------
+# Joint L-BFGS-B optimization over all agents
+# -----------------------------------------
+
+def unpack_angles(x, M):
+    """x = [theta1,phi1,...,thetaM,phiM] -> arrays."""
+    thetas = x[0::2]
+    phis   = x[1::2]
+    return thetas, phis
+
+
+def angles_to_pointings(x, p_agents, u_curr_agents, theta_lower, theta_upper, M):
+    """Convert joint angles to u_agents (M,3) with per-agent bounds."""
+    thetas, phis = unpack_angles(x, M)
+    u_agents = np.zeros_like(u_curr_agents, dtype=float)
+    for i in range(M):
+        # enforce per-agent θ-bounds softly (optimizer also has hard bounds)
+        th = np.clip(thetas[i], theta_lower[i], theta_upper[i])
+        ph = phis[i] % (2*np.pi)
+        u_agents[i] = u_from_cap(u_curr_agents[i], th, ph)
+    return u_agents
+
+
+def make_cached_y(P_p, d_M, n_mc, seed):
+    """Pre-draw y samples once to stabilize finite-diff gradients."""
+    rng = np.random.default_rng(seed)
+    y = sample_uniform_ball(n_mc, radius=d_M, dim=3, rng=rng)
+    return y
+
+
+def finite_diff_grad(f, x, eps=1e-4):
+    """Central finite-difference gradient."""
+    g = np.zeros_like(x)
+    for i in range(len(x)):
+        xp = x.copy(); xm = x.copy()
+        xp[i] += eps; xm[i] -= eps
+        g[i] = (f(xp) - f(xm)) / (2*eps)
+    return -g  # gradient of -J
+
+
+### NEW: helper to estimate theta_min and theta_max from the uncertainty ellipsoid
 def objective_joint_ellipsoid(
     x, Lp, p_hat, P_p, p_agents, u_curr_agents, theta_s_list,
     theta_h, d_M, kappa_sigma, y_cached,
@@ -504,26 +545,63 @@ def plot_fov_wedge(ax, agent_pos, pointing_angle, half_angle,
             color=color, alpha=alpha)
 
 
-def orthonormal_basis_from_u(u):
-    """Two orthonormal vectors spanning plane normal to u."""
-    u = u / np.linalg.norm(u)
-    a = np.array([1.0, 0.0, 0.0])
-    if abs(np.dot(a, u)) > 0.9:
-        a = np.array([0.0, 1.0, 0.0])
-    e1 = a - np.dot(a, u) * u
-    e1 /= np.linalg.norm(e1)
-    e2 = np.cross(u, e1)
-    e2 /= np.linalg.norm(e2)
-    return e1, e2
+def coverage_count_2d(grid_pts, p_agents_2d, pointing_angles, theta_h):
+    """
+    grid_pts: (N,2) array of xy points
+    p_agents_2d: (M,2)
+    pointing_angles: (M,) angles in radians (from +y axis CCW)
+    theta_h: FOV half-angle (scalar, radians)
+    Returns:
+        counts: (N,) array, number of FOVs that cover each point
+    """
+
+    # direction vector for planar angle = rotation from +y
+    def dir_from_plus_y(theta):
+        return np.stack([np.sin(theta), np.cos(theta)], axis=-1)  # (M,2)
+
+    M = len(p_agents_2d)
+    dirs = dir_from_plus_y(pointing_angles)  # (M,2)
+    cos_th = np.cos(theta_h)
+
+    counts = np.zeros(len(grid_pts), dtype=int)
+
+    for i in range(M):
+        v = grid_pts - p_agents_2d[i]             # (N,2)
+        v_norm = np.linalg.norm(v, axis=1)
+        good = v_norm > 1e-9                      # avoid divide-by-zero
+        v_unit = np.zeros_like(v)
+        v_unit[good] = v[good] / v_norm[good,None]
+
+        cosang = np.sum(v_unit * dirs[i], axis=1)
+        inside = cosang >= cos_th                 # boolean mask
+        counts += inside.astype(int)
+
+    return counts
 
 
-def u_from_cap(u_curr, theta, phi):
-    """Eq. (uit): candidate pointing vector on spherical cap around u_curr."""
-    u_curr = u_curr / np.linalg.norm(u_curr)
-    e1, e2 = orthonormal_basis_from_u(u_curr)
-    u_phi = np.cos(phi) * e1 + np.sin(phi) * e2
-    u_new = np.cos(theta) * u_curr + np.sin(theta) * u_phi
-    return u_new / np.linalg.norm(u_new)
+def sample_from_uncertainty_2d(mu, Sigma, d_mahal=None, rng=None, max_tries=1000):
+    """
+    Draw a random sample from N(mu, Sigma).
+    If d_mahal is provided, reject samples with Mahalanobis distance > d_mahal.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    L = np.linalg.cholesky(Sigma)
+
+    for _ in range(max_tries):
+        z = rng.normal(size=2)          # N(0, I)
+        x = mu + L @ z                  # N(mu, Sigma)
+        if d_mahal is None:
+            return x
+        # Mahalanobis distance
+        dm2 = z @ z                     # since x = mu + L z => (x-mu)^T Sigma^{-1} (x-mu) = z^T z
+        if dm2 <= d_mahal**2:
+            return x
+
+    # Fallback if rejection fails (very unlikely for moderate d_mahal)
+    return x
+
 
 def compute_J_grid_thetas_pair(
     p_hat, P_p, p_agents, u_curr_agents,
@@ -585,65 +663,6 @@ def compute_J_grid_thetas_pair(
     THJ_deg = np.rad2deg(THJ)
     return THI_deg, THJ_deg, J_grid
 
-
-def coverage_count_2d(grid_pts, p_agents_2d, pointing_angles, theta_h):
-    """
-    grid_pts: (N,2) array of xy points
-    p_agents_2d: (M,2)
-    pointing_angles: (M,) angles in radians (from +y axis CCW)
-    theta_h: FOV half-angle (scalar, radians)
-    Returns:
-        counts: (N,) array, number of FOVs that cover each point
-    """
-
-    # direction vector for planar angle = rotation from +y
-    def dir_from_plus_y(theta):
-        return np.stack([np.sin(theta), np.cos(theta)], axis=-1)  # (M,2)
-
-    M = len(p_agents_2d)
-    dirs = dir_from_plus_y(pointing_angles)  # (M,2)
-    cos_th = np.cos(theta_h)
-
-    counts = np.zeros(len(grid_pts), dtype=int)
-
-    for i in range(M):
-        v = grid_pts - p_agents_2d[i]             # (N,2)
-        v_norm = np.linalg.norm(v, axis=1)
-        good = v_norm > 1e-9                      # avoid divide-by-zero
-        v_unit = np.zeros_like(v)
-        v_unit[good] = v[good] / v_norm[good,None]
-
-        cosang = np.sum(v_unit * dirs[i], axis=1)
-        inside = cosang >= cos_th                 # boolean mask
-        counts += inside.astype(int)
-
-    return counts
-
-
-def sample_from_uncertainty_2d(mu, Sigma, d_mahal=None, rng=None, max_tries=1000):
-    """
-    Draw a random sample from N(mu, Sigma).
-    If d_mahal is provided, reject samples with Mahalanobis distance > d_mahal.
-    """
-    if rng is None:
-        rng = np.random.default_rng()
-
-    L = np.linalg.cholesky(Sigma)
-
-    for _ in range(max_tries):
-        z = rng.normal(size=2)          # N(0, I)
-        x = mu + L @ z                  # N(mu, Sigma)
-        if d_mahal is None:
-            return x
-        # Mahalanobis distance
-        dm2 = z @ z                     # since x = mu + L z => (x-mu)^T Sigma^{-1} (x-mu) = z^T z
-        if dm2 <= d_mahal**2:
-            return x
-
-    # Fallback if rejection fails (very unlikely for moderate d_mahal)
-    return x
-
-
 # ============================================================
 # Your main(), now working
 # ============================================================
@@ -652,7 +671,7 @@ def main():
     # =======================
     # User parameters
     # =======================
-    M = 4
+    M = 5
 
     x_line_min, x_line_max = -1.0, 1.0
     y_line = 0.0
@@ -664,18 +683,19 @@ def main():
     theta_s_list = np.array([np.deg2rad(90.0)] * M)
 
     rng = np.random.default_rng(0)
+    # near +y
     pointing_angles = np.deg2rad(rng.uniform(-1e-5, 1e-5, size=M))
 
-    # 2D covariance
+    # 2D covariance of target
     P_p_2d = np.array([[0.25, 0.1],
                        [-0.1, 0.5]])
 
     d_mahal = 3.0
 
-    seed = int(time.time())
-    print(seed)
-    # seed = 1764192846
-    kappa = 1000
+    # seed = int(time.time())
+    # print(seed)
+    seed = 1764359905
+    kappa = 2000
     # =======================
 
     # 2D positions
@@ -688,10 +708,10 @@ def main():
     p_agents = np.hstack([p_agents_2d, np.zeros((M,1))])           # (M,3)
     p_hat = np.array([p_hat_2d[0], p_hat_2d[1], 0.0])              # (3,)
 
-    # Pad covariance to 3x3 (tiny z variance)1764104794
-    P_p = np.array([[P_p_2d[0,0], P_p_2d[0,1], 0.0],
-                    [P_p_2d[1,0], P_p_2d[1,1], 0.0],
-                    [0.0,         0.0,         1e-4]])
+    # Pad covariance to 3x3 (small z variance)
+    P_p = np.array([[P_p_2d[0, 0], P_p_2d[0, 1], 0.0],
+                    [P_p_2d[1, 0], P_p_2d[1, 1], 0.0],
+                    [0.0,          0.0,          1e-4]])
 
     # Current pointing vectors from planar angles (measured from +y)
     # u = [sin(angle), cos(angle), 0]
@@ -699,7 +719,7 @@ def main():
                               np.cos(pointing_angles),
                               np.zeros(M)], axis=1)
 
-    # ----- Optimize jointly -----
+    # ----- Optimize jointly (θ, φ) with logging -----
     u_star, ang_star, J_star, history = optimize_pointing_lbfgs_joint(
         p_hat, P_p, p_agents, u_curr_agents,
         theta_h, theta_s_list,
@@ -728,22 +748,24 @@ def main():
 
     slew0 = [entry["slew"][0] for entry in history]
     slew1 = [entry["slew"][1] for entry in history]
-    if M == 4:
-        slew2 = [entry["slew"][2] for entry in history]
-        slew3 = [entry["slew"][3] for entry in history]
     J_hist = [entry["J"] for entry in history]
 
+    if M >= 3:
+        slew2 = [entry["slew"][2] for entry in history]
+    if M >= 4:
+        slew3 = [entry["slew"][3] for entry in history]
 
+    # Slew / J_t evolution plots
     if M == 2:
         plt.figure()
         plt.subplot(3, 1, 1)
         plt.plot(np.rad2deg(slew0))
-        plt.ylabel("Slew (deg)")
+        plt.ylabel("Slew 0 (deg)")
         plt.grid(True, alpha=0.3)
 
         plt.subplot(3, 1, 2)
         plt.plot(np.rad2deg(slew1))
-        plt.ylabel("Slew (deg)")
+        plt.ylabel("Slew 1 (deg)")
         plt.grid(True, alpha=0.3)
 
         plt.subplot(3, 1, 3)
@@ -751,20 +773,22 @@ def main():
         plt.xlabel("Logged step")
         plt.ylabel("J_t")
         plt.grid(True, alpha=0.3)
+
     elif M == 3:
         plt.figure()
         plt.subplot(4, 1, 1)
         plt.plot(np.rad2deg(slew0))
-        plt.ylabel("Slew (deg)")
+        plt.ylabel("Slew 0 (deg)")
         plt.grid(True, alpha=0.3)
 
         plt.subplot(4, 1, 2)
         plt.plot(np.rad2deg(slew1))
-        plt.ylabel("Slew (deg)")
+        plt.ylabel("Slew 1 (deg)")
         plt.grid(True, alpha=0.3)
+
         plt.subplot(4, 1, 3)
         plt.plot(np.rad2deg(slew2))
-        plt.ylabel("Slew (deg)")
+        plt.ylabel("Slew 2 (deg)")
         plt.grid(True, alpha=0.3)
 
         plt.subplot(4, 1, 4)
@@ -772,25 +796,27 @@ def main():
         plt.xlabel("Logged step")
         plt.ylabel("J_t")
         plt.grid(True, alpha=0.3)
+
     else:
         plt.figure()
         plt.subplot(5, 1, 1)
         plt.plot(np.rad2deg(slew0))
-        plt.ylabel("Slew (deg)")
+        plt.ylabel("Slew 0 (deg)")
         plt.grid(True, alpha=0.3)
 
         plt.subplot(5, 1, 2)
         plt.plot(np.rad2deg(slew1))
-        plt.ylabel("Slew (deg)")
+        plt.ylabel("Slew 1 (deg)")
         plt.grid(True, alpha=0.3)
+
         plt.subplot(5, 1, 3)
         plt.plot(np.rad2deg(slew2))
-        plt.ylabel("Slew (deg)")
+        plt.ylabel("Slew 2 (deg)")
         plt.grid(True, alpha=0.3)
 
         plt.subplot(5, 1, 4)
         plt.plot(np.rad2deg(slew3))
-        plt.ylabel("Slew (deg)")
+        plt.ylabel("Slew 3 (deg)")
         plt.grid(True, alpha=0.3)
 
         plt.subplot(5, 1, 5)
@@ -799,100 +825,95 @@ def main():
         plt.ylabel("J_t")
         plt.grid(True, alpha=0.3)
 
-
     plt.tight_layout()
 
-
-
-
     # Convert optimized 3D u back to planar pointing angles
-    pointing_angles_opt = np.arctan2(u_star[:,0], u_star[:,1])
+    pointing_angles_opt = np.arctan2(u_star[:, 0], u_star[:, 1])
 
-    # ----- Plot -----
+    # ----- Coverage shading + geometry plot -----
     fig, ax = plt.subplots(figsize=(8, 6))
 
-    # ----- Coverage shading background -----
-    Nx = 500  # resolution
+    # Background coverage map
+    Nx = 500
     Ny = 500
-
-    # grid covering plot range
     xg = np.linspace(x_line_min - 5, x_line_max + 5, Nx)
     yg = np.linspace(y_line - 1, y_t_max + 8, Ny)
     XX, YY = np.meshgrid(xg, yg)
-    grid = np.stack([XX.ravel(), YY.ravel()], axis=1)  # (Nx*Ny, 2)
+    grid = np.stack([XX.ravel(), YY.ravel()], axis=1)
 
     coverage = coverage_count_2d(
         grid,
         p_agents_2d,
-        pointing_angles_opt,  # NOTE: use optimized angles
+        pointing_angles_opt,
         theta_h
     )
-
     coverage_img = coverage.reshape(Ny, Nx)
 
-    # color map:
-    # 0-covered = white,
-    # 1-covered = blue-ish,
-    # 2-covered = green-ish,
-    # >=3-covered = red
-    cmap = plt.cm.get_cmap("viridis", 4)
+    from matplotlib.colors import ListedColormap, BoundaryNorm
     cmap_colors = np.array([
         [1, 1, 1, 1],  # 0 coverage = white
         [0.6, 0.8, 1, 1],  # 1 coverage = light blue
         [0.2, 0.7, 0.2, 1],  # 2 coverage = green (dual)
-        [1.0, 0.0, 0.0, 1]  # >=3 coverage = red (triple)
+        [1.0, 0.0, 0.0, 1]  # ≥3 coverage = red (triple+)
     ])
 
-    from matplotlib.colors import ListedColormap
     cov_cmap = ListedColormap(cmap_colors)
+
+    # boundaries for bins around 0,1,2,3
+    bounds = [-0.5, 0.5, 1.5, 2.5, 3.5]
+    norm = BoundaryNorm(bounds, cov_cmap.N)
 
     ax.imshow(
         coverage_img,
         extent=[xg.min(), xg.max(), yg.min(), yg.max()],
         origin='lower',
         cmap=cov_cmap,
+        norm=norm,  # <-- key line
         alpha=0.25,
         zorder=-5
     )
 
+    # FOV wedges and agents
     for i, pos in enumerate(p_agents_2d):
         plot_fov_wedge(ax, pos, pointing_angles_opt[i], theta_h,
                        ray_length=10.0, color='tab:blue', alpha=0.12, lw=1.5)
         ax.scatter(pos[0], pos[1], color='tab:blue', s=60)
-        ax.text(pos[0], pos[1]-0.35, f"A{i}", color='tab:blue', ha='center', va='top')
+        ax.text(pos[0], pos[1] - 0.35, f"A{i}", color='tab:blue',
+                ha='center', va='top')
 
-    ax.scatter(p_hat_2d[0], p_hat_2d[1], color='tab:red', s=80, marker='x', linewidths=2)
+    # Target mean + ellipse
+    ax.scatter(p_hat_2d[0], p_hat_2d[1], color='tab:red', s=80,
+               marker='x', linewidths=2)
     ax.plot(ellipse_pts[:, 0], ellipse_pts[:, 1], color='tab:red', lw=2)
-    ax.fill(ellipse_pts[:, 0], ellipse_pts[:, 1], color='tab:red', alpha=0.10)
+    ax.fill(ellipse_pts[:, 0], ellipse_pts[:, 1],
+            color='tab:red', alpha=0.10)
 
-    ax.plot([x_line_min, x_line_max], [y_line, y_line], color='k', lw=1, alpha=0.3)
+    # Agent line
+    ax.plot([x_line_min, x_line_max], [y_line, y_line],
+            color='k', lw=1, alpha=0.3)
 
-    # Random sample from the uncertainty distribution (within the same Mahalanobis ball)
-    rng = np.random.default_rng(seed + 42)  # or any seed
-    sample_pt = sample_from_uncertainty_2d(p_hat_2d, P_p_2d, d_mahal=d_mahal, rng=rng)
-
-    # Plot it as a green circle
+    # Random sample from uncertainty distribution (within same d_M)
+    rng2 = np.random.default_rng(seed + 42)
+    sample_pt = sample_from_uncertainty_2d(p_hat_2d, P_p_2d,
+                                           d_mahal=d_mahal, rng=rng2)
     ax.scatter(sample_pt[0], sample_pt[1],
-               s=60, facecolors='none', edgecolors='green', linewidths=2,
-               label='Random sample')
-
+               s=60, facecolors='none', edgecolors='green',
+               linewidths=2, label='Random sample')
 
     ax.set_aspect('equal', adjustable='box')
     ax.set_xlabel("x")
     ax.set_ylabel("y")
-    ax.set_title("2D Agents with Optimized Dual-Coverage FOVs")
+    ax.set_title("2D Agents with Optimized Dual-Coverage FOVs (θ/φ parametrization)")
 
-    ax.set_xlim(x_line_min-5, x_line_max+5)
-    ax.set_ylim(y_line-1, y_t_max+8)
-
+    ax.set_xlim(x_line_min - 5, x_line_max + 5)
+    ax.set_ylim(y_line - 1, y_t_max + 8)
     plt.grid(alpha=0.25)
+    plt.legend(loc='upper right')
 
-
+    # Optional: J_t(θ_1, θ_2) surface, like before
     if False:
         fixed_thetas = [0, 0, 17.08]
 
-
-        # ----- Brute-force J_t(theta1, theta2) grid for M=2, phi_i=0 -----
         TH12_1, TH12_2, J12 = compute_J_grid_thetas_pair(
             p_hat, P_p, p_agents, u_curr_agents,
             theta_h, theta_s_list,
@@ -924,8 +945,6 @@ def main():
         plt.ylabel(r'$\theta_2$ (deg)')
         plt.title(r'$J_t$ contour for $\phi_1=\phi_2=0$')
         plt.grid(alpha=0.3)
-
-
 
     plt.show()
 
