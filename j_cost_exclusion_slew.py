@@ -1,6 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import time
+
+from google.protobuf.internal.wire_format import INT32_MAX
 from mpl_toolkits.mplot3d import Axes3D  # needed for 3D EMS sphere plot
 try:
     from scipy.optimize import minimize
@@ -351,6 +353,47 @@ def estimate_theta_bounds_from_ellipsoid(p_hat, P_p, p_agents, u_curr_agents,
     return theta_min, theta_max
 
 
+def theta_s_of_dt(delta_t_s, alpha_max, omega_max):
+    """
+    Compute the maximum allowable slew angle θ_{s,t} for a given slew time Δt_s.
+
+    Implements the piecewise definition:
+        Δt_crit = 2 ω_max / α_max
+
+        θ_{s,t} = α_max Δt_s^2 / 4                         if Δt_s <  Δt_crit
+                  (Δt_s - ω_max / α_max) ω_max            if Δt_s >  Δt_crit
+
+    At Δt_s = Δt_crit both expressions are equal, so we use the first branch
+    for Δt_s <= Δt_crit and the second for Δt_s > Δt_crit.
+
+    Parameters
+    ----------
+    delta_t_s : float or array_like
+        Slew time Δt_s (seconds).
+    alpha_max : float
+        Maximum angular acceleration α_max (rad/s^2).
+    omega_max : float
+        Maximum angular rate ω_max (rad/s).
+
+    Returns
+    -------
+    theta_s_t : float or ndarray
+        Maximum allowable slew angle θ_{s,t} (radians), matching the shape of delta_t_s.
+    """
+    delta_t_s = np.asarray(delta_t_s, dtype=float)
+    delta_t_crit = 2.0 * omega_max / alpha_max
+
+    theta_s_t = np.where(
+        delta_t_s <= delta_t_crit,
+        0.25 * alpha_max * delta_t_s**2,
+        (delta_t_s - omega_max / alpha_max) * omega_max
+    )
+
+    # Return scalar if input was scalar
+    if np.isscalar(delta_t_s):
+        return float(theta_s_t)
+    return theta_s_t
+
 
 def optimize_pointing_lbfgs_joint(
     p_hat, P_p, p_agents, u_curr_agents,
@@ -371,6 +414,7 @@ def optimize_pointing_lbfgs_joint(
       angles_best : list[(theta_i, phi_i)]
       J_best      : best J_t value
       history     : list of dicts with state logs
+      best_cost   : best objective value (cost = -J_t + penalty)
     """
     rng = np.random.default_rng(seed)
     M = len(p_agents)
@@ -386,8 +430,9 @@ def optimize_pointing_lbfgs_joint(
 
     infeasible_mask = theta_upper < theta_lower
     if np.any(infeasible_mask):
-        print("Infeasible: slew limit smaller than required to reach ellipsoid.")
-        return None, None, 0.0, []
+        print(f"Infeasible: slew limit smaller than required to reach ellipsoid {np.rad2deg(theta_upper)}, {np.rad2deg(theta_lower)}.")
+        # NOTE: now returning 5 values
+        return None, None, 0.0, [], np.inf
 
     # MC cache
     y_cached = make_cached_y(P_p, d_M, n_mc, seed=seed+123)
@@ -428,7 +473,8 @@ def optimize_pointing_lbfgs_joint(
         })
 
     best_x = None
-    best_f = np.inf  # minimize f = -J_t + penalty
+    best_f = np.inf   # objective = cost = -J_t + penalty
+    best_cost = np.inf
 
     x0_mean = init_theta_phi_to_mean(
         p_hat, p_agents, u_curr_agents,
@@ -491,7 +537,9 @@ def optimize_pointing_lbfgs_joint(
         if f_star < best_f:
             best_f = f_star
             best_x = x_star.copy()
+            best_cost = f_star   # store best objective
 
+    # Unpack best and compute J_t
     thetas_best, phis_best = unpack_angles(best_x, M)
     u_best = angles_to_pointings(best_x, p_agents, u_curr_agents, theta_lower, theta_upper, M)
 
@@ -502,7 +550,7 @@ def optimize_pointing_lbfgs_joint(
     )
 
     angles_best = [(thetas_best[i], phis_best[i]) for i in range(M)]
-    return u_best, angles_best, J_best, history
+    return u_best, angles_best, J_best, history, best_cost
 
 
 def sample_agents_on_line(N, x_min=-5.0, x_max=5.0, y_line=0.0, seed=None):
@@ -674,7 +722,7 @@ def main():
     # =======================
     # User parameters
     # =======================
-    M = 3
+    M = 2
 
     x_line_min, x_line_max = -1.0, 1.0
     y_line = 0.0
@@ -682,176 +730,217 @@ def main():
     x_t_min, x_t_max = -3.0, 3.0
     y_t_min, y_t_max = 1.0, 5.0
 
+    # -----------------------
+    # Spacecraft attitude specs
+    # -----------------------
     theta_h = np.deg2rad(2.5)
-    theta_s_list = np.array([np.deg2rad(90.0)] * M)
+    tau_max = 0.004
+    h_max = 0.015
+    m_m = 50
+    l_m = 0.5
+    m_t = 5
+    d_t = 0.28
+    z_0 = 0.3
+    I_max = (1 / 6) * m_m * (l_m / 2) ** 2 + (1 / 2) * m_t * (d_t / 2) ** 2 + m_t * z_0 ** 2
+    alpha_max = 1.63 * tau_max / I_max
+    omega_max = 1.63 * h_max / I_max
+
+    # Observation epochs (slew windows)
+    delta_ts = np.linspace(10.0, 70.0, 6)  # e.g. seconds between re-pointings
+
+    # -----------------------
+    # Target motion & uncertainty growth
+    # -----------------------
+    # Simple quadratic motion: p_hat(t) = p0 + v * Δt + 0.5 * a * Δt^2
+    v_target = np.array([0.01, 0.02])   # "velocity" in x,y per second
+    a_target = np.array([0.0, -0.0002]) # small acceleration, mostly in y
+
+    # Exponential covariance growth: P(t) = P0 * exp(2 * γ * Δt)
+    growth_rate = 0.02  # γ
 
     rng = np.random.default_rng(0)
 
-    # seed = 1764781082
     seed = int(time.time())
-    print(seed)
+    print("Seed:", seed)
+    # seed = 1764788512
 
-    # near +y
+    # Initial planar pointing (near +y)
     pointing_angles = np.deg2rad(rng.uniform(-1e-5, 1e-5, size=M))
 
     rng = np.random.default_rng(seed)
 
     # --- Base covariance (shape), before random rotation ---
-    P_base = np.array([[0.25, 0.1],
-                       [-0.1, 0.5]])
+    P_base = np.array([[0.025, 0.01],
+                       [-0.01, 0.05]])
 
     phi_r = rng.uniform(0.0, 2.0 * np.pi)
     R = np.array([[np.cos(phi_r), -np.sin(phi_r)],
                   [np.sin(phi_r),  np.cos(phi_r)]])
-    P_p_2d = R @ P_base @ R.T
+    P_p_2d_0 = R @ P_base @ R.T  # initial 2D covariance at t=0
 
     d_mahal = 3.0
     kappa = 2000
 
     # =======================
-    # EMS configuration (example)
+    # EMS configuration
     # =======================
-    # EMS center + radius in 3D; z=0 plane is where we draw 2D cross-section
-    p_em = np.array([0.0, 1.5, 0.0])          # EMS center
-    R_em = 0.3                                # EMS effective radius
-    alpha_s = np.deg2rad(1.0)                 # safety margin
-    lambda_em = 1.0                           # penalty weight (0 => off)
-    beta_zeta = 50.0                          # softplus sharpness
+    p_em = np.array([0.0, 1.5, 0.0])   # EMS center
+    R_em = 0.3                         # EMS effective radius
+    alpha_s = np.deg2rad(1.0)          # safety margin
+    lambda_em = 10.0                    # penalty weight
+    beta_zeta = 1000.0                   # softplus sharpness
 
-    # 2D positions
+    # =======================
+    # Initial geometry
+    # =======================
     p_agents_2d = sample_agents_on_line(M, x_line_min, x_line_max, y_line, seed=seed)
-    p_hat_2d = sample_target_in_front(x_t_min, x_t_max, y_t_min, y_t_max, seed=seed+10)
+    p_hat_2d_0 = sample_target_in_front(x_t_min, x_t_max, y_t_min, y_t_max, seed=seed+10)
 
-    ellipse_pts = mahalanobis_ellipse_points(p_hat_2d, P_p_2d, d_mahal=d_mahal)
+    # 3D embedding of agents
+    p_agents = np.hstack([p_agents_2d, np.zeros((M, 1))])
 
-    # ----- Embed into 3D -----
-    p_agents = np.hstack([p_agents_2d, np.zeros((M,1))])
-    p_hat = np.array([p_hat_2d[0], p_hat_2d[1], 0.0])
+    # Initial 3D covariance (z small)
+    def embed_cov_3d(P2d):
+        return np.array([[P2d[0, 0], P2d[0, 1], 0.0],
+                         [P2d[1, 0], P2d[1, 1], 0.0],
+                         [0.0,        0.0,      1e-4]])
 
-    P_p = np.array([[P_p_2d[0, 0], P_p_2d[0, 1], 0.0],
-                    [P_p_2d[1, 0], P_p_2d[1, 1], 0.0],
-                    [0.0,          0.0,          1e-4]])
-
+    # Initial pointing vectors in 3D
     u_curr_agents = np.stack([np.sin(pointing_angles),
                               np.cos(pointing_angles),
                               np.zeros(M)], axis=1)
 
-    # ----- Optimize jointly (θ, φ) with EMS penalty -----
-    u_star, ang_star, J_star, history = optimize_pointing_lbfgs_joint(
-        p_hat, P_p, p_agents, u_curr_agents,
-        theta_h, theta_s_list,
-        d_M=d_mahal, kappa_sigma=kappa,
-        n_mc=20000, seed=seed, n_restarts=1,
-        p_em=p_em, R_em=R_em,
-        alpha_s=alpha_s, lambda_em=lambda_em,
-        beta_zeta=beta_zeta
-    )
+    # =======================
+    # Epoch loop
+    # =======================
+    results = []
 
-    if u_star is None:
-        print("No feasible solution given the slew angle constraints.")
+    for dt in delta_ts:
+        # Time-dependent slew limit θ_s,t (same for all S/C for this epoch)
+        theta_s_t = float(theta_s_of_dt(dt, alpha_max, omega_max))
+        # Cap physically to < 180 deg
+        theta_s_t = np.clip(theta_s_t, 0.0, np.deg2rad(179.0))
+        theta_s_list_t = np.full(M, theta_s_t)
+
+        # Evolve target mean (quadratic) in 2D
+        p_hat_2d_t = p_hat_2d_0 + v_target * dt + 0.5 * a_target * dt**2
+
+        # Evolve covariance (scalar growth on 2D base cov)
+        scale = np.exp(growth_rate * dt)
+        P_p_2d_t = (scale**2) * P_p_2d_0
+
+        # Embed in 3D
+        p_hat_t = np.array([p_hat_2d_t[0], p_hat_2d_t[1], 0.0])
+        P_p_t = embed_cov_3d(P_p_2d_t)
+
+        # Optimize pointing at this epoch, starting from current boresights
+        u_star, ang_star, J_star, history, cost_star = optimize_pointing_lbfgs_joint(
+            p_hat_t, P_p_t, p_agents, u_curr_agents,
+            theta_h, theta_s_list_t,
+            d_M=d_mahal, kappa_sigma=kappa,
+            n_mc=20000, seed=seed, n_restarts=1,
+            p_em=p_em, R_em=R_em,
+            alpha_s=alpha_s, lambda_em=lambda_em,
+            beta_zeta=beta_zeta
+        )
+
+        if u_star is None:
+            print(f"No feasible solution at Δt = {dt:.2f} (slew constraints). Skipping.")
+            continue
+
+        # Save epoch result
+        results.append({
+            "dt": dt,
+            "J": J_star,
+            "cost": cost_star,  # <--- new
+            "p_hat_2d": p_hat_2d_t.copy(),
+            "P_p_2d": P_p_2d_t.copy(),
+            "u_star": u_star.copy(),
+            "ang_star": ang_star,
+            "theta_s": theta_s_t,
+        })
+
+        # Roll optimized attitudes forward as new "current" for next epoch
+        # u_curr_agents = u_star.copy()
+
+    if not results:
+        print("No feasible epochs found.")
         return
 
-    print("Best J_t:", J_star)
+    # =======================
+    # Select epochs for visualization
+    # =======================
+    J_values = np.array([r["J"] for r in results])
+    cost_values = np.array([r["cost"] for r in results])
+    dts_res = np.array([r["dt"] for r in results])
 
-    for i, (theta_i, phi_i) in enumerate(ang_star):
-        dot = np.dot(u_curr_agents[i], u_star[i])
-        dot = np.clip(dot, -1.0, 1.0)
-        slew = np.arccos(dot)
+    # Sort indices by J (ascending -> worst first)
+    order = np.argsort(J_values)
 
-        print(f"\nAgent {i}:")
-        print(f"   theta = {theta_i:.4f} rad   ({np.rad2deg(theta_i):.2f} deg)")
-        print(f"   phi   = {phi_i:.4f} rad   ({np.rad2deg(phi_i):.2f} deg)")
-        print(f"   u*    = {u_star[i]}")
-        print(f"   slew  = {slew:.4f} rad   ({np.rad2deg(slew):.2f} deg)")
+    # ===== Plot J_t and cost vs epoch (Δt) =====
+    fig_tc, ax1 = plt.subplots(figsize=(8, 4))
 
-    # ---- Extract history for plotting ----
-    slew0 = [entry["slew"][0] for entry in history]
-    slew1 = [entry["slew"][1] for entry in history]
-    J_hist = [entry["J"] for entry in history]
+    line1, = ax1.plot(dts_res, J_values, marker='o', linestyle='-',
+                      label=r"$J_t$")
+    ax1.set_xlabel(r"Epoch time $\Delta t_s$ [s]")
+    ax1.set_ylabel(r"$J_t$", color=line1.get_color())
+    ax1.tick_params(axis='y', labelcolor=line1.get_color())
 
-    if M >= 3:
-        slew2 = [entry["slew"][2] for entry in history]
-    if M >= 4:
-        slew3 = [entry["slew"][3] for entry in history]
+    ax2 = ax1.twinx()
+    line2, = ax2.plot(dts_res, -cost_values, marker='x', linestyle='--',
+                      label="Cost (objective)")
+    ax2.set_ylabel("Cost = objective", color=line2.get_color())
+    ax2.tick_params(axis='y', labelcolor=line2.get_color())
 
-    # Slew / J_t evolution plots
-    if M == 2:
-        plt.figure()
-        plt.subplot(3, 1, 1)
-        plt.plot(np.rad2deg(slew0))
-        plt.ylabel("Slew 0 (deg)")
-        plt.grid(True, alpha=0.3)
+    # Combined legend
+    lines = [line1, line2]
+    labels = [l.get_label() for l in lines]
+    ax1.legend(lines, labels, loc='best')
 
-        plt.subplot(3, 1, 2)
-        plt.plot(np.rad2deg(slew1))
-        plt.ylabel("Slew 1 (deg)")
-        plt.grid(True, alpha=0.3)
+    ax1.grid(alpha=0.3)
+    fig_tc.tight_layout()
 
-        plt.subplot(3, 1, 3)
-        plt.plot(J_hist)
-        plt.xlabel("Logged step")
-        plt.ylabel("J_t")
-        plt.grid(True, alpha=0.3)
+    # Two worst and two best epochs
+    worst_indices = order[:2]
+    best_indices = order[-2:][::-1]
 
-    elif M == 3:
-        plt.figure()
-        plt.subplot(4, 1, 1)
-        plt.plot(np.rad2deg(slew0))
-        plt.ylabel("Slew 0 (deg)")
-        plt.grid(True, alpha=0.3)
+    # Epoch nearest to mean J
+    J_mean = J_values.mean()
+    idx_mean = np.argmin(np.abs(J_values - J_mean))
 
-        plt.subplot(4, 1, 2)
-        plt.plot(np.rad2deg(slew1))
-        plt.ylabel("Slew 1 (deg)")
-        plt.grid(True, alpha=0.3)
+    # Epoch nearest to median J
+    J_median = np.median(J_values)
+    idx_median = np.argmin(np.abs(J_values - J_median))
 
-        plt.subplot(4, 1, 3)
-        plt.plot(np.rad2deg(slew2))
-        plt.ylabel("Slew 2 (deg)")
-        plt.grid(True, alpha=0.3)
+    # Collect unique indices in desired visualization order
+    indices_to_plot = []
+    for idx in worst_indices:
+        if idx not in indices_to_plot:
+            indices_to_plot.append(idx)
+    for idx in best_indices:
+        if idx not in indices_to_plot:
+            indices_to_plot.append(idx)
+    if idx_mean not in indices_to_plot:
+        indices_to_plot.append(idx_mean)
+    if idx_median not in indices_to_plot:
+        indices_to_plot.append(idx_median)
 
-        plt.subplot(4, 1, 4)
-        plt.plot(J_hist)
-        plt.xlabel("Logged step")
-        plt.ylabel("J_t")
-        plt.grid(True, alpha=0.3)
+    # =======================
+    # 2D visualization for selected epochs
+    # =======================
+    from matplotlib.colors import ListedColormap, BoundaryNorm
 
-    else:
-        plt.figure()
-        plt.subplot(5, 1, 1)
-        plt.plot(np.rad2deg(slew0))
-        plt.ylabel("Slew 0 (deg)")
-        plt.grid(True, alpha=0.3)
+    cmap_colors = np.array([
+        [1, 1, 1, 1],      # 0 coverage = white
+        [0.6, 0.8, 1, 1],  # 1 coverage = light blue
+        [0.2, 0.7, 0.2, 1],# 2 coverage = green (dual)
+        [1.0, 0.0, 0.0, 1] # ≥3 coverage = red (triple+)
+    ])
+    cov_cmap = ListedColormap(cmap_colors)
+    bounds = [-0.5, 0.5, 1.5, 2.5, 3.5]
+    norm = BoundaryNorm(bounds, cov_cmap.N)
 
-        plt.subplot(5, 1, 2)
-        plt.plot(np.rad2deg(slew1))
-        plt.ylabel("Slew 1 (deg)")
-        plt.grid(True, alpha=0.3)
-
-        plt.subplot(5, 1, 3)
-        plt.plot(np.rad2deg(slew2))
-        plt.ylabel("Slew 2 (deg)")
-        plt.grid(True, alpha=0.3)
-
-        plt.subplot(5, 1, 4)
-        plt.plot(np.rad2deg(slew3))
-        plt.ylabel("Slew 3 (deg)")
-        plt.grid(True, alpha=0.3)
-
-        plt.subplot(5, 1, 5)
-        plt.plot(J_hist)
-        plt.xlabel("Logged step")
-        plt.ylabel("J_t")
-        plt.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-
-    # Convert optimized 3D u back to planar pointing angles
-    pointing_angles_opt = np.arctan2(u_star[:, 0], u_star[:, 1])
-
-    # ----- Coverage shading + geometry plot -----
-    fig, ax = plt.subplots(figsize=(8, 6))
-
+    # Grid extents for plotting
     Nx = 500
     Ny = 500
     xg = np.linspace(x_line_min - 5, x_line_max + 5, Nx)
@@ -859,138 +948,124 @@ def main():
     XX, YY = np.meshgrid(xg, yg)
     grid = np.stack([XX.ravel(), YY.ravel()], axis=1)
 
-    coverage = coverage_count_2d(
-        grid,
-        p_agents_2d,
-        pointing_angles_opt,
-        theta_h
-    )
+    for idx in indices_to_plot:
+        res = results[idx]
+        dt = res["dt"]
+        J_star = res["J"]
+        cost_star = res["cost"]  # <--- new
+        p_hat_2d_t = res["p_hat_2d"]
+        P_p_2d_t = res["P_p_2d"]
+        u_star = res["u_star"]
+        theta_s_t = res["theta_s"]
 
-    coverage_img = coverage.reshape(Ny, Nx)
+        ang_star = res["ang_star"]  # list of (theta_i, phi_i) for all spacecraft
 
-    from matplotlib.colors import ListedColormap, BoundaryNorm
-    cmap_colors = np.array([
-        [1, 1, 1, 1],      # 0 coverage = white
-        [0.6, 0.8, 1, 1],  # 1 coverage = light blue
-        [0.2, 0.7, 0.2, 1],# 2 coverage = green (dual)
-        [1.0, 0.0, 0.0, 1] # ≥3 coverage = red (triple+)
-    ])
+        # Build legend text items for angles:
+        angle_legend = []
+        for i, (theta_i, phi_i) in enumerate(ang_star):
+            angle_legend.append(
+                f"A{i}: θ={np.rad2deg(theta_i):.1f}°, φ={np.rad2deg(phi_i):.1f}°"
+            )
+        angle_legend_text = "\n".join(angle_legend)
 
-    cov_cmap = ListedColormap(cmap_colors)
-    bounds = [-0.5, 0.5, 1.5, 2.5, 3.5]
-    norm = BoundaryNorm(bounds, cov_cmap.N)
+        # Convert optimized 3D u back to planar pointing angles
+        pointing_angles_opt = np.arctan2(u_star[:, 0], u_star[:, 1])
 
-    ax.imshow(
-        coverage_img,
-        extent=[xg.min(), xg.max(), yg.min(), yg.max()],
-        origin='lower',
-        cmap=cov_cmap,
-        norm=norm,
-        alpha=0.25,
-        zorder=-5
-    )
+        # Coverage map
+        coverage = coverage_count_2d(
+            grid,
+            p_agents_2d,
+            pointing_angles_opt,
+            theta_h
+        )
+        coverage_img = coverage.reshape(Ny, Nx)
 
-    # FOV wedges and agents
-    for i, pos in enumerate(p_agents_2d):
-        plot_fov_wedge(ax, pos, pointing_angles_opt[i], theta_h,
-                       ray_length=10.0, color='tab:blue', alpha=0.12, lw=1.5)
-        ax.scatter(pos[0], pos[1], color='tab:blue', s=60)
-        ax.text(pos[0], pos[1] - 0.35, f"A{i}", color='tab:blue',
-                ha='center', va='top')
+        # Ellipse at this epoch
+        ellipse_pts = mahalanobis_ellipse_points(p_hat_2d_t, P_p_2d_t, d_mahal=d_mahal)
 
-    # Target mean + ellipse
-    ax.scatter(p_hat_2d[0], p_hat_2d[1], color='tab:red', s=80,
-               marker='x', linewidths=2)
-    ax.plot(ellipse_pts[:, 0], ellipse_pts[:, 1], color='tab:red', lw=2)
-    ax.fill(ellipse_pts[:, 0], ellipse_pts[:, 1],
-            color='tab:red', alpha=0.10)
+        fig, ax = plt.subplots(figsize=(8, 6))
 
-    # Agent line
-    ax.plot([x_line_min, x_line_max], [y_line, y_line],
-            color='k', lw=1, alpha=0.3)
+        ax.imshow(
+            coverage_img,
+            extent=[xg.min(), xg.max(), yg.min(), yg.max()],
+            origin='lower',
+            cmap=cov_cmap,
+            norm=norm,
+            alpha=0.25,
+            zorder=-5
+        )
 
-    # Random sample from uncertainty distribution (within same d_M)
-    rng2 = np.random.default_rng(seed + 42)
-    sample_pt = sample_from_uncertainty_2d(p_hat_2d, P_p_2d,
-                                           d_mahal=d_mahal, rng=rng2)
-    ax.scatter(sample_pt[0], sample_pt[1],
-               s=60, facecolors='none', edgecolors='green',
-               linewidths=2, label='Random sample')
+        # FOV wedges and agents
+        for i, pos in enumerate(p_agents_2d):
+            plot_fov_wedge(ax, pos, pointing_angles_opt[i], theta_h,
+                           ray_length=10.0, color='tab:blue', alpha=0.12, lw=1.5)
+            ax.scatter(pos[0], pos[1], color='tab:blue', s=60)
+            ax.text(pos[0], pos[1] - 0.35, f"A{i}", color='tab:blue',
+                    ha='center', va='top')
 
-    # ===== EMS sphere cross-section in 2D (z=0 plane) =====
-    if R_em > 0.0:
-        z_plane = 0.0
-        dz = z_plane - p_em[2]
-        if abs(dz) <= R_em:
-            r_xy = np.sqrt(R_em**2 - dz**2)
-            theta_c = np.linspace(0, 2*np.pi, 200)
-            x_c = p_em[0] + r_xy * np.cos(theta_c)
-            y_c = p_em[1] + r_xy * np.sin(theta_c)
-            ax.plot(x_c, y_c, color='orange', lw=2, label='EMS sphere (cross-section)')
-            ax.fill(x_c, y_c, color='orange', alpha=0.1)
-            ax.scatter(p_em[0], p_em[1], color='orange', s=60, marker='o')
-            ax.text(p_em[0], p_em[1] + 0.3, "EMS", color='orange',
-                    ha='center', va='bottom')
+        # Target mean + ellipse
+        ax.scatter(p_hat_2d_t[0], p_hat_2d_t[1], color='tab:red', s=80,
+                   marker='x', linewidths=2)
+        ax.plot(ellipse_pts[:, 0], ellipse_pts[:, 1], color='tab:red', lw=2)
+        ax.fill(ellipse_pts[:, 0], ellipse_pts[:, 1],
+                color='tab:red', alpha=0.10)
 
-    ax.set_aspect('equal', adjustable='box')
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    ax.set_title("2D Agents with Optimized Dual-Coverage FOVs + EMS Exclusion")
+        # Agent line
+        ax.plot([x_line_min, x_line_max], [y_line, y_line],
+                color='k', lw=1, alpha=0.3)
 
-    ax.set_xlim(x_line_min - 5, x_line_max + 5)
-    ax.set_ylim(y_line - 1, y_t_max + 8)
-    plt.grid(alpha=0.25)
-    plt.legend(loc='upper right')
+        # EMS sphere cross-section in 2D (z=0 plane)
+        if R_em > 0.0:
+            z_plane = 0.0
+            dz = z_plane - p_em[2]
+            if abs(dz) <= R_em:
+                r_xy = np.sqrt(R_em**2 - dz**2)
+                theta_c = np.linspace(0, 2*np.pi, 200)
+                x_c = p_em[0] + r_xy * np.cos(theta_c)
+                y_c = p_em[1] + r_xy * np.sin(theta_c)
+                ax.plot(x_c, y_c, color='orange', lw=2, label='EMS sphere (cross-section)')
+                ax.fill(x_c, y_c, color='orange', alpha=0.1)
+                ax.scatter(p_em[0], p_em[1], color='orange', s=60, marker='o')
+                ax.text(p_em[0], p_em[1] + 0.3, "EMS", color='orange',
+                        ha='center', va='bottom')
 
-    # ===== 3D visualization of agents, target mean, and EMS sphere =====
-    if R_em > 0.0:
-        fig3d = plt.figure(figsize=(7, 6))
-        ax3d = fig3d.add_subplot(111, projection='3d')
+        ax.set_aspect('equal', adjustable='box')
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
 
-        # EMS sphere
-        u_s = np.linspace(0, 2*np.pi, 50)
-        v_s = np.linspace(0, np.pi, 50)
-        uu, vv = np.meshgrid(u_s, v_s)
+        # Label what kind of epoch this is in the title
+        tag = []
+        if idx in worst_indices:
+            tag.append("worst")
+        if idx in best_indices:
+            tag.append("best")
+        if idx == idx_mean:
+            tag.append("mean-near")
+        if idx == idx_median:
+            tag.append("median-near")
+        tag_str = ", ".join(tag) if tag else "epoch"
 
-        x_s = p_em[0] + R_em * np.cos(uu) * np.sin(vv)
-        y_s = p_em[1] + R_em * np.sin(uu) * np.sin(vv)
-        z_s = p_em[2] + R_em * np.cos(vv)
+        ax.set_title(
+            f"t = {dt:.1f} s  |  "
+            f"θₛ = {np.rad2deg(theta_s_t):.1f}°  |  "
+            f"J_t = {J_star:.3e}  |  "
+            f"cost = {cost_star:.3e}"
+            f"\n({tag_str})"
+        )
 
-        ax3d.plot_surface(x_s, y_s, z_s, alpha=0.3, color='orange', edgecolor='none')
-        ax3d.scatter(p_em[0], p_em[1], p_em[2], color='orange', s=40)
+        ax.set_xlim(x_line_min - 5, x_line_max + 5)
+        ax.set_ylim(y_line - 1, y_t_max + 8)
+        plt.grid(alpha=0.25)
 
-        # Agents
-        ax3d.scatter(p_agents[:, 0], p_agents[:, 1], p_agents[:, 2],
-                     color='tab:blue', s=40)
-        for i in range(M):
-            ax3d.text(p_agents[i, 0], p_agents[i, 1], p_agents[i, 2],
-                      f"A{i}", color='tab:blue')
+        # Angle legend as a side text box
+        props = dict(boxstyle='round', facecolor='white', alpha=0.75, edgecolor='gray')
+        ax.text(1.02, 0.5, angle_legend_text, transform=ax.transAxes,
+                fontsize=9, va='center', ha='left', bbox=props)
 
-            # draw short line showing pointing direction
-            L_dir = 2.0
-            p_end = p_agents[i] + L_dir * u_star[i]
-            ax3d.plot([p_agents[i, 0], p_end[0]],
-                      [p_agents[i, 1], p_end[1]],
-                      [p_agents[i, 2], p_end[2]],
-                      color='tab:blue', lw=1.5)
-
-        # Target mean
-        ax3d.scatter(p_hat[0], p_hat[1], p_hat[2],
-                     color='tab:red', s=50, marker='x')
-
-        ax3d.set_xlabel("x")
-        ax3d.set_ylabel("y")
-        ax3d.set_zlabel("z")
-        ax3d.set_title("3D View: Agents, Pointing, and EMS Sphere")
-
-        # make aspect roughly equal
-        all_pts = np.vstack([p_agents, p_hat[None, :], p_em[None, :]])
-        max_range = (all_pts.max(axis=0) - all_pts.min(axis=0)).max()
-        mid = all_pts.mean(axis=0)
-        for axis, m in zip([ax3d.set_xlim, ax3d.set_ylim, ax3d.set_zlim], mid):
-            axis(m - max_range/2, m + max_range/2)
+        plt.legend(loc='upper right')
 
     plt.show()
+
 
 
 if __name__ == "__main__":
