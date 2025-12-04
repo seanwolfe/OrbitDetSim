@@ -70,7 +70,7 @@ def c_tilde_i(y_samples, Lp, p_hat, p_i, u_i, cos_theta_h, kappa_sigma):
 
 
 def k2_tilde(y_samples, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma):
-    """Eq. (k2ty) continuous dual coverage."""
+
     M = len(p_agents)
     N = y_samples.shape[0]
     C = np.zeros((M, N))
@@ -78,14 +78,25 @@ def k2_tilde(y_samples, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma)
         C[i] = c_tilde_i(y_samples, Lp, p_hat, p_agents[i], u_agents[i],
                          cos_theta_h, kappa_sigma)
 
+    if M == 2:
+        # Algebraic identity: k2 = C0 * C1 for M=2
+        return C[0] * C[1]
+
     one_minus_C = 1.0 - C
     prod_all = np.prod(one_minus_C, axis=0)
 
     k2 = np.zeros(N)
     for i in range(M):
-        for j in range(i+1, M):  # <-- i < j (no i=j terms)
+        for j in range(i+1, M):
             denom = one_minus_C[i] * one_minus_C[j]
-            prod_excl = prod_all / np.maximum(denom, 1e-12)
+
+            # Avoid 0/0 only by masking, not by changing the denominator value
+            prod_excl = np.zeros_like(prod_all)
+            mask = denom > 1e-15
+            prod_excl[mask] = prod_all[mask] / denom[mask]
+            # where denom ~ 0, prod_excl is irrelevant: either product_all is ~0 too,
+            # or C[i]*C[j] is tiny/ill-defined; leaving it 0 is fine
+
             k2 += C[i] * C[j] * prod_excl
 
     return k2
@@ -614,8 +625,8 @@ def compute_J_grid_thetas_pair(
     # theta ranges for the swept pair
     # thi_vals = np.linspace(0.0, theta_s_list[i], n_grid)
     # thj_vals = np.linspace(0.0, theta_s_list[j], n_grid)
-    thi_vals = np.linspace(np.deg2rad(5), np.deg2rad(20) , n_grid)
-    thj_vals = np.linspace(0.0, np.pi / 2, n_grid)
+    thi_vals = np.linspace(np.deg2rad(0), np.deg2rad(90), n_grid)
+    thj_vals = np.linspace(np.deg2rad(0), np.deg2rad(90), n_grid)
 
     J_grid = np.zeros((n_grid, n_grid))
 
@@ -632,6 +643,7 @@ def compute_J_grid_thetas_pair(
             # update just i, j
             u_agents[i] = u_from_cap(u_curr_agents[i], thi, 0.0)
             u_agents[j] = u_from_cap(u_curr_agents[j], thj, 0.0)
+
 
             J_val = J_t_dual_coverage(
                 p_hat, P_p, p_agents, u_agents,
@@ -741,7 +753,7 @@ def main():
     P_p_2d = R @ D @ R.T
 
     d_mahal = 3.0
-    kappa = 1000
+    kappa = 2000
     # =======================
 
     # =======================
@@ -759,11 +771,11 @@ def main():
 
     # Current pointing vectors from planar angles (measured from +y)
     # u = [sin(angle), cos(angle), 0]
-    print(pointing_angles)
+
     u_curr_agents = np.stack([np.sin(pointing_angles),
                               np.cos(pointing_angles),
                               np.zeros(M)], axis=1)
-    print(u_curr_agents)
+
 
     # ----- Optimize jointly (θ, φ) with logging -----
     u_star, ang_star, J_star, history = optimize_pointing_lbfgs_joint(
@@ -983,7 +995,6 @@ def main():
     ]
 
     ax.legend(handles=handles, loc='upper right')
-
 
     # Optional: J_t(θ_1, θ_2) surface, like before
     if True:
