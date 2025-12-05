@@ -92,7 +92,7 @@ def k2_tilde(y_samples, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma)
 
             # Avoid 0/0 only by masking, not by changing the denominator value
             prod_excl = np.zeros_like(prod_all)
-            mask = denom > 1e-15
+            mask = denom > 1e-30
             prod_excl[mask] = prod_all[mask] / denom[mask]
             # where denom ~ 0, prod_excl is irrelevant: either product_all is ~0 too,
             # or C[i]*C[j] is tiny/ill-defined; leaving it 0 is fine
@@ -405,12 +405,14 @@ def optimize_pointing_lbfgs_joint(
     )
 
     for r in range(n_restarts):
-        if r == 0:
+        if r == -1:
             # warm start: all agents roughly pointing toward the mean
             x0 = x0_mean.copy()
         else:
+
             # small random perturbation around the warm start
-            noise = rng.normal(scale=0.05, size=2 * M)  # tweak scale if you want
+            print("here2")
+            noise = rng.normal(scale=0.0001, size=2 * M)  # tweak scale if you want
             x0 = x0_mean + noise
             # make sure θ stays in bounds and wrap φ
             for i in range(M):
@@ -665,20 +667,25 @@ def main():
     # =======================
     # User parameters (generalized / randomized)
     # =======================
-    M = 2  # number of spacecraft
+    M = 4  # number of spacecraft
 
     # Spatial region for agents / target (you can tweak these)
-    x_line_min, x_line_max = -5.0, 5.0  # reuse as x-bounds for agents
+    x_line_min, x_line_max = 0.0, 0.0  # reuse as x-bounds for agents
     y_line = 0.0  # can still be used as a reference line
 
-    x_t_min, x_t_max = -5.0, 5.0
-    y_t_min, y_t_max = 0.0, 10.0
+    x_t_min, x_t_max = 4, 8.0
+    y_t_min, y_t_max = 3.0, 3.0
 
     # FOV half-angle theta_h: random in a specified range [deg]
-    theta_h_min_deg = 1.0
-    theta_h_max_deg = 20.0
+    theta_h_min_deg = 2.0
+    theta_h_max_deg = 3.0
 
-    rng = np.random.default_rng(0)
+    # Seed for other randomness (geometry, covariance, etc.)
+    # seed = 1764870711  # for not mean when m=2
+    # seed = 1764877550  # good for convex
+    seed = int(time.time())
+    print(seed)
+    rng = np.random.default_rng(seed)
 
     theta_h = np.deg2rad(
         rng.uniform(theta_h_min_deg, theta_h_max_deg)
@@ -687,11 +694,7 @@ def main():
     # If you still need a generic theta_s_list somewhere:
     theta_s_list = np.array([np.deg2rad(360.0)] * M)
 
-    # Seed for other randomness (geometry, covariance, etc.)
-    seed = 1764798839
-    # seed = int(time.time())
-    # print(seed)
-    rng = np.random.default_rng(seed)
+
 
     # -----------------------
     # Agent positions: random in the planar region
@@ -818,18 +821,18 @@ def main():
         plt.figure()
         plt.subplot(3, 1, 1)
         plt.plot(np.rad2deg(slew0))
-        plt.ylabel("Slew 0 (deg)")
+        plt.ylabel("$\\theta_0$ (deg)")
         plt.grid(True, alpha=0.3)
 
         plt.subplot(3, 1, 2)
         plt.plot(np.rad2deg(slew1))
-        plt.ylabel("Slew 1 (deg)")
+        plt.ylabel("$\\theta_1$ (deg)")
         plt.grid(True, alpha=0.3)
 
         plt.subplot(3, 1, 3)
         plt.plot(J_hist)
         plt.xlabel("Logged step")
-        plt.ylabel("J_t")
+        plt.ylabel("$J_t$")
         plt.grid(True, alpha=0.3)
 
     elif M == 3:
@@ -898,7 +901,7 @@ def main():
     # Background coverage map
     Nx = 500
     Ny = 500
-    xg = np.linspace(x_line_min - 5, x_line_max + 5, Nx)
+    xg = np.linspace(x_line_min - 5, x_line_max + 10, Nx)
     yg = np.linspace(y_line - 1, y_t_max + 8, Ny)
     XX, YY = np.meshgrid(xg, yg)
     grid = np.stack([XX.ravel(), YY.ravel()], axis=1)
@@ -948,6 +951,52 @@ def main():
         ax.text(pos[0], pos[1] - 0.35, f"A{i}", color='tab:blue',
                 ha='center', va='top')
 
+    # Draw current boresight axis directions (u_curr) as dotted lines,
+    # and annotate slew angle between u_curr and optimized pointing.
+    u_axis_proxy = None  # for legend handle
+
+    for i, pos in enumerate(p_agents_2d):
+        # Current boresight (initial attitude) in 2D
+        u_curr_2d = u_curr_agents[i, :2]
+
+        # Optimized pointing direction in 2D from the optimized angle
+        u_opt_2d = np.array([
+            np.sin(pointing_angles_opt[i]),
+            np.cos(pointing_angles_opt[i])
+        ])
+
+        # Endpoint for the boresight line (a short segment)
+        p_end = pos + u_curr_2d * 3.0
+
+        ln, = ax.plot(
+            [pos[0], p_end[0]],
+            [pos[1], p_end[1]],
+            linestyle=':',
+            color='black',
+            lw=1.2,
+            label='Initial boresight' if i == 0 else None
+        )
+        if u_axis_proxy is None:
+            u_axis_proxy = ln
+
+        # Slew angle between current and optimized
+        dot = np.dot(u_curr_2d, u_opt_2d)
+        dot = np.clip(dot, -1.0, 1.0)
+        slew_rad = np.arccos(dot)
+        slew_deg = np.rad2deg(slew_rad)
+
+        # Place text slightly above the agent to avoid overlap
+        ax.text(
+            pos[0],
+            pos[1] + 0.5,
+            f"{slew_deg:.1f}°",
+            ha='center',
+            va='bottom',
+            fontsize=9,
+            color='black'
+        )
+
+
     # Target mean + ellipse
     unc_mean_sc = ax.scatter(p_hat_2d[0], p_hat_2d[1], color='tab:red', s=80,
                              marker='x', linewidths=2, label='Uncertainty mean')
@@ -969,7 +1018,7 @@ def main():
     ax.set_ylabel("y (normalized)")
     # ax.set_title(...)  # removed title
 
-    ax.set_xlim(x_line_min - 5, x_line_max + 5)
+    ax.set_xlim(x_line_min - 1, x_line_max + 10)
     ax.set_ylim(y_line - 1, y_t_max + 8)
     plt.grid(alpha=0.25)
 
@@ -986,18 +1035,19 @@ def main():
     handles = [
         agent_scatter,
         fov_proxy,
+        u_axis_proxy,  # ← NEW: initial boresight
         unc_mean_sc,
         ellipse_line,
         true_sc,
         single_cov_patch,
         double_cov_patch,
-        triple_cov_patch,
+        #triple_cov_patch,
     ]
 
     ax.legend(handles=handles, loc='upper right')
 
     # Optional: J_t(θ_1, θ_2) surface, like before
-    if True:
+    if False:
         fixed_thetas = [0, 0]
 
         TH12_1, TH12_2, J12 = compute_J_grid_thetas_pair(
@@ -1027,10 +1077,59 @@ def main():
         plt.figure(figsize=(6, 5))
         cs = plt.contourf(TH12_1, TH12_2, J12, levels=30)
         plt.colorbar(cs, label=r'$J_t$')
-        plt.xlabel(r'$\theta_1$ (deg)')
-        plt.ylabel(r'$\theta_2$ (deg)')
-        plt.title(r'$J_t$ contour for $\phi_1=\phi_2=0$')
+        plt.xlabel(r'$\theta_0$ (deg)')
+        plt.ylabel(r'$\theta_1$ (deg)')
         plt.grid(alpha=0.3)
+
+        # determine how many restarts we actually have in history
+        restart_indices = sorted({entry["restart"] for entry in history})
+
+        # choose colors and markers to cycle through
+        colors = ['white', 'yellow', 'cyan', 'magenta', 'green', 'orange']
+        markers = ['o', 's', '^', 'D', 'x', '+']
+
+        for k, r in enumerate(restart_indices):
+            # Extract all states for this restart
+            path_entries = [entry for entry in history if entry["restart"] == r]
+            if not path_entries:
+                continue
+
+            # Extract θ1, θ2 in *degrees* over the path
+            theta1_path = []
+            theta2_path = []
+            for entry in path_entries:
+                xk = entry["x"]
+                theta1_path.append(np.rad2deg(xk[0]))  # agent 0 θ
+                theta2_path.append(np.rad2deg(xk[2]))  # agent 1 θ
+
+            theta1_path = np.array(theta1_path)
+            theta2_path = np.array(theta2_path)
+
+            col = colors[k % len(colors)]
+            m = markers[k % len(markers)]
+
+            label = f"Trial {r}"
+            if r == 0:
+                label += " (warm start)"
+
+            # line + markers
+            plt.plot(theta1_path, theta2_path,
+                     linestyle='-',
+                     marker=m,
+                     color=col,
+                     lw=1.5,
+                     ms=5,
+                     label=label)
+
+            # optional: show arrow on last segment to emphasize direction
+            # if len(theta1_path) > 1:
+            #     plt.annotate("",
+            #                  xy=(theta1_path[-1], theta2_path[-1]),
+            #                  xytext=(theta1_path[-2], theta2_path[-2]),
+            #                  arrowprops=dict(arrowstyle="->", color=col, lw=1.5))
+
+        plt.legend(loc='upper right')
+
 
     plt.show()
 
