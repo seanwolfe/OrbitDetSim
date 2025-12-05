@@ -83,6 +83,12 @@ def k2_tilde(y_samples, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma)
         return C[0] * C[1]
 
     one_minus_C = 1.0 - C
+
+    if M ==3:
+        k2 = C[0] * C[1] * one_minus_C[2] + C[0] * C[2] * one_minus_C[1] + C[1] * C[2] * one_minus_C[0]
+        k1 = 0.1 * (C[0] * one_minus_C[1] * one_minus_C[2] + C[2] * one_minus_C[0] * one_minus_C[1] + C[1] * one_minus_C[0] * one_minus_C[2])
+        return k1 + k2
+
     prod_all = np.prod(one_minus_C, axis=0)
 
     k2 = np.zeros(N)
@@ -185,7 +191,7 @@ def objective_joint(x, p_hat, P_p, p_agents, u_curr_agents,
         n_mc=y_cached.shape[0], y_samples_cached=y_cached
     )
 
-def init_theta_phi_to_mean(p_hat, p_agents, u_curr_agents, theta_lower, theta_upper, eps=1e-10):
+def init_theta_phi_to_mean(p_hat, p_agents, u_curr_agents, theta_lower, theta_upper, seed, eps=1e-10):
     """
     Initialize (theta_i, phi_i) for each spacecraft i so that the resulting pointing
     vector u_i is as close as possible to the direction from p_agents[i] to p_hat,
@@ -219,6 +225,8 @@ def init_theta_phi_to_mean(p_hat, p_agents, u_curr_agents, theta_lower, theta_up
 
     M = p_agents.shape[0]
     x0 = np.zeros(2 * M, dtype=float)
+
+    rng = np.random.default_rng(seed=seed)
 
     for i in range(M):
         p_i = p_agents[i]
@@ -255,7 +263,8 @@ def init_theta_phi_to_mean(p_hat, p_agents, u_curr_agents, theta_lower, theta_up
             theta_star = np.clip(theta_star, theta_lower[i], theta_upper[i])
 
         # Store in x0 as (theta_i, phi_i)
-        x0[2*i]   = theta_star
+        possible_values = np.deg2rad([0, 1, -1])
+        x0[2*i]   = theta_star + rng.choice(possible_values, size=1)
         x0[2*i+1] = phi_star
 
     return x0
@@ -401,18 +410,17 @@ def optimize_pointing_lbfgs_joint(
     # before the restart loop, after you have theta_lower, theta_upper, etc.
     x0_mean = init_theta_phi_to_mean(
         p_hat, p_agents, u_curr_agents,
-        theta_lower, theta_upper
+        theta_lower, theta_upper, seed
     )
 
     for r in range(n_restarts):
-        if r == -1:
+        if r == 0:
             # warm start: all agents roughly pointing toward the mean
             x0 = x0_mean.copy()
         else:
-
             # small random perturbation around the warm start
-            print("here2")
-            noise = rng.normal(scale=0.0001, size=2 * M)  # tweak scale if you want
+            noise = rng.normal(scale=0.05, size=2 * M)  # tweak scale if you want
+            print(np.rad2deg(noise))
             x0 = x0_mean + noise
             # make sure θ stays in bounds and wrap φ
             for i in range(M):
@@ -437,7 +445,7 @@ def optimize_pointing_lbfgs_joint(
                 f, x0, method="L-BFGS-B",
                 bounds=bounds,
                 callback=cb,
-                options=dict(maxiter=60, ftol=1e-10, disp=False)
+                options=dict(maxiter=60, ftol=1e-10, disp=True)
             )
             x_star = res.x
             f_star = res.fun
@@ -627,8 +635,8 @@ def compute_J_grid_thetas_pair(
     # theta ranges for the swept pair
     # thi_vals = np.linspace(0.0, theta_s_list[i], n_grid)
     # thj_vals = np.linspace(0.0, theta_s_list[j], n_grid)
-    thi_vals = np.linspace(np.deg2rad(0), np.deg2rad(90), n_grid)
-    thj_vals = np.linspace(np.deg2rad(0), np.deg2rad(90), n_grid)
+    thi_vals = np.linspace(np.deg2rad(-20), np.deg2rad(25), n_grid)
+    thj_vals = np.linspace(np.deg2rad(-20), np.deg2rad(25), n_grid)
 
     J_grid = np.zeros((n_grid, n_grid))
 
@@ -667,7 +675,7 @@ def main():
     # =======================
     # User parameters (generalized / randomized)
     # =======================
-    M = 4  # number of spacecraft
+    M = 3  # number of spacecraft
 
     # Spatial region for agents / target (you can tweak these)
     x_line_min, x_line_max = 0.0, 0.0  # reuse as x-bounds for agents
@@ -683,8 +691,9 @@ def main():
     # Seed for other randomness (geometry, covariance, etc.)
     # seed = 1764870711  # for not mean when m=2
     # seed = 1764877550  # good for convex
-    seed = int(time.time())
-    print(seed)
+    seed = 1764965779  # good for all at same place
+    # seed = int(time.time())
+    # print(seed)
     rng = np.random.default_rng(seed)
 
     theta_h = np.deg2rad(
@@ -756,7 +765,7 @@ def main():
     P_p_2d = R @ D @ R.T
 
     d_mahal = 3.0
-    kappa = 2000
+    kappa = 600
     # =======================
 
     # =======================
@@ -1047,13 +1056,13 @@ def main():
     ax.legend(handles=handles, loc='upper right')
 
     # Optional: J_t(θ_1, θ_2) surface, like before
-    if False:
-        fixed_thetas = [0, 0]
+    if True:
+        fixed_thetas = [np.deg2rad(0.9), 0, 0]
 
         TH12_1, TH12_2, J12 = compute_J_grid_thetas_pair(
             p_hat, P_p, p_agents, u_curr_agents,
             theta_h, theta_s_list,
-            idx_pair=(0, 1),
+            idx_pair=(1, 2),
             fixed_thetas=fixed_thetas,
             d_M=d_mahal, kappa_sigma=kappa,
             n_mc=20000, n_grid=50, seed=seed
@@ -1099,8 +1108,8 @@ def main():
             theta2_path = []
             for entry in path_entries:
                 xk = entry["x"]
-                theta1_path.append(np.rad2deg(xk[0]))  # agent 0 θ
-                theta2_path.append(np.rad2deg(xk[2]))  # agent 1 θ
+                theta1_path.append(np.rad2deg(xk[2]))  # agent 0 θ
+                theta2_path.append(np.rad2deg(xk[4]))  # agent 1 θ
 
             theta1_path = np.array(theta1_path)
             theta2_path = np.array(theta2_path)
