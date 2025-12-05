@@ -675,7 +675,7 @@ def main():
     # =======================
     # User parameters (generalized / randomized)
     # =======================
-    M = 3  # number of spacecraft
+    M = 4  # number of spacecraft
 
     # Spatial region for agents / target (you can tweak these)
     x_line_min, x_line_max = 0.0, 0.0  # reuse as x-bounds for agents
@@ -765,7 +765,7 @@ def main():
     P_p_2d = R @ D @ R.T
 
     d_mahal = 3.0
-    kappa = 600
+    kappa = 145
     # =======================
 
     # =======================
@@ -957,8 +957,8 @@ def main():
                         label='Agent position' if i == 0 else None)
         if agent_scatter is None:
             agent_scatter = sc
-        ax.text(pos[0], pos[1] - 0.35, f"A{i}", color='tab:blue',
-                ha='center', va='top')
+        # ax.text(pos[0], pos[1] - 0.35, f"A{i}", color='tab:blue',
+        #         ha='center', va='top')
 
     # Draw current boresight axis directions (u_curr) as dotted lines,
     # and annotate slew angle between u_curr and optimized pointing.
@@ -977,16 +977,16 @@ def main():
         # Endpoint for the boresight line (a short segment)
         p_end = pos + u_curr_2d * 3.0
 
-        ln, = ax.plot(
-            [pos[0], p_end[0]],
-            [pos[1], p_end[1]],
-            linestyle=':',
-            color='black',
-            lw=1.2,
-            label='Initial boresight' if i == 0 else None
-        )
-        if u_axis_proxy is None:
-            u_axis_proxy = ln
+        # ln, = ax.plot(
+        #     [pos[0], p_end[0]],
+        #     [pos[1], p_end[1]],
+        #     linestyle=':',
+        #     color='black',
+        #     lw=1.2,
+        #     label='Initial boresight' if i == 0 else None
+        # )
+        # if u_axis_proxy is None:
+        #     u_axis_proxy = ln
 
         # Slew angle between current and optimized
         dot = np.dot(u_curr_2d, u_opt_2d)
@@ -995,15 +995,15 @@ def main():
         slew_deg = np.rad2deg(slew_rad)
 
         # Place text slightly above the agent to avoid overlap
-        ax.text(
-            pos[0],
-            pos[1] + 0.5,
-            f"{slew_deg:.1f}°",
-            ha='center',
-            va='bottom',
-            fontsize=9,
-            color='black'
-        )
+        # ax.text(
+        #     pos[0],
+        #     pos[1] + 0.5,
+        #     f"{slew_deg:.1f}°",
+        #     ha='center',
+        #     va='bottom',
+        #     fontsize=9,
+        #     color='black'
+        # )
 
 
     # Target mean + ellipse
@@ -1018,9 +1018,9 @@ def main():
     rng2 = np.random.default_rng(seed + 42)
     sample_pt = sample_from_uncertainty_2d(p_hat_2d, P_p_2d,
                                            d_mahal=d_mahal, rng=rng2)
-    true_sc = ax.scatter(sample_pt[0], sample_pt[1],
-                         s=60, facecolors='none', edgecolors='green',
-                         linewidths=2, label='True position')
+    # true_sc = ax.scatter(sample_pt[0], sample_pt[1],
+    #                      s=60, facecolors='none', edgecolors='green',
+    #                      linewidths=2, label='True position')
 
     ax.set_aspect('equal', adjustable='box')
     ax.set_xlabel("x (normalized)")
@@ -1044,20 +1044,20 @@ def main():
     handles = [
         agent_scatter,
         fov_proxy,
-        u_axis_proxy,  # ← NEW: initial boresight
+        # u_axis_proxy,  # ← NEW: initial boresight
         unc_mean_sc,
         ellipse_line,
-        true_sc,
+        # true_sc,
         single_cov_patch,
         double_cov_patch,
-        #triple_cov_patch,
+        triple_cov_patch,
     ]
 
     ax.legend(handles=handles, loc='upper right')
 
     # Optional: J_t(θ_1, θ_2) surface, like before
-    if True:
-        fixed_thetas = [np.deg2rad(0.9), 0, 0]
+    if False:
+        fixed_thetas = [np.deg2rad(0.24), 0, 0]
 
         TH12_1, TH12_2, J12 = compute_J_grid_thetas_pair(
             p_hat, P_p, p_agents, u_curr_agents,
@@ -1079,15 +1079,16 @@ def main():
         ax3d.set_xlabel(r'$\theta_1$ (deg)')
         ax3d.set_ylabel(r'$\theta_2$ (deg)')
         ax3d.set_zlabel(r'$J_t$')
-        ax3d.set_title(r'$J_t(\theta_1,\theta_2)$ for $\phi_1=\phi_2=0$')
+        ax3d.set_title(r'$J_t(\theta_0=0.2^{\circ}, \theta_1,\theta_2)$')
 
         plt.tight_layout()
 
         plt.figure(figsize=(6, 5))
         cs = plt.contourf(TH12_1, TH12_2, J12, levels=30)
         plt.colorbar(cs, label=r'$J_t$')
-        plt.xlabel(r'$\theta_0$ (deg)')
-        plt.ylabel(r'$\theta_1$ (deg)')
+        plt.xlabel(r'$\theta_1$ (deg)')
+        plt.ylabel(r'$\theta_2$ (deg)')
+        plt.title(r'$J_t(\theta_0=0.2^{\circ}, \theta_1,\theta_2)$')
         plt.grid(alpha=0.3)
 
         # determine how many restarts we actually have in history
