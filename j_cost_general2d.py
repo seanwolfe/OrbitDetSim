@@ -70,7 +70,7 @@ def c_tilde_i(y_samples, Lp, p_hat, p_i, u_i, cos_theta_h, kappa_sigma):
 
 
 def k2_tilde(y_samples, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma):
-
+    """Eq. (k2ty) continuous dual coverage."""
     M = len(p_agents)
     N = y_samples.shape[0]
     C = np.zeros((M, N))
@@ -87,6 +87,27 @@ def k2_tilde(y_samples, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma)
     if M ==3:
         k2 = C[0] * C[1] * one_minus_C[2] + C[0] * C[2] * one_minus_C[1] + C[1] * C[2] * one_minus_C[0]
         k1 = 0.1 * (C[0] * one_minus_C[1] * one_minus_C[2] + C[2] * one_minus_C[0] * one_minus_C[1] + C[1] * one_minus_C[0] * one_minus_C[2])
+        return k1 + k2
+
+    if M == 4:
+        # k2: exactly two detect
+        k2 = (
+                C[0] * C[1] * one_minus_C[2] * one_minus_C[3] +
+                C[0] * C[2] * one_minus_C[1] * one_minus_C[3] +
+                C[0] * C[3] * one_minus_C[1] * one_minus_C[2] +
+                C[1] * C[2] * one_minus_C[0] * one_minus_C[3] +
+                C[1] * C[3] * one_minus_C[0] * one_minus_C[2] +
+                C[2] * C[3] * one_minus_C[0] * one_minus_C[1]
+        )
+
+        # k1: exactly one detects
+        k1 = 0.1 * (
+                C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] +
+                C[1] * one_minus_C[0] * one_minus_C[2] * one_minus_C[3] +
+                C[2] * one_minus_C[0] * one_minus_C[1] * one_minus_C[3] +
+                C[3] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2]
+        )
+
         return k1 + k2
 
     prod_all = np.prod(one_minus_C, axis=0)
@@ -177,6 +198,7 @@ def finite_diff_grad(f, x, eps=1e-4):
         xp[i] += eps; xm[i] -= eps
         g[i] = (f(xp) - f(xm)) / (2*eps)
     return -g  # gradient of -J
+
 
 def objective_joint(x, p_hat, P_p, p_agents, u_curr_agents,
                     theta_lower, theta_upper,
@@ -445,7 +467,7 @@ def optimize_pointing_lbfgs_joint(
                 f, x0, method="L-BFGS-B",
                 bounds=bounds,
                 callback=cb,
-                options=dict(maxiter=60, ftol=1e-10, disp=True)
+                options=dict(maxiter=60, ftol=1e-10, disp=False)
             )
             x_star = res.x
             f_star = res.fun
@@ -635,8 +657,8 @@ def compute_J_grid_thetas_pair(
     # theta ranges for the swept pair
     # thi_vals = np.linspace(0.0, theta_s_list[i], n_grid)
     # thj_vals = np.linspace(0.0, theta_s_list[j], n_grid)
-    thi_vals = np.linspace(np.deg2rad(-20), np.deg2rad(25), n_grid)
-    thj_vals = np.linspace(np.deg2rad(-20), np.deg2rad(25), n_grid)
+    thi_vals = np.linspace(np.deg2rad(-90), np.deg2rad(90), n_grid)
+    thj_vals = np.linspace(np.deg2rad(-90), np.deg2rad(90), n_grid)
 
     J_grid = np.zeros((n_grid, n_grid))
 
@@ -668,32 +690,35 @@ def compute_J_grid_thetas_pair(
     return THI_deg, THJ_deg, J_grid
 
 # ============================================================
-# Your main(), now working
+# main()
 # ============================================================
 
 def main():
     # =======================
     # User parameters (generalized / randomized)
     # =======================
-    M = 4  # number of spacecraft
+    M = 3  # number of spacecraft
 
     # Spatial region for agents / target (you can tweak these)
-    x_line_min, x_line_max = 0.0, 0.0  # reuse as x-bounds for agents
+    x_line_min, x_line_max = -3.0, 3.0  # reuse as x-bounds for agents
     y_line = 0.0  # can still be used as a reference line
 
-    x_t_min, x_t_max = 4, 8.0
-    y_t_min, y_t_max = 3.0, 3.0
+    x_t_min, x_t_max = -6, 6.0
+    y_t_min, y_t_max = -6.0, 6.0
 
     # FOV half-angle theta_h: random in a specified range [deg]
     theta_h_min_deg = 2.0
-    theta_h_max_deg = 3.0
+    theta_h_max_deg = 15.0
 
     # Seed for other randomness (geometry, covariance, etc.)
     # seed = 1764870711  # for not mean when m=2
     # seed = 1764877550  # good for convex
-    seed = 1764965779  # good for all at same place
+    # seed = 1764965779  # good for all at same place
+    seed = 1765220306
     # seed = int(time.time())
     # print(seed)
+
+
     rng = np.random.default_rng(seed)
 
     theta_h = np.deg2rad(
@@ -753,7 +778,7 @@ def main():
     # 2D covariance: random eigenvalues + random rotation
     # -----------------------
     # Draw random eigenvalues (spread/scale of uncertainty)
-    lambda1, lambda2 = rng.uniform(0.05, 1.0, size=2)
+    lambda1, lambda2 = rng.uniform(0.2, 1.5, size=2)
     D = np.diag([lambda1, lambda2])
 
     # Random 2D rotation
@@ -765,7 +790,7 @@ def main():
     P_p_2d = R @ D @ R.T
 
     d_mahal = 3.0
-    kappa = 145
+    kappa = 1500
     # =======================
 
     # =======================
@@ -957,8 +982,8 @@ def main():
                         label='Agent position' if i == 0 else None)
         if agent_scatter is None:
             agent_scatter = sc
-        # ax.text(pos[0], pos[1] - 0.35, f"A{i}", color='tab:blue',
-        #         ha='center', va='top')
+        ax.text(pos[0], pos[1] - 0.35, f"A{i}", color='tab:blue',
+                ha='center', va='top')
 
     # Draw current boresight axis directions (u_curr) as dotted lines,
     # and annotate slew angle between u_curr and optimized pointing.
@@ -977,16 +1002,16 @@ def main():
         # Endpoint for the boresight line (a short segment)
         p_end = pos + u_curr_2d * 3.0
 
-        # ln, = ax.plot(
-        #     [pos[0], p_end[0]],
-        #     [pos[1], p_end[1]],
-        #     linestyle=':',
-        #     color='black',
-        #     lw=1.2,
-        #     label='Initial boresight' if i == 0 else None
-        # )
-        # if u_axis_proxy is None:
-        #     u_axis_proxy = ln
+        ln, = ax.plot(
+            [pos[0], p_end[0]],
+            [pos[1], p_end[1]],
+            linestyle=':',
+            color='black',
+            lw=1.2,
+            label='Initial boresight' if i == 0 else None
+        )
+        if u_axis_proxy is None:
+            u_axis_proxy = ln
 
         # Slew angle between current and optimized
         dot = np.dot(u_curr_2d, u_opt_2d)
@@ -995,15 +1020,15 @@ def main():
         slew_deg = np.rad2deg(slew_rad)
 
         # Place text slightly above the agent to avoid overlap
-        # ax.text(
-        #     pos[0],
-        #     pos[1] + 0.5,
-        #     f"{slew_deg:.1f}°",
-        #     ha='center',
-        #     va='bottom',
-        #     fontsize=9,
-        #     color='black'
-        # )
+        ax.text(
+            pos[0],
+            pos[1] + 0.5,
+            f"{slew_deg:.1f}°",
+            ha='center',
+            va='bottom',
+            fontsize=9,
+            color='black'
+        )
 
 
     # Target mean + ellipse
@@ -1018,17 +1043,17 @@ def main():
     rng2 = np.random.default_rng(seed + 42)
     sample_pt = sample_from_uncertainty_2d(p_hat_2d, P_p_2d,
                                            d_mahal=d_mahal, rng=rng2)
-    # true_sc = ax.scatter(sample_pt[0], sample_pt[1],
-    #                      s=60, facecolors='none', edgecolors='green',
-    #                      linewidths=2, label='True position')
+    true_sc = ax.scatter(sample_pt[0], sample_pt[1],
+                         s=60, facecolors='none', edgecolors='green',
+                         linewidths=2, label='True position')
 
     ax.set_aspect('equal', adjustable='box')
     ax.set_xlabel("x (normalized)")
     ax.set_ylabel("y (normalized)")
     # ax.set_title(...)  # removed title
 
-    ax.set_xlim(x_line_min - 1, x_line_max + 10)
-    ax.set_ylim(y_line - 1, y_t_max + 8)
+    # ax.set_xlim(x_line_min - 10, x_line_max + 10)
+    # ax.set_ylim(y_line - 10, y_t_max + 10)
     plt.grid(alpha=0.25)
 
     # ---- Comprehensive legend ----
@@ -1056,8 +1081,8 @@ def main():
     ax.legend(handles=handles, loc='upper right')
 
     # Optional: J_t(θ_1, θ_2) surface, like before
-    if False:
-        fixed_thetas = [np.deg2rad(0.24), 0, 0]
+    if True:
+        fixed_thetas = [np.deg2rad(62.44), 0, 0]
 
         TH12_1, TH12_2, J12 = compute_J_grid_thetas_pair(
             p_hat, P_p, p_agents, u_curr_agents,
@@ -1065,7 +1090,7 @@ def main():
             idx_pair=(1, 2),
             fixed_thetas=fixed_thetas,
             d_M=d_mahal, kappa_sigma=kappa,
-            n_mc=20000, n_grid=50, seed=seed
+            n_mc=20000, n_grid=100, seed=seed
         )
 
         # 3D surface plot: theta1 vs theta2 vs J_t

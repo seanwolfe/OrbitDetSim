@@ -52,6 +52,12 @@ def sigmoid(z):
     return 1.0 / (1.0 + np.exp(-z))
 
 
+def softplus(z, beta=1.0):
+    """Numerically stable softplus: (1/beta) * log(1 + exp(beta*z))."""
+    z_beta = beta * z
+    return (1.0 / beta) * np.log1p(np.exp(z_beta))
+
+
 # -----------------------------------------------------------
 # Continuous FOV membership & dual coverage in whitened space
 # -----------------------------------------------------------
@@ -80,14 +86,52 @@ def k2_tilde(y_samples, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma)
         C[i] = c_tilde_i(y_samples, Lp, p_hat, p_agents[i], u_agents[i],
                          cos_theta_h, kappa_sigma)
 
+    if M == 2:
+        # Algebraic identity: k2 = C0 * C1 for M=2
+        return C[0] * C[1]
+
     one_minus_C = 1.0 - C
+
+    if M ==3:
+        k2 = C[0] * C[1] * one_minus_C[2] + C[0] * C[2] * one_minus_C[1] + C[1] * C[2] * one_minus_C[0]
+        k1 = 0.1 * (C[0] * one_minus_C[1] * one_minus_C[2] + C[2] * one_minus_C[0] * one_minus_C[1] + C[1] * one_minus_C[0] * one_minus_C[2])
+        return k1 + k2
+
+    if M == 4:
+        # k2: exactly two detect
+        k2 = (
+                C[0] * C[1] * one_minus_C[2] * one_minus_C[3] +
+                C[0] * C[2] * one_minus_C[1] * one_minus_C[3] +
+                C[0] * C[3] * one_minus_C[1] * one_minus_C[2] +
+                C[1] * C[2] * one_minus_C[0] * one_minus_C[3] +
+                C[1] * C[3] * one_minus_C[0] * one_minus_C[2] +
+                C[2] * C[3] * one_minus_C[0] * one_minus_C[1]
+        )
+
+        # k1: exactly one detects
+        k1 = 0.1 * (
+                C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] +
+                C[1] * one_minus_C[0] * one_minus_C[2] * one_minus_C[3] +
+                C[2] * one_minus_C[0] * one_minus_C[1] * one_minus_C[3] +
+                C[3] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2]
+        )
+
+        return k1 + k2
+
     prod_all = np.prod(one_minus_C, axis=0)
 
     k2 = np.zeros(N)
     for i in range(M):
-        for j in range(i+1, M):  # i < j (no i=j terms)
+        for j in range(i+1, M):
             denom = one_minus_C[i] * one_minus_C[j]
-            prod_excl = prod_all / np.maximum(denom, 1e-12)
+
+            # Avoid 0/0 only by masking, not by changing the denominator value
+            prod_excl = np.zeros_like(prod_all)
+            mask = denom > 1e-30
+            prod_excl[mask] = prod_all[mask] / denom[mask]
+            # where denom ~ 0, prod_excl is irrelevant: either product_all is ~0 too,
+            # or C[i]*C[j] is tiny/ill-defined; leaving it 0 is fine
+
             k2 += C[i] * C[j] * prod_excl
 
     return k2
@@ -122,6 +166,63 @@ def J_t_dual_coverage(
 
     J = integral_est / ((2*np.pi)**1.5)
     return J
+
+
+# -----------------------------------------
+# EMS exclusion penalty
+# -----------------------------------------
+
+def ems_exclusion_penalty(
+    p_agents,          # (M,3) spacecraft positions
+    u_agents,          # (M,3) pointing unit vectors
+    p_em,              # (3,) EMS center position
+    R_em,              # scalar EMS effective radius
+    theta_h,           # FOV half-angle
+    alpha_s,           # safety margin
+    lambda_em,         # penalty weight
+    beta_zeta=50.0     # softplus sharpness
+):
+    """
+    Smooth EMS exclusion penalty term:
+
+        Θ_EM,t = -λ_EM ∑ ζ(z_i),
+
+    but here we *return* +λ_EM ∑ ζ(z_i) so it can be added to a cost function
+    which we minimize:
+
+        objective = -J_t + λ_EM ∑ ζ(z_i),
+
+    with
+
+        z_i = u_i^T u_i^{EM} - cos(θ_h + α^{EM}_i + α_s),
+        α^{EM}_i = arcsin(R_EM / ||p_EM - p_i||),
+        u_i^{EM} = (p_EM - p_i) / ||p_EM - p_i||.
+    """
+    M = len(p_agents)
+    total = 0.0
+
+    for i in range(M):
+        r = p_em - p_agents[i]
+        dist = np.linalg.norm(r)
+        if dist < 1e-12:
+            # Degenerate: s/c at EMS center; skip or heavily penalize if desired
+            continue
+
+        u_em = r / dist
+
+        # α^{EM}_i = arcsin(R_EM / ||r||), clipped
+        ratio = np.clip(R_em / dist, -1.0, 1.0)
+        alpha_em = np.arcsin(ratio)
+
+        angle_req = theta_h + alpha_em + alpha_s
+        cos_req = np.cos(angle_req)
+
+        dot_val = float(np.dot(u_agents[i], u_em))
+        z_i = dot_val - cos_req
+
+        total += softplus(z_i, beta=beta_zeta)
+
+    return lambda_em * total
 
 
 # -----------------------------------------
@@ -167,42 +268,47 @@ def finite_diff_grad(f, x, eps=1e-4):
 def objective_joint(x, p_hat, P_p, p_agents, u_curr_agents,
                     theta_lower, theta_upper,
                     theta_h, d_M, kappa_sigma,
-                    y_cached):
+                    y_cached,
+                    p_em=None, R_em=0.0,
+                    alpha_s=0.0, lambda_em=0.0,
+                    beta_zeta=50.0):
+    """
+    Joint objective for the optimizer:
+
+        objective = -J_t_dual_coverage + EMS_penalty
+
+    where EMS_penalty = λ_EM ∑ softplus(z_i) if enabled.
+    """
     M = len(p_agents)
     u_agents = angles_to_pointings(x, p_agents, u_curr_agents, theta_lower, theta_upper, M)
-    # We maximize J, so objective is -J
-    return -J_t_dual_coverage(
+
+    # Base objective: maximize J_t, so minimize -J_t
+    J = J_t_dual_coverage(
         p_hat, P_p, p_agents, u_agents,
         theta_h, d_M=d_M, kappa_sigma=kappa_sigma,
         n_mc=y_cached.shape[0], y_samples_cached=y_cached
     )
+    obj = -J
+
+    # EMS exclusion penalty (only if configured)
+    if lambda_em != 0.0 and p_em is not None and R_em > 0.0:
+        penalty_em = ems_exclusion_penalty(
+            p_agents, u_agents,
+            p_em=p_em, R_em=R_em,
+            theta_h=theta_h,
+            alpha_s=alpha_s,
+            lambda_em=lambda_em,
+            beta_zeta=beta_zeta
+        )
+        obj += penalty_em
+
+    return obj
 
 
-def init_theta_phi_to_mean(p_hat, p_agents, u_curr_agents, theta_lower, theta_upper, seed, eps=1e-10):
+def init_theta_phi_to_mean(p_hat, p_agents, u_curr_agents, theta_lower, theta_upper, eps=1e-10):
     """
-    Initialize (theta_i, phi_i) for each spacecraft i so that the resulting pointing
-    vector u_i is as close as possible to the direction from p_agents[i] to p_hat,
-    but respecting the slew constraints:
-        theta_lower[i] <= theta_i <= theta_upper[i].
-
-    Parameters
-    ----------
-    p_hat : array_like, shape (3,)
-        Mean position of the uncertainty ellipsoid in 3D.
-    p_agents : array_like, shape (M,3)
-        Positions of the M spacecraft.
-    u_curr_agents : array_like, shape (M,3)
-        Current boresight unit vectors for each spacecraft.
-    theta_lower : array_like, shape (M,)
-        Lower bounds on the slew angle for each spacecraft (usually >= 0).
-    theta_upper : array_like, shape (M,)
-        Upper bounds on the slew angle for each spacecraft.
-
-    Returns
-    -------
-    x0 : ndarray, shape (2*M,)
-        Initial parameter vector:
-            x0 = [theta_0, phi_0, theta_1, phi_1, ..., theta_{M-1}, phi_{M-1}]
+    Initialize (theta_i, phi_i) so u_i ~ direction from p_agents[i] to p_hat,
+    respecting slew bounds.
     """
     p_hat = np.asarray(p_hat, dtype=float)
     p_agents = np.asarray(p_agents, dtype=float)
@@ -213,8 +319,6 @@ def init_theta_phi_to_mean(p_hat, p_agents, u_curr_agents, theta_lower, theta_up
     M = p_agents.shape[0]
     x0 = np.zeros(2 * M, dtype=float)
 
-    rng = np.random.default_rng(seed=seed)
-
     for i in range(M):
         p_i = p_agents[i]
         u_curr = u_curr_agents[i] / max(np.linalg.norm(u_curr_agents[i]), eps)
@@ -223,60 +327,48 @@ def init_theta_phi_to_mean(p_hat, p_agents, u_curr_agents, theta_lower, theta_up
         d_vec = p_hat - p_i
         dist = np.linalg.norm(d_vec)
         if dist < eps:
-            # Degenerate: spacecraft at the mean; just keep current pointing
             theta_star = 0.0
             phi_star = 0.0
         else:
             v = d_vec / dist  # desired pointing direction (unit)
 
-            # Build local basis around u_curr
+            # Local basis
             e1, e2 = orthonormal_basis_from_u(u_curr)
 
-            # Decompose v in {u_curr, e1, e2}
-            a  = np.dot(v, u_curr)   # component along u_curr
+            # Decompose v
+            a  = np.dot(v, u_curr)
             b1 = np.dot(v, e1)
             b2 = np.dot(v, e2)
             s  = np.sqrt(b1**2 + b2**2)
 
-            # Ideal slew angle between u_curr and v
-            # (angle in [0, pi])
             theta_star = np.arctan2(s, a)
-
-            # Azimuth in the e1/e2 plane
             phi_star = np.arctan2(b2, b1)
 
-            # Clamp theta to feasible slew interval
-            # This enforces the hard slew constraint
             theta_star = np.clip(theta_star, theta_lower[i], theta_upper[i])
 
-        # Store in x0 as (theta_i, phi_i)
-        possible_values = np.deg2rad([0, 1, -1])
-        x0[2*i]   = theta_star + rng.choice(possible_values, size=1)
+        x0[2*i]   = theta_star
         x0[2*i+1] = phi_star
 
     return x0
-
 
 
 def estimate_theta_bounds_from_ellipsoid(p_hat, P_p, p_agents, u_curr_agents,
                                          d_M, n_shell=400, seed=12345):
     """
     For each spacecraft i:
-      - sample points on the Mahalanobis shell (||y|| = d_M) of the ellipsoid
-      - compute angular distance θ_i(p) between u_curr_i and direction to each point
-      - return θ_min_i, θ_max_i^{(ell)} over those samples
+      - sample points on the Mahalanobis shell ||y|| = d_M
+      - compute angle between u_curr_i and direction to each point
+      - return θ_min_i, θ_max_i over those samples
     """
     M = len(p_agents)
     rng = np.random.default_rng(seed)
 
-    # Sample unit directions on the 3D sphere
     dirs = rng.normal(size=(n_shell, 3))
     dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
 
-    # Map to ellipsoid shell: p = p_hat + Lp * (d_M * dir)
     Lp = np.linalg.cholesky(P_p)
     y_shell = d_M * dirs
-    p_shell = (Lp @ y_shell.T).T + p_hat[None, :]   # (n_shell, 3)
+    p_shell = (Lp @ y_shell.T).T + p_hat[None, :]
 
     theta_min = np.zeros(M)
     theta_max = np.zeros(M)
@@ -285,13 +377,13 @@ def estimate_theta_bounds_from_ellipsoid(p_hat, P_p, p_agents, u_curr_agents,
         p_i = p_agents[i]
         u_i_curr = u_curr_agents[i] / np.linalg.norm(u_curr_agents[i])
 
-        r = p_shell - p_i[None, :]             # vectors from s/c to ellipsoid points
+        r = p_shell - p_i[None, :]
         r_norm = np.linalg.norm(r, axis=1, keepdims=True)
         r_unit = r / np.maximum(r_norm, 1e-12)
 
         cos_theta = np.einsum('ij,j->i', r_unit, u_i_curr)
         cos_theta = np.clip(cos_theta, -1.0, 1.0)
-        theta_vals = np.arccos(cos_theta)     # [0, π]
+        theta_vals = np.arccos(cos_theta)
 
         theta_min[i] = np.min(theta_vals)
         theta_max[i] = np.max(theta_vals)
@@ -424,19 +516,22 @@ def optimize_pointing_lbfgs_joint(
 
     x0_mean = init_theta_phi_to_mean(
         p_hat, p_agents, u_curr_agents,
-        theta_lower, theta_upper, seed
+        theta_lower, theta_upper
     )
 
     for r in range(n_restarts):
         if r == 0:
+            # warm start: all agents roughly pointing toward the mean
             x0 = x0_mean.copy()
         else:
             noise = rng.normal(scale=0.05, size=2 * M)
             x0 = x0_mean + noise
+            # make sure θ stays in bounds and wrap φ
             for i in range(M):
                 x0[2 * i] = np.clip(x0[2 * i], theta_lower[i], theta_upper[i])
                 x0[2 * i + 1] = x0[2 * i + 1] % (2 * np.pi)
 
+        # log initial state
         log_state(x0, r)
 
         f = lambda z: objective_joint(
@@ -447,6 +542,7 @@ def optimize_pointing_lbfgs_joint(
 
         if SCIPY_OK:
             def cb(xk, restart_idx=r):
+                # log each L-BFGS-B iteration
                 log_state(xk, restart_idx)
 
             res = minimize(
@@ -458,12 +554,14 @@ def optimize_pointing_lbfgs_joint(
             x_star = res.x
             f_star = res.fun
         else:
+            # fallback: crude joint random + gradient descent
             x_star = x0.copy()
             f_star = f(x_star)
             lr = 0.2
             for _ in range(40):
                 g = finite_diff_grad(f, x_star, eps=2e-4)
                 x_star -= lr * g
+                # project to bounds
                 for i in range(M):
                     x_star[2*i]   = np.clip(x_star[2*i], theta_lower[i], theta_upper[i])
                     x_star[2*i+1] = x_star[2*i+1] % (2*np.pi)
@@ -482,7 +580,7 @@ def optimize_pointing_lbfgs_joint(
             best_x = x_star.copy()
             best_cost = f_star   # store best objective
 
-    # Unpack best and compute J_t
+    # Unpack best and compute actual J_t (not −J)
     thetas_best, phis_best = unpack_angles(best_x, M)
     u_best = angles_to_pointings(best_x, p_agents, u_curr_agents, theta_lower, theta_upper, M)
 
@@ -512,7 +610,7 @@ def sample_target_in_front(x_min=-5.0, x_max=5.0, y_min=2.0, y_max=8.0, seed=Non
 
 def mahalanobis_ellipse_points(mu, Sigma, d_mahal=3.0, num_pts=200):
     """
-    Points on the ellipse (x-mu)^T Sigma^{-1} (x-mu) = d_mahal^2
+    Returns points on the ellipse defined by (x-mu)^T Sigma^{-1} (x-mu) = d_mahal^2
     """
     eigvals, eigvecs = np.linalg.eigh(Sigma)
     eigvals = np.maximum(eigvals, 1e-12)
@@ -562,24 +660,25 @@ def coverage_count_2d(grid_pts, p_agents_2d, pointing_angles, theta_h):
         counts: (N,) array, number of FOVs that cover each point
     """
 
+    # direction vector for planar angle = rotation from +y
     def dir_from_plus_y(theta):
         return np.stack([np.sin(theta), np.cos(theta)], axis=-1)  # (M,2)
 
     M = len(p_agents_2d)
-    dirs = dir_from_plus_y(pointing_angles)
+    dirs = dir_from_plus_y(pointing_angles)  # (M,2)
     cos_th = np.cos(theta_h)
 
     counts = np.zeros(len(grid_pts), dtype=int)
 
     for i in range(M):
-        v = grid_pts - p_agents_2d[i]
+        v = grid_pts - p_agents_2d[i]             # (N,2)
         v_norm = np.linalg.norm(v, axis=1)
-        good = v_norm > 1e-9
+        good = v_norm > 1e-9                      # avoid divide-by-zero
         v_unit = np.zeros_like(v)
         v_unit[good] = v[good] / v_norm[good,None]
 
         cosang = np.sum(v_unit * dirs[i], axis=1)
-        inside = cosang >= cos_th
+        inside = cosang >= cos_th                 # boolean mask
         counts += inside.astype(int)
 
     return counts
@@ -596,14 +695,16 @@ def sample_from_uncertainty_2d(mu, Sigma, d_mahal=None, rng=None, max_tries=1000
     L = np.linalg.cholesky(Sigma)
 
     for _ in range(max_tries):
-        z = rng.normal(size=2)
-        x = mu + L @ z
+        z = rng.normal(size=2)          # N(0, I)
+        x = mu + L @ z                  # N(mu, Sigma)
         if d_mahal is None:
             return x
-        dm2 = z @ z
+        # Mahalanobis distance
+        dm2 = z @ z                     # since x = mu + L z => (x-mu)^T Sigma^{-1} (x-mu) = z^T z
         if dm2 <= d_mahal**2:
             return x
 
+    # Fallback if rejection fails (very unlikely for moderate d_mahal)
     return x
 
 
@@ -616,33 +717,47 @@ def compute_J_grid_thetas_pair(
     n_mc=20000, n_grid=50, seed=0
 ):
     """
-    Brute-force grid in (theta_i, theta_j) for arbitrary M, with phi_k = 0.
+    Brute-force grid in (theta_i, theta_j) for arbitrary M, with phi_k = 0 for all k.
+    All thetas not in idx_pair are held fixed at fixed_thetas[k].
+
+    Returns:
+      THI_deg, THJ_deg : meshgrids (in degrees)
+      J_grid           : J_t(theta_i, theta_j | others fixed)
     """
     rng = np.random.default_rng(seed)
     M = len(p_agents)
     i, j = idx_pair
     assert 0 <= i < M and 0 <= j < M and i != j
 
+    # MC cache
     y_cached = make_cached_y(P_p, d_M, n_mc, seed=seed+123)
 
+    # default fixed_thetas: zero for all non-swept indices
     if fixed_thetas is None:
         fixed_thetas = np.zeros(M)
 
-    thi_vals = np.linspace(0.0, theta_s_list[i], n_grid)
-    thj_vals = np.linspace(0.0, theta_s_list[j], n_grid)
+    # theta ranges for the swept pair
+    # thi_vals = np.linspace(0.0, theta_s_list[i], n_grid)
+    # thj_vals = np.linspace(0.0, theta_s_list[j], n_grid)
+    thi_vals = np.linspace(np.deg2rad(-90), np.deg2rad(90), n_grid)
+    thj_vals = np.linspace(np.deg2rad(-90), np.deg2rad(90), n_grid)
 
     J_grid = np.zeros((n_grid, n_grid))
 
+    # temp array for all agents' pointings
     u_agents = np.zeros_like(u_curr_agents)
 
+    # precompute the fixed directions for k ≠ i,j
     for k in range(M):
         if k not in idx_pair:
             u_agents[k] = u_from_cap(u_curr_agents[k], fixed_thetas[k], 0.0)
 
     for a, thi in enumerate(thi_vals):
         for b, thj in enumerate(thj_vals):
+            # update just i, j
             u_agents[i] = u_from_cap(u_curr_agents[i], thi, 0.0)
             u_agents[j] = u_from_cap(u_curr_agents[j], thj, 0.0)
+
 
             J_val = J_t_dual_coverage(
                 p_hat, P_p, p_agents, u_agents,
@@ -656,99 +771,126 @@ def compute_J_grid_thetas_pair(
     THJ_deg = np.rad2deg(THJ)
     return THI_deg, THJ_deg, J_grid
 
-
 # ============================================================
 # main()
 # ============================================================
 
 def main():
     # =======================
-    # User parameters
+    # User parameters (generalized / randomized)
     # =======================
-    M = 2
+    M = 3  # number of spacecraft
 
-    x_line_min, x_line_max = -1.0, 1.0
-    y_line = 0.0
+    # Spatial region for agents / target (you can tweak these)
+    x_line_min, x_line_max = -3.0, 3.0  # reuse as x-bounds for agents
+    y_line = 0.0  # can still be used as a reference line
 
-    x_t_min, x_t_max = -3.0, 3.0
-    y_t_min, y_t_max = 1.0, 5.0
+    x_t_min, x_t_max = -6, 6.0
+    y_t_min, y_t_max = -6.0, 6.0
 
-    # -----------------------
-    # Spacecraft attitude specs
-    # -----------------------
-    theta_h = np.deg2rad(2.5)
-    tau_max = 0.004
-    h_max = 0.015
-    m_m = 50
-    l_m = 0.5
-    m_t = 5
-    d_t = 0.28
-    z_0 = 0.3
-    I_max = (1 / 6) * m_m * (l_m / 2) ** 2 + (1 / 2) * m_t * (d_t / 2) ** 2 + m_t * z_0 ** 2
-    alpha_max = 1.63 * tau_max / I_max
-    omega_max = 1.63 * h_max / I_max
+    # FOV half-angle theta_h: random in a specified range [deg]
+    theta_h_min_deg = 2.0
+    theta_h_max_deg = 15.0
 
-    # Observation epochs (slew windows)
-    delta_ts = np.linspace(10.0, 70.0, 6)  # e.g. seconds between re-pointings
+    # Seed for other randomness (geometry, covariance, etc.)
+    # seed = 1764870711  # for not mean when m=2
+    # seed = 1764877550  # good for convex
+    # seed = 1764965779  # good for all at same place
+    seed = 1765220306
+    # seed = int(time.time())
+    # print(seed)
 
-    # -----------------------
-    # Target motion & uncertainty growth
-    # -----------------------
-    # Simple quadratic motion: p_hat(t) = p0 + v * Δt + 0.5 * a * Δt^2
-    v_target = np.array([0.01, 0.02])   # "velocity" in x,y per second
-    a_target = np.array([0.0, -0.0002]) # small acceleration, mostly in y
-
-    # Exponential covariance growth: P(t) = P0 * exp(2 * γ * Δt)
-    growth_rate = 0.02  # γ
-
-    rng = np.random.default_rng(0)
-
-    seed = int(time.time())
-    print("Seed:", seed)
-    # seed = 1764788512
-
-    # Initial planar pointing (near +y)
-    pointing_angles = np.deg2rad(rng.uniform(-1e-5, 1e-5, size=M))
 
     rng = np.random.default_rng(seed)
 
-    # --- Base covariance (shape), before random rotation ---
-    P_base = np.array([[0.025, 0.01],
-                       [-0.01, 0.05]])
+    theta_h = np.deg2rad(
+        rng.uniform(theta_h_min_deg, theta_h_max_deg)
+    )
 
+    # If you still need a generic theta_s_list somewhere:
+    theta_s_list = np.array([np.deg2rad(360.0)] * M)
+
+
+
+    # -----------------------
+    # Agent positions: random in the planar region
+    # -----------------------
+    x_agents = rng.uniform(x_line_min, x_line_max, size=M)
+    y_agents = rng.uniform(y_t_min, y_t_max, size=M)
+    p_agents_2d = np.stack([x_agents, y_agents], axis=1)
+
+    # -----------------------
+    # Target mean position: random in its own box
+    # -----------------------
+    p_hat_2d = np.array([
+        rng.uniform(x_t_min, x_t_max),
+        rng.uniform(y_t_min, y_t_max),
+    ])
+
+    # -----------------------
+    # Initial pointings: axis-aligned, chosen to best point to target
+    # -----------------------
+    # Angles are measured from +y axis CCW:
+    #   0       -> +y
+    #   pi/2    -> +x
+    #   pi      -> -y
+    #   3pi/2   -> -x
+    axis_dirs = np.array([
+        [0.0, 1.0],  # +y
+        [1.0, 0.0],  # +x
+        [0.0, -1.0],  # -y
+        [-1.0, 0.0],  # -x
+    ])
+    axis_angles = np.array([0.0, 0.5 * np.pi, np.pi, 1.5 * np.pi])
+
+    pointing_angles = np.zeros(M)
+    for i in range(M):
+        rel = p_hat_2d - p_agents_2d[i]  # vector from agent to target
+        n = np.linalg.norm(rel)
+        if n < 1e-9:
+            # if target is basically at the same point, just pick +y
+            pointing_angles[i] = 0.0
+            continue
+        rel_unit = rel / n
+        dots = axis_dirs @ rel_unit  # cosine with each axis direction
+        idx_best = np.argmax(dots)  # most aligned axis
+        pointing_angles[i] = axis_angles[idx_best]
+
+    # -----------------------
+    # 2D covariance: random eigenvalues + random rotation
+    # -----------------------
+    # Draw random eigenvalues (spread/scale of uncertainty)
+    lambda1, lambda2 = rng.uniform(0.2, 1.5, size=2)
+    D = np.diag([lambda1, lambda2])
+
+    # Random 2D rotation
     phi_r = rng.uniform(0.0, 2.0 * np.pi)
     R = np.array([[np.cos(phi_r), -np.sin(phi_r)],
-                  [np.sin(phi_r),  np.cos(phi_r)]])
-    P_p_2d_0 = R @ P_base @ R.T  # initial 2D covariance at t=0
+                  [np.sin(phi_r), np.cos(phi_r)]])
+
+    # Covariance = R * D * R^T
+    P_p_2d = R @ D @ R.T
 
     d_mahal = 3.0
-    kappa = 2000
+    kappa = 1500
+    # =======================
 
     # =======================
-    # EMS configuration
-    # =======================
-    p_em = np.array([0.0, 1.5, 0.0])   # EMS center
-    R_em = 0.3                         # EMS effective radius
-    alpha_s = np.deg2rad(1.0)          # safety margin
-    lambda_em = 10.0                    # penalty weight
-    beta_zeta = 1000.0                   # softplus sharpness
 
-    # =======================
-    # Initial geometry
-    # =======================
-    p_agents_2d = sample_agents_on_line(M, x_line_min, x_line_max, y_line, seed=seed)
-    p_hat_2d_0 = sample_target_in_front(x_t_min, x_t_max, y_t_min, y_t_max, seed=seed+10)
+    ellipse_pts = mahalanobis_ellipse_points(p_hat_2d, P_p_2d, d_mahal=d_mahal)
 
-    # 3D embedding of agents
-    p_agents = np.hstack([p_agents_2d, np.zeros((M, 1))])
+    # ----- Embed into 3D for optimizer -----
+    p_agents = np.hstack([p_agents_2d, np.zeros((M,1))])           # (M,3)
+    p_hat = np.array([p_hat_2d[0], p_hat_2d[1], 0.0])              # (3,)
 
-    # Initial 3D covariance (z small)
-    def embed_cov_3d(P2d):
-        return np.array([[P2d[0, 0], P2d[0, 1], 0.0],
-                         [P2d[1, 0], P2d[1, 1], 0.0],
-                         [0.0,        0.0,      1e-4]])
+    # Pad covariance to 3x3 (small z variance)
+    P_p = np.array([[P_p_2d[0, 0], P_p_2d[0, 1], 0.0],
+                    [P_p_2d[1, 0], P_p_2d[1, 1], 0.0],
+                    [0.0,          0.0,          1e-4]])
 
-    # Initial pointing vectors in 3D
+    # Current pointing vectors from planar angles (measured from +y)
+    # u = [sin(angle), cos(angle), 0]
+
     u_curr_agents = np.stack([np.sin(pointing_angles),
                               np.cos(pointing_angles),
                               np.zeros(M)], axis=1)
@@ -956,6 +1098,7 @@ def main():
         # Agent line
         ax.plot([x_line_min, x_line_max], [y_line, y_line],
                 color='k', lw=1, alpha=0.3)
+
 
 
         ax.set_aspect('equal', adjustable='box')
