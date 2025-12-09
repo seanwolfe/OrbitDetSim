@@ -729,14 +729,14 @@ def main():
     # =======================
     # User parameters (generalized / randomized)
     # =======================
-    M = 3  # number of spacecraft
+    M = 4  # number of spacecraft
 
     # Spatial region for agents / target (you can tweak these)
     y_line_min, y_line_max = -0.8, 0.8  # reuse as x-bounds for agents
     x_line = -1.5  # can still be used as a reference line
 
-    x_t_min, x_t_max = -1.5, 4.5
-    y_t_min, y_t_max = -4.5, 4.5
+    x_t_min, x_t_max = 1.5, 2.5
+    y_t_min, y_t_max = 2.5, 3.5
 
     # FOV half-angle theta_h: random in a specified range [deg]
     theta_h_min_deg = 2.5
@@ -774,8 +774,9 @@ def main():
     # seed = 1764877550  # good for convex
     # seed = 1764965779  # good for all at same place
     # seed = 1765220306
-    seed = int(time.time())
-    print(seed)
+    seed = 1765314781  # good for slew-time
+    # seed = int(time.time())
+    # print(seed)
 
     rng = np.random.default_rng(seed)
 
@@ -834,7 +835,7 @@ def main():
     # 2D covariance: random eigenvalues + random rotation
     # -----------------------
     # Draw random eigenvalues (spread/scale of uncertainty)
-    lambda1, lambda2 = rng.uniform(0.02, 0.5, size=2)
+    lambda1, lambda2 = rng.uniform(0.002, 0.1, size=2)
     D = np.diag([lambda1, lambda2])
 
     # Random 2D rotation
@@ -939,7 +940,7 @@ def main():
                       label=r"$J_t$")
     ax1.set_xlabel(r"Epoch time $\Delta t_s$ [s]")
     ax1.set_ylabel(r"$J_t$")
-    ax1.tick_params(axis='y', labelcolor=line1.get_color())
+    # ax1.tick_params(axis='y', labelcolor=line1.get_color())
 
     # ax2 = ax1.twinx()
     # line2, = ax2.plot(dts_res, -cost_values, marker='x', linestyle='--',
@@ -1040,7 +1041,7 @@ def main():
         # Ellipse at this epoch
         ellipse_pts = mahalanobis_ellipse_points(p_hat_2d_t, P_p_2d_t, d_mahal=d_mahal)
 
-        fig, ax = plt.subplots(figsize=(8, 6))
+        fig, ax = plt.subplots(figsize=(5, 5))
 
         ax.imshow(
             coverage_img,
@@ -1121,16 +1122,16 @@ def main():
                 color='k', lw=1, alpha=0.3)
 
         ax.set_aspect('equal', adjustable='box')
-        ax.set_xlabel("x (normalized)")
-        ax.set_ylabel("y (normalized)")
+        ax.set_xlabel(r"x ($10^6$ km)")
+        ax.set_ylabel(r"y ($10^6$ km)")
 
         ax.set_title(
             fr"t = {dt:.1f} s  |  "
             fr"$\theta_{{s,t}} = {np.rad2deg(theta_s_t):.1f}^{{\circ}}$"
         )
 
-        ax.set_xlim(x_line - 1.5,  x_t_max + 3)
-        ax.set_ylim(y_t_min - 1, y_t_max + 1)
+        # ax.set_xlim(x_line - 1.5,  x_t_max + 3)
+        # ax.set_ylim(y_t_min - 1, y_t_max + 1)
         plt.grid(alpha=0.25)
 
         # Proxy artists for coverage levels
