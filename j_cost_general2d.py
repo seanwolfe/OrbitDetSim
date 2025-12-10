@@ -110,6 +110,74 @@ def k2_tilde(y_samples, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma)
 
         return k1 + k2
 
+    if M == 5:
+        # k2: exactly two detect
+        k2 = (
+            # pairs involving 0
+                C[0] * C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] +
+                C[0] * C[2] * one_minus_C[1] * one_minus_C[3] * one_minus_C[4] +
+                C[0] * C[3] * one_minus_C[1] * one_minus_C[2] * one_minus_C[4] +
+                C[0] * C[4] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] +
+
+                # pairs involving 1
+                C[1] * C[2] * one_minus_C[0] * one_minus_C[3] * one_minus_C[4] +
+                C[1] * C[3] * one_minus_C[0] * one_minus_C[2] * one_minus_C[4] +
+                C[1] * C[4] * one_minus_C[0] * one_minus_C[2] * one_minus_C[3] +
+
+                # pairs involving 2
+                C[2] * C[3] * one_minus_C[0] * one_minus_C[1] * one_minus_C[4] +
+                C[2] * C[4] * one_minus_C[0] * one_minus_C[1] * one_minus_C[3] +
+
+                # pairs involving 3
+                C[3] * C[4] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2]
+        )
+
+        # k1: exactly one detects
+        k1 = 0.1 * (
+                C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] +
+                C[1] * one_minus_C[0] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] +
+                C[2] * one_minus_C[0] * one_minus_C[1] * one_minus_C[3] * one_minus_C[4] +
+                C[3] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[4] +
+                C[4] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3]
+        )
+
+        return k1 + k2
+
+    if M == 6:
+        # k2: exactly two detect
+        k2 = (
+                C[0] * C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] * one_minus_C[5] +
+                C[0] * C[2] * one_minus_C[1] * one_minus_C[3] * one_minus_C[4] * one_minus_C[5] +
+                C[0] * C[3] * one_minus_C[1] * one_minus_C[2] * one_minus_C[4] * one_minus_C[5] +
+                C[0] * C[4] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[5] +
+                C[0] * C[5] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] +
+
+                C[1] * C[2] * one_minus_C[0] * one_minus_C[3] * one_minus_C[4] * one_minus_C[5] +
+                C[1] * C[3] * one_minus_C[0] * one_minus_C[2] * one_minus_C[4] * one_minus_C[5] +
+                C[1] * C[4] * one_minus_C[0] * one_minus_C[2] * one_minus_C[3] * one_minus_C[5] +
+                C[1] * C[5] * one_minus_C[0] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] +
+
+                C[2] * C[3] * one_minus_C[0] * one_minus_C[1] * one_minus_C[4] * one_minus_C[5] +
+                C[2] * C[4] * one_minus_C[0] * one_minus_C[1] * one_minus_C[3] * one_minus_C[5] +
+                C[2] * C[5] * one_minus_C[0] * one_minus_C[1] * one_minus_C[3] * one_minus_C[4] +
+
+                C[3] * C[4] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[5] +
+                C[3] * C[5] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[4] +
+                C[4] * C[5] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3]
+        )
+
+        # k1: exactly one detects
+        k1 = 0.1 * (
+                C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] * one_minus_C[5] +
+                C[1] * one_minus_C[0] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] * one_minus_C[5] +
+                C[2] * one_minus_C[0] * one_minus_C[1] * one_minus_C[3] * one_minus_C[4] * one_minus_C[5] +
+                C[3] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[4] * one_minus_C[5] +
+                C[4] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[5] +
+                C[5] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4]
+        )
+
+        return k1 + k2
+
     prod_all = np.prod(one_minus_C, axis=0)
 
     k2 = np.zeros(N)
@@ -697,11 +765,14 @@ def main():
     # =======================
     # User parameters (generalized / randomized)
     # =======================
+    seed = 1765220309
+    rng = np.random.default_rng(seed)
+
     M = 3  # number of spacecraft
 
     # Spatial region for agents / target (you can tweak these)
     x_line_min, x_line_max = -3.0, 3.0  # reuse as x-bounds for agents
-    y_line = 0.0  # can still be used as a reference line
+    y_agents_min, y_agents_max = -6.0, 6.0  # reuse as x-bounds for agents
 
     x_t_min, x_t_max = -6, 6.0
     y_t_min, y_t_max = -6.0, 6.0
@@ -714,12 +785,13 @@ def main():
     # seed = 1764870711  # for not mean when m=2
     # seed = 1764877550  # good for convex
     # seed = 1764965779  # good for all at same place
-    seed = 1765220306
+    # seed = 1765220306
+
     # seed = int(time.time())
     # print(seed)
 
 
-    rng = np.random.default_rng(seed)
+
 
     theta_h = np.deg2rad(
         rng.uniform(theta_h_min_deg, theta_h_max_deg)
@@ -734,7 +806,7 @@ def main():
     # Agent positions: random in the planar region
     # -----------------------
     x_agents = rng.uniform(x_line_min, x_line_max, size=M)
-    y_agents = rng.uniform(y_t_min, y_t_max, size=M)
+    y_agents = rng.uniform(y_agents_min, y_agents_max, size=M)
     p_agents_2d = np.stack([x_agents, y_agents], axis=1)
 
     # -----------------------
@@ -840,6 +912,11 @@ def main():
         print(f"   u*    = {u_star[i]}")
         print(f"   slew  = {slew:.4f} rad   ({np.rad2deg(slew):.2f} deg)")
 
+    # True
+    sample_pt = sample_from_uncertainty_2d(p_hat_2d, P_p_2d,
+                                           d_mahal=d_mahal, rng=rng)
+
+
     # ---- Extract history for plotting ----
     slew0 = [entry["slew"][0] for entry in history]
     slew1 = [entry["slew"][1] for entry in history]
@@ -936,7 +1013,7 @@ def main():
     Nx = 500
     Ny = 500
     xg = np.linspace(x_line_min - 5, x_line_max + 10, Nx)
-    yg = np.linspace(y_line - 1, y_t_max + 8, Ny)
+    yg = np.linspace(y_agents_min - 1, y_t_max + 8, Ny)
     XX, YY = np.meshgrid(xg, yg)
     grid = np.stack([XX.ravel(), YY.ravel()], axis=1)
 
@@ -1040,9 +1117,7 @@ def main():
             color='tab:red', alpha=0.10)
 
     # Random sample from uncertainty distribution (within same d_M)
-    rng2 = np.random.default_rng(seed + 42)
-    sample_pt = sample_from_uncertainty_2d(p_hat_2d, P_p_2d,
-                                           d_mahal=d_mahal, rng=rng2)
+
     true_sc = ax.scatter(sample_pt[0], sample_pt[1],
                          s=60, facecolors='none', edgecolors='green',
                          linewidths=2, label='True position')
@@ -1081,7 +1156,7 @@ def main():
     ax.legend(handles=handles, loc='upper right')
 
     # Optional: J_t(θ_1, θ_2) surface, like before
-    if True:
+    if False:
         fixed_thetas = [np.deg2rad(62.44), 0, 0]
 
         TH12_1, TH12_2, J12 = compute_J_grid_thetas_pair(
