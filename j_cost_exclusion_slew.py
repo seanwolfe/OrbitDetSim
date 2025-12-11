@@ -2,8 +2,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import time
 
-from google.protobuf.internal.wire_format import INT32_MAX
-from mpl_toolkits.mplot3d import Axes3D  # needed for 3D EMS sphere plot
 try:
     from scipy.optimize import minimize
     SCIPY_OK = True
@@ -50,6 +48,12 @@ def u_from_cap(u_curr, theta, phi):
 
 def sigmoid(z):
     return 1.0 / (1.0 + np.exp(-z))
+
+
+def softplus(z, beta=1.0):
+    """Numerically stable softplus: (1/beta) * log(1 + exp(beta*z))."""
+    z_beta = beta * z
+    return (1.0 / beta) * np.log1p(np.exp(z_beta))
 
 
 # -----------------------------------------------------------
@@ -125,6 +129,63 @@ def J_t_dual_coverage(
 
 
 # -----------------------------------------
+# EMS exclusion penalty
+# -----------------------------------------
+
+def ems_exclusion_penalty(
+    p_agents,          # (M,3) spacecraft positions
+    u_agents,          # (M,3) pointing unit vectors
+    p_em,              # (3,) EMS center position
+    R_em,              # scalar EMS effective radius
+    theta_h,           # FOV half-angle
+    alpha_s,           # safety margin
+    lambda_em,         # penalty weight
+    beta_zeta=50.0     # softplus sharpness
+):
+    """
+    Smooth EMS exclusion penalty term:
+
+        Θ_EM,t = -λ_EM ∑ ζ(z_i),
+
+    but here we *return* +λ_EM ∑ ζ(z_i) so it can be added to a cost function
+    which we minimize:
+
+        objective = -J_t + λ_EM ∑ ζ(z_i),
+
+    with
+
+        z_i = u_i^T u_i^{EM} - cos(θ_h + α^{EM}_i + α_s),
+        α^{EM}_i = arcsin(R_EM / ||p_EM - p_i||),
+        u_i^{EM} = (p_EM - p_i) / ||p_EM - p_i||.
+    """
+    M = len(p_agents)
+    total = 0.0
+
+    for i in range(M):
+        r = p_em - p_agents[i]
+        dist = np.linalg.norm(r)
+        if dist < 1e-12:
+            # Degenerate: s/c at EMS center; skip or heavily penalize if desired
+            continue
+
+        u_em = r / dist
+
+        # α^{EM}_i = arcsin(R_EM / ||r||), clipped
+        ratio = np.clip(R_em / dist, -1.0, 1.0)
+        alpha_em = np.arcsin(ratio)
+
+        angle_req = theta_h + alpha_em + alpha_s
+        cos_req = np.cos(angle_req)
+
+        dot_val = float(np.dot(u_agents[i], u_em))
+        z_i = dot_val - cos_req
+
+        total += softplus(z_i, beta=beta_zeta)
+
+    return lambda_em * total
+
+
+# -----------------------------------------
 # Joint L-BFGS-B optimization over all agents
 # -----------------------------------------
 
@@ -167,42 +228,47 @@ def finite_diff_grad(f, x, eps=1e-4):
 def objective_joint(x, p_hat, P_p, p_agents, u_curr_agents,
                     theta_lower, theta_upper,
                     theta_h, d_M, kappa_sigma,
-                    y_cached):
+                    y_cached,
+                    p_em=None, R_em=0.0,
+                    alpha_s=0.0, lambda_em=0.0,
+                    beta_zeta=50.0):
+    """
+    Joint objective for the optimizer:
+
+        objective = -J_t_dual_coverage + EMS_penalty
+
+    where EMS_penalty = λ_EM ∑ softplus(z_i) if enabled.
+    """
     M = len(p_agents)
     u_agents = angles_to_pointings(x, p_agents, u_curr_agents, theta_lower, theta_upper, M)
-    # We maximize J, so objective is -J
-    return -J_t_dual_coverage(
+
+    # Base objective: maximize J_t, so minimize -J_t
+    J = J_t_dual_coverage(
         p_hat, P_p, p_agents, u_agents,
         theta_h, d_M=d_M, kappa_sigma=kappa_sigma,
         n_mc=y_cached.shape[0], y_samples_cached=y_cached
     )
+    obj = -J
+
+    # EMS exclusion penalty (only if configured)
+    if lambda_em != 0.0 and p_em is not None and R_em > 0.0:
+        penalty_em = ems_exclusion_penalty(
+            p_agents, u_agents,
+            p_em=p_em, R_em=R_em,
+            theta_h=theta_h,
+            alpha_s=alpha_s,
+            lambda_em=lambda_em,
+            beta_zeta=beta_zeta
+        )
+        obj += penalty_em
+
+    return obj
 
 
-def init_theta_phi_to_mean(p_hat, p_agents, u_curr_agents, theta_lower, theta_upper, seed, eps=1e-10):
+def init_theta_phi_to_mean(p_hat, p_agents, u_curr_agents, theta_lower, theta_upper, eps=1e-10, seed=123):
     """
-    Initialize (theta_i, phi_i) for each spacecraft i so that the resulting pointing
-    vector u_i is as close as possible to the direction from p_agents[i] to p_hat,
-    but respecting the slew constraints:
-        theta_lower[i] <= theta_i <= theta_upper[i].
-
-    Parameters
-    ----------
-    p_hat : array_like, shape (3,)
-        Mean position of the uncertainty ellipsoid in 3D.
-    p_agents : array_like, shape (M,3)
-        Positions of the M spacecraft.
-    u_curr_agents : array_like, shape (M,3)
-        Current boresight unit vectors for each spacecraft.
-    theta_lower : array_like, shape (M,)
-        Lower bounds on the slew angle for each spacecraft (usually >= 0).
-    theta_upper : array_like, shape (M,)
-        Upper bounds on the slew angle for each spacecraft.
-
-    Returns
-    -------
-    x0 : ndarray, shape (2*M,)
-        Initial parameter vector:
-            x0 = [theta_0, phi_0, theta_1, phi_1, ..., theta_{M-1}, phi_{M-1}]
+    Initialize (theta_i, phi_i) so u_i ~ direction from p_agents[i] to p_hat,
+    respecting slew bounds.
     """
     p_hat = np.asarray(p_hat, dtype=float)
     p_agents = np.asarray(p_agents, dtype=float)
@@ -255,7 +321,6 @@ def init_theta_phi_to_mean(p_hat, p_agents, u_curr_agents, theta_lower, theta_up
         x0[2*i+1] = phi_star
 
     return x0
-
 
 
 def estimate_theta_bounds_from_ellipsoid(p_hat, P_p, p_agents, u_curr_agents,
@@ -442,7 +507,10 @@ def optimize_pointing_lbfgs_joint(
         f = lambda z: objective_joint(
             z, p_hat, P_p, p_agents, u_curr_agents,
             theta_lower, theta_upper,
-            theta_h, d_M, kappa_sigma, y_cached
+            theta_h, d_M, kappa_sigma, y_cached,
+            p_em=p_em, R_em=R_em,
+            alpha_s=alpha_s, lambda_em=lambda_em,
+            beta_zeta=beta_zeta
         )
 
         if SCIPY_OK:
@@ -703,6 +771,7 @@ def main():
 
     rng = np.random.default_rng(0)
 
+    # seed = 1764781082
     seed = int(time.time())
     print("Seed:", seed)
     # seed = 1764788512
@@ -957,6 +1026,27 @@ def main():
         ax.plot([x_line_min, x_line_max], [y_line, y_line],
                 color='k', lw=1, alpha=0.3)
 
+        # Random sample from uncertainty distribution (within same d_M)
+        sample_pt = sample_from_uncertainty_2d(p_hat_2d_t, P_p_2d_t,
+                                               d_mahal=d_mahal, rng=rng)
+        ax.scatter(sample_pt[0], sample_pt[1],
+                   s=60, facecolors='none', edgecolors='green',
+                   linewidths=2, label='Random sample')
+
+        # ===== EMS sphere cross-section in 2D (z=0 plane) =====
+        if R_em > 0.0:
+            z_plane = 0.0
+            dz = z_plane - p_em[2]
+            if abs(dz) <= R_em:
+                r_xy = np.sqrt(R_em**2 - dz**2)
+                theta_c = np.linspace(0, 2*np.pi, 200)
+                x_c = p_em[0] + r_xy * np.cos(theta_c)
+                y_c = p_em[1] + r_xy * np.sin(theta_c)
+                ax.plot(x_c, y_c, color='orange', lw=2, label='EMS sphere (cross-section)')
+                ax.fill(x_c, y_c, color='orange', alpha=0.1)
+                ax.scatter(p_em[0], p_em[1], color='orange', s=60, marker='o')
+                ax.text(p_em[0], p_em[1] + 0.3, "EMS", color='orange',
+                        ha='center', va='bottom')
 
         ax.set_aspect('equal', adjustable='box')
         ax.set_xlabel("x")

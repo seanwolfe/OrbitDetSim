@@ -281,6 +281,7 @@ def objective_joint(x, p_hat, P_p, p_agents, u_curr_agents,
         n_mc=y_cached.shape[0], y_samples_cached=y_cached
     )
 
+
 def init_theta_phi_to_mean(p_hat, p_agents, u_curr_agents, theta_lower, theta_upper, seed, eps=1e-10):
     """
     Initialize (theta_i, phi_i) for each spacecraft i so that the resulting pointing
@@ -766,9 +767,10 @@ def main():
     # User parameters (generalized / randomized)
     # =======================
     seed = 1765220309
+    seed = 1765481444
     rng = np.random.default_rng(seed)
 
-    M = 3  # number of spacecraft
+    M = 2  # number of spacecraft
 
     # Spatial region for agents / target (you can tweak these)
     x_line_min, x_line_max = -3.0, 3.0  # reuse as x-bounds for agents
@@ -866,17 +868,18 @@ def main():
     # =======================
 
     # =======================
-
+    # Initial geometry
+    # =======================
     ellipse_pts = mahalanobis_ellipse_points(p_hat_2d, P_p_2d, d_mahal=d_mahal)
 
     # ----- Embed into 3D for optimizer -----
-    p_agents = np.hstack([p_agents_2d, np.zeros((M,1))])           # (M,3)
-    p_hat = np.array([p_hat_2d[0], p_hat_2d[1], 0.0])              # (3,)
+    p_agents = np.hstack([p_agents_2d, np.zeros((M, 1))])  # (M,3)
+    p_hat = np.array([p_hat_2d[0], p_hat_2d[1], 0.0])  # (3,)
 
     # Pad covariance to 3x3 (small z variance)
     P_p = np.array([[P_p_2d[0, 0], P_p_2d[0, 1], 0.0],
                     [P_p_2d[1, 0], P_p_2d[1, 1], 0.0],
-                    [0.0,          0.0,          1e-4]])
+                    [0.0, 0.0, 1e-4]])
 
     # Current pointing vectors from planar angles (measured from +y)
     # u = [sin(angle), cos(angle), 0]
