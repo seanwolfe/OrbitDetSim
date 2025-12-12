@@ -768,20 +768,21 @@ def main():
     # =======================
     seed = 1765220309
     seed = 1765481444
+    seed = 1765490101
     rng = np.random.default_rng(seed)
 
     M = 2  # number of spacecraft
 
     # Spatial region for agents / target (you can tweak these)
-    x_line_min, x_line_max = -3.0, 3.0  # reuse as x-bounds for agents
-    y_agents_min, y_agents_max = -6.0, 6.0  # reuse as x-bounds for agents
+    x_line_min, x_line_max = -1.5, -1.5  # reuse as x-bounds for agents
+    y_agents_min, y_agents_max = -0.8, 0.8  # reuse as x-bounds for agents
 
-    x_t_min, x_t_max = -6, 6.0
-    y_t_min, y_t_max = -6.0, 6.0
+    x_t_min, x_t_max = -1.0, 4.5
+    y_t_min, y_t_max = -4.5, 4.5
 
     # FOV half-angle theta_h: random in a specified range [deg]
-    theta_h_min_deg = 2.0
-    theta_h_max_deg = 15.0
+    theta_h_min_deg = 2.5
+    theta_h_max_deg = 2.5
 
     # Seed for other randomness (geometry, covariance, etc.)
     # seed = 1764870711  # for not mean when m=2
