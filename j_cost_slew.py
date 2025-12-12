@@ -81,13 +81,13 @@ def k2_tilde(y_samples, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma)
 
     if M == 2:
         # Algebraic identity: k2 = C0 * C1 for M=2
-        return C[0] * C[1]
+        return C[0] * C[1] + 0.01 * (C[0] + C[1])
 
     one_minus_C = 1.0 - C
 
     if M ==3:
         k2 = C[0] * C[1] * one_minus_C[2] + C[0] * C[2] * one_minus_C[1] + C[1] * C[2] * one_minus_C[0]
-        k1 = 0.1 * (C[0] * one_minus_C[1] * one_minus_C[2] + C[2] * one_minus_C[0] * one_minus_C[1] + C[1] * one_minus_C[0] * one_minus_C[2])
+        k1 = 0.01 * (C[0] * one_minus_C[1] * one_minus_C[2] + C[2] * one_minus_C[0] * one_minus_C[1] + C[1] * one_minus_C[0] * one_minus_C[2])
         return k1 + k2
 
     if M == 4:
@@ -102,11 +102,79 @@ def k2_tilde(y_samples, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma)
         )
 
         # k1: exactly one detects
-        k1 = 0.1 * (
+        k1 = 0.01 * (
                 C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] +
                 C[1] * one_minus_C[0] * one_minus_C[2] * one_minus_C[3] +
                 C[2] * one_minus_C[0] * one_minus_C[1] * one_minus_C[3] +
                 C[3] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2]
+        )
+
+        return k1 + k2
+
+    if M == 5:
+        # k2: exactly two detect
+        k2 = (
+            # pairs involving 0
+                C[0] * C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] +
+                C[0] * C[2] * one_minus_C[1] * one_minus_C[3] * one_minus_C[4] +
+                C[0] * C[3] * one_minus_C[1] * one_minus_C[2] * one_minus_C[4] +
+                C[0] * C[4] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] +
+
+                # pairs involving 1
+                C[1] * C[2] * one_minus_C[0] * one_minus_C[3] * one_minus_C[4] +
+                C[1] * C[3] * one_minus_C[0] * one_minus_C[2] * one_minus_C[4] +
+                C[1] * C[4] * one_minus_C[0] * one_minus_C[2] * one_minus_C[3] +
+
+                # pairs involving 2
+                C[2] * C[3] * one_minus_C[0] * one_minus_C[1] * one_minus_C[4] +
+                C[2] * C[4] * one_minus_C[0] * one_minus_C[1] * one_minus_C[3] +
+
+                # pairs involving 3
+                C[3] * C[4] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2]
+        )
+
+        # k1: exactly one detects
+        k1 = 0.01 * (
+                C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] +
+                C[1] * one_minus_C[0] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] +
+                C[2] * one_minus_C[0] * one_minus_C[1] * one_minus_C[3] * one_minus_C[4] +
+                C[3] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[4] +
+                C[4] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3]
+        )
+
+        return k1 + k2
+
+    if M == 6:
+        # k2: exactly two detect
+        k2 = (
+                C[0] * C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] * one_minus_C[5] +
+                C[0] * C[2] * one_minus_C[1] * one_minus_C[3] * one_minus_C[4] * one_minus_C[5] +
+                C[0] * C[3] * one_minus_C[1] * one_minus_C[2] * one_minus_C[4] * one_minus_C[5] +
+                C[0] * C[4] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[5] +
+                C[0] * C[5] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] +
+
+                C[1] * C[2] * one_minus_C[0] * one_minus_C[3] * one_minus_C[4] * one_minus_C[5] +
+                C[1] * C[3] * one_minus_C[0] * one_minus_C[2] * one_minus_C[4] * one_minus_C[5] +
+                C[1] * C[4] * one_minus_C[0] * one_minus_C[2] * one_minus_C[3] * one_minus_C[5] +
+                C[1] * C[5] * one_minus_C[0] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] +
+
+                C[2] * C[3] * one_minus_C[0] * one_minus_C[1] * one_minus_C[4] * one_minus_C[5] +
+                C[2] * C[4] * one_minus_C[0] * one_minus_C[1] * one_minus_C[3] * one_minus_C[5] +
+                C[2] * C[5] * one_minus_C[0] * one_minus_C[1] * one_minus_C[3] * one_minus_C[4] +
+
+                C[3] * C[4] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[5] +
+                C[3] * C[5] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[4] +
+                C[4] * C[5] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3]
+        )
+
+        # k1: exactly one detects
+        k1 = 0.01 * (
+                C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] * one_minus_C[5] +
+                C[1] * one_minus_C[0] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] * one_minus_C[5] +
+                C[2] * one_minus_C[0] * one_minus_C[1] * one_minus_C[3] * one_minus_C[4] * one_minus_C[5] +
+                C[3] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[4] * one_minus_C[5] +
+                C[4] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[5] +
+                C[5] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4]
         )
 
         return k1 + k2
@@ -270,6 +338,7 @@ def init_theta_phi_to_mean(p_hat, p_agents, u_curr_agents, theta_lower, theta_up
         # Direction from spacecraft to mean
         d_vec = p_hat - p_i
         dist = np.linalg.norm(d_vec)
+
         if dist < eps:
             # Degenerate: spacecraft at the mean; just keep current pointing
             theta_star = 0.0
@@ -301,6 +370,324 @@ def init_theta_phi_to_mean(p_hat, p_agents, u_curr_agents, theta_lower, theta_up
         possible_values = np.deg2rad([0, 1, -1])
         x0[2*i]   = theta_star + rng.choice(possible_values, size=1)
         x0[2*i+1] = phi_star
+
+    return x0
+
+
+def init_theta_phi_boundary_projection(
+    p_hat,
+    P_p,
+    p_agents,
+    u_curr_agents,
+    theta_lower,
+    theta_upper,
+    theta_h,
+    d_M,
+    kappa_sigma,
+    y_cached,
+    p_em,
+    R_em,
+    alpha_s,
+    seed,
+    eps=1e-10,
+):
+    """
+    3D warm-start initializer with EMS keep-out via boundary projection.
+
+    Steps:
+      1) Compute mean-pointing boresights u_star[i] (respecting slew limits).
+      2) If all u_star are EMS-safe (with theta_h, R_em, alpha_s), return
+         a jittered version of the mean-based angles (original behaviour).
+      3) Otherwise, for each spacecraft:
+           - If u_star[i] is safe  -> keep as single candidate.
+           - If u_star[i] is unsafe:
+               * Project u_star[i] onto the EMS exclusion boundary circle
+                 (angle(u, v_em) = theta_h + alpha_em + alpha_s),
+                 getting up to two candidate directions u_b1, u_b2,
+                 subject to slew limits and keep-out.
+      4) Enumerate all combinations of per-spacecraft candidates, evaluate
+         J_t_dual_coverage, and select the one with minimal cost.
+      5) Convert the resulting boresights back to (theta_i, phi_i).
+      6) Apply a small theta jitter where it remains EMS-safe and
+         within slew bounds.
+
+    Returns
+    -------
+    x0 : np.ndarray, shape (2*M,)
+        Stacked [theta_0, phi_0, theta_1, phi_1, ..., theta_{M-1}, phi_{M-1}].
+    """
+
+    rng = np.random.default_rng(seed=seed)
+    jitter_values = np.deg2rad([0.0, 1.0, -1.0])  # small theta jitter, in radians
+    p_hat = np.asarray(p_hat, dtype=float)
+    p_agents = np.asarray(p_agents, dtype=float)
+    u_curr_agents = np.asarray(u_curr_agents, dtype=float)
+    theta_lower = np.asarray(theta_lower, dtype=float)
+    theta_upper = np.asarray(theta_upper, dtype=float)
+
+    M = p_agents.shape[0]
+    x0 = np.zeros(2 * M, dtype=float)
+    n_mc = y_cached.shape[0]
+
+    # --------------------------------------------------
+    # Helper: single-ray keep-out check for spacecraft i
+    # --------------------------------------------------
+    def keepout_safe_single(p_i, u_i, theta_h, p_em, R_em, alpha_s, eps=1e-12):
+        r_vec = p_em - p_i
+        r_norm = np.linalg.norm(r_vec)
+        if r_norm < R_em + eps:
+            # Spacecraft effectively inside EMS sphere -> treat as violation
+            return False
+
+        v_em = r_vec / r_norm
+        cos_gamma = np.clip(np.dot(u_i, v_em), -1.0, 1.0)
+        gamma = np.arccos(cos_gamma)
+
+        ratio = np.clip(R_em / r_norm, -1.0, 1.0)
+        alpha_em = np.arcsin(ratio)
+
+        gamma_bound = theta_h + alpha_em + alpha_s
+        return gamma >= gamma_bound
+
+    # --------------------------------------------------
+    # Helper: config-wise keep-out
+    # --------------------------------------------------
+    def config_keepout_safe(p_agents, u_array, theta_h, p_em, R_em, alpha_s):
+        for i in range(p_agents.shape[0]):
+            if not keepout_safe_single(p_agents[i], u_array[i], theta_h, p_em, R_em, alpha_s):
+                return False
+        return True
+
+    # --------------------------------------------------
+    # Helper: local parameterization u(theta, phi)
+    # --------------------------------------------------
+    def u_from_theta_phi(theta, phi, u_curr, e1, e2):
+        """
+        u = cos(theta)*u_curr + sin(theta)*(cos(phi)*e1 + sin(phi)*e2)
+        All vectors assumed unit, theta in [0, pi].
+        """
+        return (
+            np.cos(theta) * u_curr
+            + np.sin(theta) * (np.cos(phi) * e1 + np.sin(phi) * e2)
+        )
+
+    # --------------------------------------------------
+    # Precompute local bases and mean-pointing directions u_star[i]
+    # --------------------------------------------------
+    u_curr_norm = np.zeros_like(u_curr_agents)
+    e1_list = np.zeros_like(u_curr_agents)
+    e2_list = np.zeros_like(u_curr_agents)
+    theta_star = np.zeros(M)
+    phi_star = np.zeros(M)
+    u_star = np.zeros_like(u_curr_agents)
+
+    for i in range(M):
+        p_i = p_agents[i]
+        u_curr = u_curr_agents[i]
+        n_u = np.linalg.norm(u_curr)
+        if n_u < eps:
+            # degenerate, pick arbitrary unit vector
+            u_curr = np.array([0.0, 0.0, 1.0])
+            n_u = 1.0
+        u_curr /= n_u
+        u_curr_norm[i] = u_curr
+
+        # Desired mean direction
+        d_vec = p_hat - p_i
+        dist = np.linalg.norm(d_vec)
+        if dist < eps:
+            v_des = u_curr
+        else:
+            v_des = d_vec / dist
+
+        # Local basis around u_curr
+        e1, e2 = orthonormal_basis_from_u(u_curr)
+        e1_list[i] = e1
+        e2_list[i] = e2
+
+        # Decompose v_des in {u_curr, e1, e2}
+        a = np.dot(v_des, u_curr)
+        b1 = np.dot(v_des, e1)
+        b2 = np.dot(v_des, e2)
+        s = np.sqrt(b1**2 + b2**2)
+
+        # Spherical-like angles
+        theta_i = np.arctan2(s, a)      # [0, pi]
+        phi_i = np.arctan2(b2, b1)      # (-pi, pi]
+
+        # Clamp theta to slew interval
+        theta_i = np.clip(theta_i, theta_lower[i], theta_upper[i])
+
+        theta_star[i] = theta_i
+        phi_star[i] = phi_i
+
+        u_star[i] = u_from_theta_phi(theta_i, phi_i, u_curr, e1, e2)
+
+    # --------------------------------------------------
+    # Step 1: If mean-based config is EMS-safe, use original style + jitter
+    # --------------------------------------------------
+    if config_keepout_safe(p_agents, u_star, theta_h, p_em, R_em, alpha_s):
+        for i in range(M):
+            jitter = rng.choice(jitter_values)
+            theta_i = theta_star[i] + jitter
+            # keep phi as-is
+            # ensure slew bounds
+            theta_i = np.clip(theta_i, theta_lower[i], theta_upper[i])
+
+            # rebuild u and re-check keep-out; if violated, drop jitter
+            u_i = u_from_theta_phi(theta_i, phi_star[i], u_curr_norm[i], e1_list[i], e2_list[i])
+            if not keepout_safe_single(p_agents[i], u_i, theta_h, p_em, R_em, alpha_s):
+                theta_i = theta_star[i]  # revert
+
+            x0[2 * i] = theta_i
+            x0[2 * i + 1] = phi_star[i]
+        return x0
+
+    # --------------------------------------------------
+    # Step 2: Mean-based config not safe -> boundary projection per spacecraft
+    # --------------------------------------------------
+    candidate_u_list = []
+
+    for i in range(M):
+        p_i = p_agents[i]
+        u_curr = u_curr_norm[i]
+        u_i_star = u_star[i]
+
+        # Direction to EMS center
+        r_vec = p_em - p_i
+        r_norm = np.linalg.norm(r_vec)
+        if r_norm < R_em + eps:
+            # pathological: spacecraft basically inside EMS
+            # fallback: just keep u_star
+            candidate_u_list.append([u_i_star])
+            continue
+
+        v_em = r_vec / r_norm
+        ratio = np.clip(R_em / r_norm, -1.0, 1.0)
+        alpha_em = np.arcsin(ratio)
+        gamma_bound = theta_h + alpha_em + alpha_s
+
+        # If gamma_bound is nonsensical (>= pi), just keep u_star
+        if gamma_bound >= np.pi - 1e-6:
+            candidate_u_list.append([u_i_star])
+            continue
+
+        # Check whether u_star is actually safe; if so, just keep it
+        if keepout_safe_single(p_i, u_i_star, theta_h, p_em, R_em, alpha_s):
+            candidate_u_list.append([u_i_star])
+            continue
+
+
+        # Otherwise, project u_star onto boundary circle: angle(u, v_em) = gamma_bound
+        # Decompose u_star into parallel and perpendicular wrt v_em
+        c = np.dot(u_i_star, v_em)
+        v_parallel = c * v_em
+        v_perp = u_i_star - v_parallel
+        n_perp = np.linalg.norm(v_perp)
+
+        if n_perp < eps:
+            # u_star is nearly colinear with v_em; choose an arbitrary perp direction
+            e1_em, e2_em = orthonormal_basis_from_u(v_em)
+            v_perp_hat = e1_em
+        else:
+            v_perp_hat = v_perp / n_perp
+
+        cos_gb = np.cos(gamma_bound)
+        sin_gb = np.sin(gamma_bound)
+
+        # Two symmetric boundary directions on the circle
+        u_b1 = cos_gb * v_em + sin_gb * v_perp_hat
+        u_b2 = cos_gb * v_em - sin_gb * v_perp_hat
+
+        # Normalize for safety
+        u_b1 /= max(np.linalg.norm(u_b1), eps)
+        u_b2 /= max(np.linalg.norm(u_b2), eps)
+
+        candidate_dirs = []
+
+        # Check slew feasibility + keep-out for each boundary candidate
+        for u_b in (u_b1, u_b2):
+            cos_theta = np.clip(np.dot(u_b, u_curr), -1.0, 1.0)
+            theta_b = np.arccos(cos_theta)
+
+            if theta_b < theta_lower[i] - 1e-6 or theta_b > theta_upper[i] + 1e-6:
+                continue  # outside slew envelope
+
+            # if not keepout_safe_single(p_i, u_b, theta_h, p_em, R_em, alpha_s):
+            #     continue  # should be rare, but guard anyway
+
+            candidate_dirs.append(u_b)
+
+        if len(candidate_dirs) == 0:
+            # Fallback if both boundary projections fail: use u_star anyway
+            candidate_u_list.append([u_i_star])
+        else:
+            # Use the boundary candidates (1 or 2) for this spacecraft
+            candidate_u_list.append(candidate_dirs)
+
+    # --------------------------------------------------
+    # Step 3: Enumerate all combinations of candidate_u_list and pick best J_t
+    # --------------------------------------------------
+    best_J = -np.inf
+    best_u = None
+
+    index_ranges = [range(len(cands)) for cands in candidate_u_list]
+
+    for choice in itertools.product(*index_ranges):
+        u_trial = np.zeros_like(u_curr_agents)
+        for i, idx in enumerate(choice):
+            u_trial[i] = candidate_u_list[i][idx]
+
+        J_val = J_t_dual_coverage(
+            p_hat,
+            P_p,
+            p_agents,
+            u_trial,
+            theta_h,
+            d_M=d_M,
+            kappa_sigma=kappa_sigma,
+            n_mc=n_mc,
+            y_samples_cached=y_cached,
+        )
+
+        if J_val > best_J:
+            best_J = J_val
+            best_u = u_trial.copy()
+
+    if best_u is None:
+        # Total fallback (should be extremely rare): revert to mean-based u_star
+        best_u = u_star.copy()
+
+    # --------------------------------------------------
+    # Step 4: Convert best_u back to (theta_i, phi_i), then apply safe jitter
+    # --------------------------------------------------
+    for i in range(M):
+        u_curr = u_curr_norm[i]
+        e1 = e1_list[i]
+        e2 = e2_list[i]
+        u_i = best_u[i]
+
+        a = np.dot(u_i, u_curr)
+        b1 = np.dot(u_i, e1)
+        b2 = np.dot(u_i, e2)
+        s = np.sqrt(b1**2 + b2**2)
+
+        theta_i = np.arctan2(s, a)
+        phi_i = np.arctan2(b2, b1)
+
+        # Ensure theta within bounds (small numeric repair if needed)
+        theta_i = np.clip(theta_i, theta_lower[i], theta_upper[i])
+
+        # Optional: apply jitter in theta while preserving keep-out
+        jitter = rng.choice(jitter_values)
+        theta_j = np.clip(theta_i + jitter, theta_lower[i], theta_upper[i])
+        u_j = u_from_theta_phi(theta_j, phi_i, u_curr, e1, e2)
+
+        if keepout_safe_single(p_agents[i], u_j, theta_h, p_em, R_em, alpha_s):
+            theta_i = theta_j  # accept jitter
+
+        x0[2 * i] = theta_i
+        x0[2 * i + 1] = phi_i
 
     return x0
 

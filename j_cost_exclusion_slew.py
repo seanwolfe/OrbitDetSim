@@ -7,6 +7,10 @@ try:
     SCIPY_OK = True
 except Exception:
     SCIPY_OK = False
+import itertools
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+
 
 
 # -----------------------------
@@ -84,7 +88,106 @@ def k2_tilde(y_samples, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma)
         C[i] = c_tilde_i(y_samples, Lp, p_hat, p_agents[i], u_agents[i],
                          cos_theta_h, kappa_sigma)
 
+    if M == 2:
+        # Algebraic identity: k2 = C0 * C1 for M=2
+        return C[0] * C[1] + 0.01 * (C[0] + C[1])
+
     one_minus_C = 1.0 - C
+
+    if M ==3:
+        k2 = C[0] * C[1] * one_minus_C[2] + C[0] * C[2] * one_minus_C[1] + C[1] * C[2] * one_minus_C[0]
+        k1 = 0.01 * (C[0] * one_minus_C[1] * one_minus_C[2] + C[2] * one_minus_C[0] * one_minus_C[1] + C[1] * one_minus_C[0] * one_minus_C[2])
+        return k1 + k2
+
+    if M == 4:
+        # k2: exactly two detect
+        k2 = (
+                C[0] * C[1] * one_minus_C[2] * one_minus_C[3] +
+                C[0] * C[2] * one_minus_C[1] * one_minus_C[3] +
+                C[0] * C[3] * one_minus_C[1] * one_minus_C[2] +
+                C[1] * C[2] * one_minus_C[0] * one_minus_C[3] +
+                C[1] * C[3] * one_minus_C[0] * one_minus_C[2] +
+                C[2] * C[3] * one_minus_C[0] * one_minus_C[1]
+        )
+
+        # k1: exactly one detects
+        k1 = 0.01 * (
+                C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] +
+                C[1] * one_minus_C[0] * one_minus_C[2] * one_minus_C[3] +
+                C[2] * one_minus_C[0] * one_minus_C[1] * one_minus_C[3] +
+                C[3] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2]
+        )
+
+        return k1 + k2
+
+    if M == 5:
+        # k2: exactly two detect
+        k2 = (
+            # pairs involving 0
+                C[0] * C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] +
+                C[0] * C[2] * one_minus_C[1] * one_minus_C[3] * one_minus_C[4] +
+                C[0] * C[3] * one_minus_C[1] * one_minus_C[2] * one_minus_C[4] +
+                C[0] * C[4] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] +
+
+                # pairs involving 1
+                C[1] * C[2] * one_minus_C[0] * one_minus_C[3] * one_minus_C[4] +
+                C[1] * C[3] * one_minus_C[0] * one_minus_C[2] * one_minus_C[4] +
+                C[1] * C[4] * one_minus_C[0] * one_minus_C[2] * one_minus_C[3] +
+
+                # pairs involving 2
+                C[2] * C[3] * one_minus_C[0] * one_minus_C[1] * one_minus_C[4] +
+                C[2] * C[4] * one_minus_C[0] * one_minus_C[1] * one_minus_C[3] +
+
+                # pairs involving 3
+                C[3] * C[4] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2]
+        )
+
+        # k1: exactly one detects
+        k1 = 0.01 * (
+                C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] +
+                C[1] * one_minus_C[0] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] +
+                C[2] * one_minus_C[0] * one_minus_C[1] * one_minus_C[3] * one_minus_C[4] +
+                C[3] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[4] +
+                C[4] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3]
+        )
+
+        return k1 + k2
+
+    if M == 6:
+        # k2: exactly two detect
+        k2 = (
+                C[0] * C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] * one_minus_C[5] +
+                C[0] * C[2] * one_minus_C[1] * one_minus_C[3] * one_minus_C[4] * one_minus_C[5] +
+                C[0] * C[3] * one_minus_C[1] * one_minus_C[2] * one_minus_C[4] * one_minus_C[5] +
+                C[0] * C[4] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[5] +
+                C[0] * C[5] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] +
+
+                C[1] * C[2] * one_minus_C[0] * one_minus_C[3] * one_minus_C[4] * one_minus_C[5] +
+                C[1] * C[3] * one_minus_C[0] * one_minus_C[2] * one_minus_C[4] * one_minus_C[5] +
+                C[1] * C[4] * one_minus_C[0] * one_minus_C[2] * one_minus_C[3] * one_minus_C[5] +
+                C[1] * C[5] * one_minus_C[0] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] +
+
+                C[2] * C[3] * one_minus_C[0] * one_minus_C[1] * one_minus_C[4] * one_minus_C[5] +
+                C[2] * C[4] * one_minus_C[0] * one_minus_C[1] * one_minus_C[3] * one_minus_C[5] +
+                C[2] * C[5] * one_minus_C[0] * one_minus_C[1] * one_minus_C[3] * one_minus_C[4] +
+
+                C[3] * C[4] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[5] +
+                C[3] * C[5] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[4] +
+                C[4] * C[5] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3]
+        )
+
+        # k1: exactly one detects
+        k1 = 0.01 * (
+                C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] * one_minus_C[5] +
+                C[1] * one_minus_C[0] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] * one_minus_C[5] +
+                C[2] * one_minus_C[0] * one_minus_C[1] * one_minus_C[3] * one_minus_C[4] * one_minus_C[5] +
+                C[3] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[4] * one_minus_C[5] +
+                C[4] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[5] +
+                C[5] * one_minus_C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4]
+        )
+
+        return k1 + k2
+
     prod_all = np.prod(one_minus_C, axis=0)
 
     k2 = np.zeros(N)
@@ -265,10 +368,31 @@ def objective_joint(x, p_hat, P_p, p_agents, u_curr_agents,
     return obj
 
 
-def init_theta_phi_to_mean(p_hat, p_agents, u_curr_agents, theta_lower, theta_upper, eps=1e-10, seed=123):
+def init_theta_phi_to_mean(p_hat, p_agents, u_curr_agents, theta_lower, theta_upper, seed, eps=1e-10):
     """
-    Initialize (theta_i, phi_i) so u_i ~ direction from p_agents[i] to p_hat,
-    respecting slew bounds.
+    Initialize (theta_i, phi_i) for each spacecraft i so that the resulting pointing
+    vector u_i is as close as possible to the direction from p_agents[i] to p_hat,
+    but respecting the slew constraints:
+        theta_lower[i] <= theta_i <= theta_upper[i].
+
+    Parameters
+    ----------
+    p_hat : array_like, shape (3,)
+        Mean position of the uncertainty ellipsoid in 3D.
+    p_agents : array_like, shape (M,3)
+        Positions of the M spacecraft.
+    u_curr_agents : array_like, shape (M,3)
+        Current boresight unit vectors for each spacecraft.
+    theta_lower : array_like, shape (M,)
+        Lower bounds on the slew angle for each spacecraft (usually >= 0).
+    theta_upper : array_like, shape (M,)
+        Upper bounds on the slew angle for each spacecraft.
+
+    Returns
+    -------
+    x0 : ndarray, shape (2*M,)
+        Initial parameter vector:
+            x0 = [theta_0, phi_0, theta_1, phi_1, ..., theta_{M-1}, phi_{M-1}]
     """
     p_hat = np.asarray(p_hat, dtype=float)
     p_agents = np.asarray(p_agents, dtype=float)
@@ -288,6 +412,7 @@ def init_theta_phi_to_mean(p_hat, p_agents, u_curr_agents, theta_lower, theta_up
         # Direction from spacecraft to mean
         d_vec = p_hat - p_i
         dist = np.linalg.norm(d_vec)
+
         if dist < eps:
             # Degenerate: spacecraft at the mean; just keep current pointing
             theta_star = 0.0
@@ -319,6 +444,324 @@ def init_theta_phi_to_mean(p_hat, p_agents, u_curr_agents, theta_lower, theta_up
         possible_values = np.deg2rad([0, 1, -1])
         x0[2*i]   = theta_star + rng.choice(possible_values, size=1)
         x0[2*i+1] = phi_star
+
+    return x0
+
+
+def init_theta_phi_boundary_projection(
+    p_hat,
+    P_p,
+    p_agents,
+    u_curr_agents,
+    theta_lower,
+    theta_upper,
+    theta_h,
+    d_M,
+    kappa_sigma,
+    y_cached,
+    p_em,
+    R_em,
+    alpha_s,
+    seed,
+    eps=1e-10,
+):
+    """
+    3D warm-start initializer with EMS keep-out via boundary projection.
+
+    Steps:
+      1) Compute mean-pointing boresights u_star[i] (respecting slew limits).
+      2) If all u_star are EMS-safe (with theta_h, R_em, alpha_s), return
+         a jittered version of the mean-based angles (original behaviour).
+      3) Otherwise, for each spacecraft:
+           - If u_star[i] is safe  -> keep as single candidate.
+           - If u_star[i] is unsafe:
+               * Project u_star[i] onto the EMS exclusion boundary circle
+                 (angle(u, v_em) = theta_h + alpha_em + alpha_s),
+                 getting up to two candidate directions u_b1, u_b2,
+                 subject to slew limits and keep-out.
+      4) Enumerate all combinations of per-spacecraft candidates, evaluate
+         J_t_dual_coverage, and select the one with minimal cost.
+      5) Convert the resulting boresights back to (theta_i, phi_i).
+      6) Apply a small theta jitter where it remains EMS-safe and
+         within slew bounds.
+
+    Returns
+    -------
+    x0 : np.ndarray, shape (2*M,)
+        Stacked [theta_0, phi_0, theta_1, phi_1, ..., theta_{M-1}, phi_{M-1}].
+    """
+
+    rng = np.random.default_rng(seed=seed)
+    jitter_values = np.deg2rad([0.0, 1.0, -1.0])  # small theta jitter, in radians
+    p_hat = np.asarray(p_hat, dtype=float)
+    p_agents = np.asarray(p_agents, dtype=float)
+    u_curr_agents = np.asarray(u_curr_agents, dtype=float)
+    theta_lower = np.asarray(theta_lower, dtype=float)
+    theta_upper = np.asarray(theta_upper, dtype=float)
+
+    M = p_agents.shape[0]
+    x0 = np.zeros(2 * M, dtype=float)
+    n_mc = y_cached.shape[0]
+
+    # --------------------------------------------------
+    # Helper: single-ray keep-out check for spacecraft i
+    # --------------------------------------------------
+    def keepout_safe_single(p_i, u_i, theta_h, p_em, R_em, alpha_s, eps=1e-12):
+        r_vec = p_em - p_i
+        r_norm = np.linalg.norm(r_vec)
+        if r_norm < R_em + eps:
+            # Spacecraft effectively inside EMS sphere -> treat as violation
+            return False
+
+        v_em = r_vec / r_norm
+        cos_gamma = np.clip(np.dot(u_i, v_em), -1.0, 1.0)
+        gamma = np.arccos(cos_gamma)
+
+        ratio = np.clip(R_em / r_norm, -1.0, 1.0)
+        alpha_em = np.arcsin(ratio)
+
+        gamma_bound = theta_h + alpha_em + alpha_s
+        return gamma >= gamma_bound
+
+    # --------------------------------------------------
+    # Helper: config-wise keep-out
+    # --------------------------------------------------
+    def config_keepout_safe(p_agents, u_array, theta_h, p_em, R_em, alpha_s):
+        for i in range(p_agents.shape[0]):
+            if not keepout_safe_single(p_agents[i], u_array[i], theta_h, p_em, R_em, alpha_s):
+                return False
+        return True
+
+    # --------------------------------------------------
+    # Helper: local parameterization u(theta, phi)
+    # --------------------------------------------------
+    def u_from_theta_phi(theta, phi, u_curr, e1, e2):
+        """
+        u = cos(theta)*u_curr + sin(theta)*(cos(phi)*e1 + sin(phi)*e2)
+        All vectors assumed unit, theta in [0, pi].
+        """
+        return (
+            np.cos(theta) * u_curr
+            + np.sin(theta) * (np.cos(phi) * e1 + np.sin(phi) * e2)
+        )
+
+    # --------------------------------------------------
+    # Precompute local bases and mean-pointing directions u_star[i]
+    # --------------------------------------------------
+    u_curr_norm = np.zeros_like(u_curr_agents)
+    e1_list = np.zeros_like(u_curr_agents)
+    e2_list = np.zeros_like(u_curr_agents)
+    theta_star = np.zeros(M)
+    phi_star = np.zeros(M)
+    u_star = np.zeros_like(u_curr_agents)
+
+    for i in range(M):
+        p_i = p_agents[i]
+        u_curr = u_curr_agents[i]
+        n_u = np.linalg.norm(u_curr)
+        if n_u < eps:
+            # degenerate, pick arbitrary unit vector
+            u_curr = np.array([0.0, 0.0, 1.0])
+            n_u = 1.0
+        u_curr /= n_u
+        u_curr_norm[i] = u_curr
+
+        # Desired mean direction
+        d_vec = p_hat - p_i
+        dist = np.linalg.norm(d_vec)
+        if dist < eps:
+            v_des = u_curr
+        else:
+            v_des = d_vec / dist
+
+        # Local basis around u_curr
+        e1, e2 = orthonormal_basis_from_u(u_curr)
+        e1_list[i] = e1
+        e2_list[i] = e2
+
+        # Decompose v_des in {u_curr, e1, e2}
+        a = np.dot(v_des, u_curr)
+        b1 = np.dot(v_des, e1)
+        b2 = np.dot(v_des, e2)
+        s = np.sqrt(b1**2 + b2**2)
+
+        # Spherical-like angles
+        theta_i = np.arctan2(s, a)      # [0, pi]
+        phi_i = np.arctan2(b2, b1)      # (-pi, pi]
+
+        # Clamp theta to slew interval
+        theta_i = np.clip(theta_i, theta_lower[i], theta_upper[i])
+
+        theta_star[i] = theta_i
+        phi_star[i] = phi_i
+
+        u_star[i] = u_from_theta_phi(theta_i, phi_i, u_curr, e1, e2)
+
+    # --------------------------------------------------
+    # Step 1: If mean-based config is EMS-safe, use original style + jitter
+    # --------------------------------------------------
+    if config_keepout_safe(p_agents, u_star, theta_h, p_em, R_em, alpha_s):
+        for i in range(M):
+            jitter = rng.choice(jitter_values)
+            theta_i = theta_star[i] + jitter
+            # keep phi as-is
+            # ensure slew bounds
+            theta_i = np.clip(theta_i, theta_lower[i], theta_upper[i])
+
+            # rebuild u and re-check keep-out; if violated, drop jitter
+            u_i = u_from_theta_phi(theta_i, phi_star[i], u_curr_norm[i], e1_list[i], e2_list[i])
+            if not keepout_safe_single(p_agents[i], u_i, theta_h, p_em, R_em, alpha_s):
+                theta_i = theta_star[i]  # revert
+
+            x0[2 * i] = theta_i
+            x0[2 * i + 1] = phi_star[i]
+        return x0
+
+    # --------------------------------------------------
+    # Step 2: Mean-based config not safe -> boundary projection per spacecraft
+    # --------------------------------------------------
+    candidate_u_list = []
+
+    for i in range(M):
+        p_i = p_agents[i]
+        u_curr = u_curr_norm[i]
+        u_i_star = u_star[i]
+
+        # Direction to EMS center
+        r_vec = p_em - p_i
+        r_norm = np.linalg.norm(r_vec)
+        if r_norm < R_em + eps:
+            # pathological: spacecraft basically inside EMS
+            # fallback: just keep u_star
+            candidate_u_list.append([u_i_star])
+            continue
+
+        v_em = r_vec / r_norm
+        ratio = np.clip(R_em / r_norm, -1.0, 1.0)
+        alpha_em = np.arcsin(ratio)
+        gamma_bound = theta_h + alpha_em + alpha_s
+
+        # If gamma_bound is nonsensical (>= pi), just keep u_star
+        if gamma_bound >= np.pi - 1e-6:
+            candidate_u_list.append([u_i_star])
+            continue
+
+        # Check whether u_star is actually safe; if so, just keep it
+        if keepout_safe_single(p_i, u_i_star, theta_h, p_em, R_em, alpha_s):
+            candidate_u_list.append([u_i_star])
+            continue
+
+
+        # Otherwise, project u_star onto boundary circle: angle(u, v_em) = gamma_bound
+        # Decompose u_star into parallel and perpendicular wrt v_em
+        c = np.dot(u_i_star, v_em)
+        v_parallel = c * v_em
+        v_perp = u_i_star - v_parallel
+        n_perp = np.linalg.norm(v_perp)
+
+        if n_perp < eps:
+            # u_star is nearly colinear with v_em; choose an arbitrary perp direction
+            e1_em, e2_em = orthonormal_basis_from_u(v_em)
+            v_perp_hat = e1_em
+        else:
+            v_perp_hat = v_perp / n_perp
+
+        cos_gb = np.cos(gamma_bound)
+        sin_gb = np.sin(gamma_bound)
+
+        # Two symmetric boundary directions on the circle
+        u_b1 = cos_gb * v_em + sin_gb * v_perp_hat
+        u_b2 = cos_gb * v_em - sin_gb * v_perp_hat
+
+        # Normalize for safety
+        u_b1 /= max(np.linalg.norm(u_b1), eps)
+        u_b2 /= max(np.linalg.norm(u_b2), eps)
+
+        candidate_dirs = []
+
+        # Check slew feasibility + keep-out for each boundary candidate
+        for u_b in (u_b1, u_b2):
+            cos_theta = np.clip(np.dot(u_b, u_curr), -1.0, 1.0)
+            theta_b = np.arccos(cos_theta)
+
+            if theta_b < theta_lower[i] - 1e-6 or theta_b > theta_upper[i] + 1e-6:
+                continue  # outside slew envelope
+
+            # if not keepout_safe_single(p_i, u_b, theta_h, p_em, R_em, alpha_s):
+            #     continue  # should be rare, but guard anyway
+
+            candidate_dirs.append(u_b)
+
+        if len(candidate_dirs) == 0:
+            # Fallback if both boundary projections fail: use u_star anyway
+            candidate_u_list.append([u_i_star])
+        else:
+            # Use the boundary candidates (1 or 2) for this spacecraft
+            candidate_u_list.append(candidate_dirs)
+
+    # --------------------------------------------------
+    # Step 3: Enumerate all combinations of candidate_u_list and pick best J_t
+    # --------------------------------------------------
+    best_J = -np.inf
+    best_u = None
+
+    index_ranges = [range(len(cands)) for cands in candidate_u_list]
+
+    for choice in itertools.product(*index_ranges):
+        u_trial = np.zeros_like(u_curr_agents)
+        for i, idx in enumerate(choice):
+            u_trial[i] = candidate_u_list[i][idx]
+
+        J_val = J_t_dual_coverage(
+            p_hat,
+            P_p,
+            p_agents,
+            u_trial,
+            theta_h,
+            d_M=d_M,
+            kappa_sigma=kappa_sigma,
+            n_mc=n_mc,
+            y_samples_cached=y_cached,
+        )
+
+        if J_val > best_J:
+            best_J = J_val
+            best_u = u_trial.copy()
+
+    if best_u is None:
+        # Total fallback (should be extremely rare): revert to mean-based u_star
+        best_u = u_star.copy()
+
+    # --------------------------------------------------
+    # Step 4: Convert best_u back to (theta_i, phi_i), then apply safe jitter
+    # --------------------------------------------------
+    for i in range(M):
+        u_curr = u_curr_norm[i]
+        e1 = e1_list[i]
+        e2 = e2_list[i]
+        u_i = best_u[i]
+
+        a = np.dot(u_i, u_curr)
+        b1 = np.dot(u_i, e1)
+        b2 = np.dot(u_i, e2)
+        s = np.sqrt(b1**2 + b2**2)
+
+        theta_i = np.arctan2(s, a)
+        phi_i = np.arctan2(b2, b1)
+
+        # Ensure theta within bounds (small numeric repair if needed)
+        theta_i = np.clip(theta_i, theta_lower[i], theta_upper[i])
+
+        # Optional: apply jitter in theta while preserving keep-out
+        jitter = rng.choice(jitter_values)
+        theta_j = np.clip(theta_i + jitter, theta_lower[i], theta_upper[i])
+        u_j = u_from_theta_phi(theta_j, phi_i, u_curr, e1, e2)
+
+        if keepout_safe_single(p_agents[i], u_j, theta_h, p_em, R_em, alpha_s):
+            theta_i = theta_j  # accept jitter
+
+        x0[2 * i] = theta_i
+        x0[2 * i + 1] = phi_i
 
     return x0
 
@@ -360,6 +803,9 @@ def estimate_theta_bounds_from_ellipsoid(p_hat, P_p, p_agents, u_curr_agents,
 
         theta_min[i] = np.min(theta_vals)
         theta_max[i] = np.max(theta_vals)
+
+        if np.rad2deg(theta_min[i]) < 0.5:
+            theta_min[i] = 0
 
     return theta_min, theta_max
 
@@ -437,7 +883,8 @@ def optimize_pointing_lbfgs_joint(
     )
 
     theta_upper = np.minimum(theta_max_ell, theta_s_list)
-    theta_lower = np.maximum(theta_min_ell, 0.0)
+    theta_lower = theta_min_ell.copy()
+    theta_lower = np.maximum(theta_lower, 0.0)
 
     infeasible_mask = theta_upper < theta_lower
     if np.any(infeasible_mask):
@@ -487,15 +934,24 @@ def optimize_pointing_lbfgs_joint(
     best_f = np.inf   # objective = cost = -J_t + penalty
     best_cost = np.inf
 
-    x0_mean = init_theta_phi_to_mean(
-        p_hat, p_agents, u_curr_agents,
-        theta_lower, theta_upper, seed
+    # x0_mean = init_theta_phi_to_mean(
+    #     p_hat, p_agents, u_curr_agents,
+    #     theta_lower, theta_upper, seed
+    # )
+
+    x0_mean = init_theta_phi_boundary_projection(
+        p_hat, P_p, p_agents, u_curr_agents,
+        theta_lower, theta_upper, theta_h,
+        d_M, kappa_sigma, y_cached, p_em,
+        R_em, alpha_s, seed
     )
+
 
     for r in range(n_restarts):
         if r == 0:
             x0 = x0_mean.copy()
         else:
+
             noise = rng.normal(scale=0.05, size=2 * M)
             x0 = x0_mean + noise
             for i in range(M):
@@ -634,20 +1090,20 @@ def coverage_count_2d(grid_pts, p_agents_2d, pointing_angles, theta_h):
         return np.stack([np.sin(theta), np.cos(theta)], axis=-1)  # (M,2)
 
     M = len(p_agents_2d)
-    dirs = dir_from_plus_y(pointing_angles)
+    dirs = dir_from_plus_y(pointing_angles)  # (M,2)
     cos_th = np.cos(theta_h)
 
     counts = np.zeros(len(grid_pts), dtype=int)
 
     for i in range(M):
-        v = grid_pts - p_agents_2d[i]
+        v = grid_pts - p_agents_2d[i]             # (N,2)
         v_norm = np.linalg.norm(v, axis=1)
-        good = v_norm > 1e-9
+        good = v_norm > 1e-9                      # avoid divide-by-zero
         v_unit = np.zeros_like(v)
         v_unit[good] = v[good] / v_norm[good,None]
 
         cosang = np.sum(v_unit * dirs[i], axis=1)
-        inside = cosang >= cos_th
+        inside = cosang >= cos_th                 # boolean mask
         counts += inside.astype(int)
 
     return counts
@@ -664,14 +1120,16 @@ def sample_from_uncertainty_2d(mu, Sigma, d_mahal=None, rng=None, max_tries=1000
     L = np.linalg.cholesky(Sigma)
 
     for _ in range(max_tries):
-        z = rng.normal(size=2)
-        x = mu + L @ z
+        z = rng.normal(size=2)          # N(0, I)
+        x = mu + L @ z                  # N(mu, Sigma)
         if d_mahal is None:
             return x
-        dm2 = z @ z
+        # Mahalanobis distance
+        dm2 = z @ z                     # since x = mu + L z => (x-mu)^T Sigma^{-1} (x-mu) = z^T z
         if dm2 <= d_mahal**2:
             return x
 
+    # Fallback if rejection fails (very unlikely for moderate d_mahal)
     return x
 
 
@@ -681,48 +1139,76 @@ def compute_J_grid_thetas_pair(
     idx_pair=(0, 1),          # which two thetas to sweep (i, j)
     fixed_thetas=None,        # length M array for the others
     d_M=3.0, kappa_sigma=100.0,
-    n_mc=20000, n_grid=50, seed=0
+    n_mc=20000, n_grid=50, seed=0,
+    p_em=None, R_em=0.3, alpha_s=1.0,
+    lambda_em=10.0, beta_zeta=1500.0
 ):
     """
-    Brute-force grid in (theta_i, theta_j) for arbitrary M, with phi_k = 0.
+    Brute-force grid in (theta_i, theta_j) for arbitrary M, with phi_k = 0 for all k.
+    All thetas not in idx_pair are held fixed at fixed_thetas[k].
+
+    Returns:
+      THI_deg, THJ_deg : meshgrids (in degrees)
+      J_grid           : J_t(theta_i, theta_j | others fixed)
     """
     rng = np.random.default_rng(seed)
     M = len(p_agents)
     i, j = idx_pair
     assert 0 <= i < M and 0 <= j < M and i != j
 
+    # MC cache
     y_cached = make_cached_y(P_p, d_M, n_mc, seed=seed+123)
 
+    # default fixed_thetas: zero for all non-swept indices
     if fixed_thetas is None:
         fixed_thetas = np.zeros(M)
 
-    thi_vals = np.linspace(0.0, theta_s_list[i], n_grid)
-    thj_vals = np.linspace(0.0, theta_s_list[j], n_grid)
+    # theta ranges for the swept pair
+    # thi_vals = np.linspace(0.0, theta_s_list[i], n_grid)
+    # thj_vals = np.linspace(0.0, theta_s_list[j], n_grid)
+    thi_vals = np.linspace(np.deg2rad(-90), np.deg2rad(90), n_grid)
+    thj_vals = np.linspace(np.deg2rad(-90), np.deg2rad(90), n_grid)
 
     J_grid = np.zeros((n_grid, n_grid))
 
+    # temp array for all agents' pointings
     u_agents = np.zeros_like(u_curr_agents)
 
+    # precompute the fixed directions for k ≠ i,j
     for k in range(M):
         if k not in idx_pair:
             u_agents[k] = u_from_cap(u_curr_agents[k], fixed_thetas[k], 0.0)
 
     for a, thi in enumerate(thi_vals):
         for b, thj in enumerate(thj_vals):
+            # update just i, j
             u_agents[i] = u_from_cap(u_curr_agents[i], thi, 0.0)
             u_agents[j] = u_from_cap(u_curr_agents[j], thj, 0.0)
+
 
             J_val = J_t_dual_coverage(
                 p_hat, P_p, p_agents, u_agents,
                 theta_h, d_M=d_M, kappa_sigma=kappa_sigma,
                 n_mc=n_mc, y_samples_cached=y_cached
             )
-            J_grid[a, b] = J_val
+
+            penalty_em = ems_exclusion_penalty(
+                p_agents, u_agents,
+                p_em=p_em, R_em=R_em,
+                theta_h=theta_h,
+                alpha_s=alpha_s,
+                lambda_em=lambda_em,
+                beta_zeta=beta_zeta
+            )
+
+
+            J_grid[a, b] = J_val - penalty_em
 
     THI, THJ = np.meshgrid(thi_vals, thj_vals, indexing='ij')
     THI_deg = np.rad2deg(THI)
     THJ_deg = np.rad2deg(THJ)
     return THI_deg, THJ_deg, J_grid
+
 
 
 # ============================================================
@@ -731,18 +1217,24 @@ def compute_J_grid_thetas_pair(
 
 def main():
     # =======================
-    # User parameters
+    # User parameters (generalized / randomized)
     # =======================
-    M = 2
+    seed = int(time.time())
+    # seed = 1765481444  # not workng without any penalty
+    # seed = 1765490101
+    # seed = 1765557699
+    # seed = 1765561479
+    # seed = 1765566576
+    # seed = 1765569259
+    # seed = 1765570072
+    # seed = 1765570959
+    print(seed)
+    rng = np.random.default_rng(seed)
 
-    x_line_min, x_line_max = -1.0, 1.0
-    y_line = 0.0
-
-    x_t_min, x_t_max = -3.0, 3.0
-    y_t_min, y_t_max = 1.0, 5.0
+    M = 3  # number of spacecraft
 
     # -----------------------
-    # Spacecraft attitude specs
+    # Agent positions: random in the planar region
     # -----------------------
     theta_h = np.deg2rad(2.5)
     tau_max = 0.004
@@ -759,6 +1251,40 @@ def main():
     # Observation epochs (slew windows)
     delta_ts = np.linspace(10.0, 70.0, 6)  # e.g. seconds between re-pointings
 
+
+    # Spatial region for agents / target (you can tweak these)
+    x_line_min, x_line_max = -1.5, -1.5  # reuse as x-bounds for agents
+    y_agents_min, y_agents_max = -0.8, 0.8  # reuse as x-bounds for agents
+
+    x_t_min, x_t_max = -1.0, 4.5
+    y_t_min, y_t_max = -4.5, 4.5
+
+    # FOV half-angle theta_h: random in a specified range [deg]
+    theta_h_min_deg = 2.5
+    theta_h_max_deg = 2.5
+
+    theta_h = np.deg2rad(
+        rng.uniform(theta_h_min_deg, theta_h_max_deg)
+    )
+
+
+    # -----------------------
+    # Agent positions: random in the planar region
+    # -----------------------
+    x_agents = rng.uniform(x_line_min, x_line_max, size=M)
+    y_agents = rng.uniform(y_agents_min, y_agents_max, size=M)
+    p_agents_2d = np.stack([x_agents, y_agents], axis=1)
+
+    # -----------------------
+    # Target mean position: random in its own box
+    # -----------------------
+    p_hat_2d = np.array([
+        rng.uniform(x_t_min, x_t_max),
+        rng.uniform(y_t_min, y_t_max),
+    ])
+
+    # -----------------------
+    # Target mean position: random in its own box
     # -----------------------
     # Target motion & uncertainty growth
     # -----------------------
@@ -769,44 +1295,63 @@ def main():
     # Exponential covariance growth: P(t) = P0 * exp(2 * γ * Δt)
     growth_rate = 0.02  # γ
 
-    rng = np.random.default_rng(0)
 
-    # seed = 1764781082
-    seed = int(time.time())
-    print("Seed:", seed)
-    # seed = 1764788512
 
-    # Initial planar pointing (near +y)
-    pointing_angles = np.deg2rad(rng.uniform(-1e-5, 1e-5, size=M))
+    # -----------------------
+    # Initial pointings: axis-aligned, chosen to best point to target
+    # -----------------------
+    # Angles are measured from +y axis CCW:
+    #   0       -> +y
+    #   pi/2    -> +x
+    #   pi      -> -y
+    #   3pi/2   -> -x
+    axis_dirs = np.array([
+        [0.0, 1.0],  # +y
+        [1.0, 0.0],  # +x
+        [0.0, -1.0],  # -y
+        [-1.0, 0.0],  # -x
+    ])
+    axis_angles = np.array([0.0, 0.5 * np.pi, np.pi, 1.5 * np.pi])
 
-    rng = np.random.default_rng(seed)
+    pointing_angles = np.zeros(M)
+    for i in range(M):
+        rel = p_hat_2d - p_agents_2d[i]  # vector from agent to target
+        n = np.linalg.norm(rel)
+        if n < 1e-9:
+            # if target is basically at the same point, just pick +y
+            pointing_angles[i] = 0.0
+            continue
+        rel_unit = rel / n
+        dots = axis_dirs @ rel_unit  # cosine with each axis direction
+        idx_best = np.argmax(dots)  # most aligned axis
+        pointing_angles[i] = axis_angles[idx_best]
 
-    # --- Base covariance (shape), before random rotation ---
-    P_base = np.array([[0.025, 0.01],
-                       [-0.01, 0.05]])
+    # -----------------------
+    # 2D covariance: random eigenvalues + random rotation
+    # -----------------------
+    # Draw random eigenvalues (spread/scale of uncertainty)
+    lambda1, lambda2 = rng.uniform(0.05, 0.5, size=2)
+    D = np.diag([lambda1, lambda2])
 
+    # Random 2D rotation
     phi_r = rng.uniform(0.0, 2.0 * np.pi)
     R = np.array([[np.cos(phi_r), -np.sin(phi_r)],
-                  [np.sin(phi_r),  np.cos(phi_r)]])
-    P_p_2d_0 = R @ P_base @ R.T  # initial 2D covariance at t=0
+                  [np.sin(phi_r), np.cos(phi_r)]])
+
+    # Covariance = R * D * R^T
+    P_p_2d_0 = R @ D @ R.T
 
     d_mahal = 3.0
-    kappa = 2000
-
+    kappa = 1500
     # =======================
     # EMS configuration
     # =======================
-    p_em = np.array([0.0, 1.5, 0.0])   # EMS center
-    R_em = 0.3                         # EMS effective radius
-    alpha_s = np.deg2rad(1.0)          # safety margin
-    lambda_em = 10.0                    # penalty weight
-    beta_zeta = 1000.0                   # softplus sharpness
+    p_em = np.array([0.0, 0.0, 0.0])   # EMS center
+    R_em = 0.5                        # EMS effective radius
+    alpha_s = np.deg2rad(4.5)          # safety margin
+    lambda_em = 1.0                    # penalty weight
+    beta_zeta = 1500.0                   # softplus sharpness
 
-    # =======================
-    # Initial geometry
-    # =======================
-    p_agents_2d = sample_agents_on_line(M, x_line_min, x_line_max, y_line, seed=seed)
-    p_hat_2d_0 = sample_target_in_front(x_t_min, x_t_max, y_t_min, y_t_max, seed=seed+10)
 
     # 3D embedding of agents
     p_agents = np.hstack([p_agents_2d, np.zeros((M, 1))])
@@ -817,7 +1362,9 @@ def main():
                          [P2d[1, 0], P2d[1, 1], 0.0],
                          [0.0,        0.0,      1e-4]])
 
-    # Initial pointing vectors in 3D
+    # Current pointing vectors from planar angles (measured from +y)
+    # u = [sin(angle), cos(angle), 0]
+
     u_curr_agents = np.stack([np.sin(pointing_angles),
                               np.cos(pointing_angles),
                               np.zeros(M)], axis=1)
@@ -827,6 +1374,7 @@ def main():
     # =======================
     results = []
 
+
     for dt in delta_ts:
         # Time-dependent slew limit θ_s,t (same for all S/C for this epoch)
         theta_s_t = float(theta_s_of_dt(dt, alpha_max, omega_max))
@@ -835,7 +1383,7 @@ def main():
         theta_s_list_t = np.full(M, theta_s_t)
 
         # Evolve target mean (quadratic) in 2D
-        p_hat_2d_t = p_hat_2d_0 + v_target * dt + 0.5 * a_target * dt**2
+        p_hat_2d_t = p_hat_2d + v_target * dt + 0.5 * a_target * dt**2
 
         # Evolve covariance (scalar growth on 2D base cov)
         scale = np.exp(growth_rate * dt)
@@ -955,8 +1503,8 @@ def main():
     # Grid extents for plotting
     Nx = 500
     Ny = 500
-    xg = np.linspace(x_line_min - 5, x_line_max + 5, Nx)
-    yg = np.linspace(y_line - 1, y_t_max + 8, Ny)
+    xg = np.linspace(x_t_min - 2, x_t_max + 2, Nx)
+    yg = np.linspace(y_t_min - 2, y_t_max + 2, Ny)
     XX, YY = np.meshgrid(xg, yg)
     grid = np.stack([XX.ravel(), YY.ravel()], axis=1)
 
@@ -971,6 +1519,10 @@ def main():
         theta_s_t = res["theta_s"]
 
         ang_star = res["ang_star"]  # list of (theta_i, phi_i) for all spacecraft
+
+        # True
+        sample_pt = sample_from_uncertainty_2d(p_hat_2d_t, P_p_2d_t,
+                                               d_mahal=d_mahal, rng=rng)
 
         # Build legend text items for angles:
         angle_legend = []
@@ -1008,80 +1560,132 @@ def main():
         )
 
         # FOV wedges and agents
+        agent_scatter = None
         for i, pos in enumerate(p_agents_2d):
+            # FOV wedge (no direct label; we'll make a proxy for legend)
             plot_fov_wedge(ax, pos, pointing_angles_opt[i], theta_h,
                            ray_length=10.0, color='tab:blue', alpha=0.12, lw=1.5)
-            ax.scatter(pos[0], pos[1], color='tab:blue', s=60)
+            sc = ax.scatter(pos[0], pos[1], color='tab:blue', s=60,
+                            label='Agent position' if i == 0 else None)
+            if agent_scatter is None:
+                agent_scatter = sc
             ax.text(pos[0], pos[1] - 0.35, f"A{i}", color='tab:blue',
                     ha='center', va='top')
 
-        # Target mean + ellipse
-        ax.scatter(p_hat_2d_t[0], p_hat_2d_t[1], color='tab:red', s=80,
-                   marker='x', linewidths=2)
-        ax.plot(ellipse_pts[:, 0], ellipse_pts[:, 1], color='tab:red', lw=2)
-        ax.fill(ellipse_pts[:, 0], ellipse_pts[:, 1],
-                color='tab:red', alpha=0.10)
+            # Draw current boresight axis directions (u_curr) as dotted lines,
+            # and annotate slew angle between u_curr and optimized pointing.
+            u_axis_proxy = None  # for legend handle
 
-        # Agent line
-        ax.plot([x_line_min, x_line_max], [y_line, y_line],
-                color='k', lw=1, alpha=0.3)
+            for i, pos in enumerate(p_agents_2d):
+                # Current boresight (initial attitude) in 2D
+                u_curr_2d = u_curr_agents[i, :2]
 
-        # Random sample from uncertainty distribution (within same d_M)
-        sample_pt = sample_from_uncertainty_2d(p_hat_2d_t, P_p_2d_t,
-                                               d_mahal=d_mahal, rng=rng)
-        ax.scatter(sample_pt[0], sample_pt[1],
-                   s=60, facecolors='none', edgecolors='green',
-                   linewidths=2, label='Random sample')
+                # Optimized pointing direction in 2D from the optimized angle
+                u_opt_2d = np.array([
+                    np.sin(pointing_angles_opt[i]),
+                    np.cos(pointing_angles_opt[i])
+                ])
 
-        # ===== EMS sphere cross-section in 2D (z=0 plane) =====
-        if R_em > 0.0:
-            z_plane = 0.0
-            dz = z_plane - p_em[2]
-            if abs(dz) <= R_em:
-                r_xy = np.sqrt(R_em**2 - dz**2)
-                theta_c = np.linspace(0, 2*np.pi, 200)
-                x_c = p_em[0] + r_xy * np.cos(theta_c)
-                y_c = p_em[1] + r_xy * np.sin(theta_c)
-                ax.plot(x_c, y_c, color='orange', lw=2, label='EMS sphere (cross-section)')
-                ax.fill(x_c, y_c, color='orange', alpha=0.1)
-                ax.scatter(p_em[0], p_em[1], color='orange', s=60, marker='o')
-                ax.text(p_em[0], p_em[1] + 0.3, "EMS", color='orange',
-                        ha='center', va='bottom')
+                # Endpoint for the boresight line (a short segment)
+                p_end = pos + u_curr_2d * 3.0
 
-        ax.set_aspect('equal', adjustable='box')
-        ax.set_xlabel("x")
-        ax.set_ylabel("y")
+                ln, = ax.plot(
+                    [pos[0], p_end[0]],
+                    [pos[1], p_end[1]],
+                    linestyle=':',
+                    color='black',
+                    lw=1.2,
+                    label='Initial boresight' if i == 0 else None
+                )
+                if u_axis_proxy is None:
+                    u_axis_proxy = ln
 
-        # Label what kind of epoch this is in the title
-        tag = []
-        if idx in worst_indices:
-            tag.append("worst")
-        if idx in best_indices:
-            tag.append("best")
-        if idx == idx_mean:
-            tag.append("mean-near")
-        if idx == idx_median:
-            tag.append("median-near")
-        tag_str = ", ".join(tag) if tag else "epoch"
+                # Slew angle between current and optimized
+                dot = np.dot(u_curr_2d, u_opt_2d)
+                dot = np.clip(dot, -1.0, 1.0)
+                slew_rad = np.arccos(dot)
+                slew_deg = np.rad2deg(slew_rad)
 
-        ax.set_title(
-            f"t = {dt:.1f} s  |  "
-            f"θₛ = {np.rad2deg(theta_s_t):.1f}°  |  "
-            f"J_t = {J_star:.3e}  |  "
-            f"cost = {cost_star:.3e}"
-            f"\n({tag_str})"
-        )
+                # Place text slightly above the agent to avoid overlap
+                ax.text(
+                    pos[0],
+                    pos[1] + 0.5,
+                    f"{slew_deg:.1f}°",
+                    ha='center',
+                    va='bottom',
+                    fontsize=9,
+                    color='black'
+                )
 
-        ax.set_xlim(x_line_min - 5, x_line_max + 5)
-        ax.set_ylim(y_line - 1, y_t_max + 8)
-        plt.grid(alpha=0.25)
+            # Target mean + ellipse
+            unc_mean_sc = ax.scatter(p_hat_2d[0], p_hat_2d[1], color='tab:red', s=80,
+                                     marker='x', linewidths=2, label='Uncertainty mean')
+            ellipse_line, = ax.plot(ellipse_pts[:, 0], ellipse_pts[:, 1],
+                                    color='tab:red', lw=2, label='Uncertainty ellipse')
+            ax.fill(ellipse_pts[:, 0], ellipse_pts[:, 1],
+                    color='tab:red', alpha=0.10)
 
-        # Angle legend as a side text box
-        props = dict(boxstyle='round', facecolor='white', alpha=0.75, edgecolor='gray')
-        ax.text(1.02, 0.5, angle_legend_text, transform=ax.transAxes,
-                fontsize=9, va='center', ha='left', bbox=props)
+            # Random sample from uncertainty distribution (within same d_M)
 
-        plt.legend(loc='upper right')
+            true_sc = ax.scatter(sample_pt[0], sample_pt[1],
+                                 s=60, facecolors='none', edgecolors='green',
+                                 linewidths=2, label='True position')
+
+            ax.set_aspect('equal', adjustable='box')
+            ax.set_xlabel(r"x ($10^6 km$)")
+            ax.set_ylabel(r"y ($10^6 km$)")
+            ax.set_title(
+                fr"t = {dt:.1f} s  |  "
+                fr"$\theta_{{s,t}} = {np.rad2deg(theta_s_t):.1f}^{{\circ}}$"
+            )
+
+            # ax.set_xlim(x_line_min - 10, x_line_max + 10)
+            # ax.set_ylim(y_line - 10, y_t_max + 10)
+            plt.grid(alpha=0.25)
+
+            # ---- Comprehensive legend ----
+
+            # Proxy artists for coverage levels
+            single_cov_patch = Patch(facecolor=cmap_colors[1], alpha=0.25, label='Single coverage')
+            double_cov_patch = Patch(facecolor=cmap_colors[2], alpha=0.25, label='Double coverage')
+            triple_cov_patch = Patch(facecolor=cmap_colors[3], alpha=0.25, label='Triple+ coverage')
+
+            # Proxy for FOV wedge (blue lines)
+            fov_proxy = Line2D([0], [0], color='tab:blue', lw=1.5, label='Agent FOV')
+
+            if R_em > 0.0:
+                z_plane = 0.0
+                dz = z_plane - p_em[2]
+                if abs(dz) <= R_em:
+                    r_xy = np.sqrt(R_em ** 2 - dz ** 2)
+                    theta_c = np.linspace(0, 2 * np.pi, 200)
+                    x_c = p_em[0] + r_xy * np.cos(theta_c)
+                    y_c = p_em[1] + r_xy * np.sin(theta_c)
+                    ems = ax.plot(x_c, y_c, color='orange', lw=2, label='EMS sphere (cross-section)')
+                    ax.fill(x_c, y_c, color='orange', alpha=0.1)
+                    ax.scatter(p_em[0], p_em[1], color='orange', s=60, marker='o')
+                    ax.text(p_em[0], p_em[1] + 0.3, "EMS", color='orange',
+                            ha='center', va='bottom')
+
+            handles = [
+                agent_scatter,
+                fov_proxy,
+                u_axis_proxy,  # ← NEW: initial boresight
+                unc_mean_sc,
+                ellipse_line,
+                true_sc,
+                single_cov_patch,
+                double_cov_patch,
+                triple_cov_patch,
+            ]
+
+
+
+            ax.legend(handles=handles, loc='upper right')
+
+
+
+
 
     plt.show()
 

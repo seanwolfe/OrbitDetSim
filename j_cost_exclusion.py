@@ -788,6 +788,47 @@ def estimate_theta_bounds_from_ellipsoid(p_hat, P_p, p_agents, u_curr_agents,
     return theta_min, theta_max
 
 
+def theta_s_of_dt(delta_t_s, alpha_max, omega_max):
+    """
+    Compute the maximum allowable slew angle θ_{s,t} for a given slew time Δt_s.
+
+    Implements the piecewise definition:
+        Δt_crit = 2 ω_max / α_max
+
+        θ_{s,t} = α_max Δt_s^2 / 4                         if Δt_s <  Δt_crit
+                  (Δt_s - ω_max / α_max) ω_max            if Δt_s >  Δt_crit
+
+    At Δt_s = Δt_crit both expressions are equal, so we use the first branch
+    for Δt_s <= Δt_crit and the second for Δt_s > Δt_crit.
+
+    Parameters
+    ----------
+    delta_t_s : float or array_like
+        Slew time Δt_s (seconds).
+    alpha_max : float
+        Maximum angular acceleration α_max (rad/s^2).
+    omega_max : float
+        Maximum angular rate ω_max (rad/s).
+
+    Returns
+    -------
+    theta_s_t : float or ndarray
+        Maximum allowable slew angle θ_{s,t} (radians), matching the shape of delta_t_s.
+    """
+    delta_t_s = np.asarray(delta_t_s, dtype=float)
+    delta_t_crit = 2.0 * omega_max / alpha_max
+
+    theta_s_t = np.where(
+        delta_t_s <= delta_t_crit,
+        0.25 * alpha_max * delta_t_s**2,
+        (delta_t_s - omega_max / alpha_max) * omega_max
+    )
+
+    # Return scalar if input was scalar
+    if np.isscalar(delta_t_s):
+        return float(theta_s_t)
+    return theta_s_t
+
 
 def optimize_pointing_lbfgs_joint(
     p_hat, P_p, p_agents, u_curr_agents,
@@ -914,7 +955,7 @@ def optimize_pointing_lbfgs_joint(
                 f, x0, method="L-BFGS-B",
                 bounds=bounds,
                 callback=cb,
-                options=dict(maxiter=60, ftol=1e-10, disp=True)
+                options=dict(maxiter=60, ftol=1e-10, disp=False)
             )
             x_star = res.x
             f_star = res.fun
@@ -1181,15 +1222,6 @@ def main():
     theta_h_min_deg = 2.5
     theta_h_max_deg = 2.5
 
-    # Seed for other randomness (geometry, covariance, etc.)
-    # seed = 1764870711  # for not mean when m=2
-    # seed = 1764877550  # good for convex
-    # seed = 1764965779  # good for all at same place
-    # seed = 1765220306
-
-    # seed = int(time.time())
-    # print(seed)
-
     theta_h = np.deg2rad(
         rng.uniform(theta_h_min_deg, theta_h_max_deg)
     )
@@ -1259,7 +1291,7 @@ def main():
     P_p_2d = R @ D @ R.T
 
     d_mahal = 3.0
-    kappa = 1500
+    kappa = 2000
 
     # =======================
     # EMS configuration
