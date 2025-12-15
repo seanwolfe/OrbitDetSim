@@ -9,148 +9,91 @@ import n_body_integrator as nbody
 from utilities import eme_to_ecliptic_batch, ecliptic_to_eme_batch
 import utilities as util
 import time
-import os
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
-spice.furnsh("de430.bsp")
-spice.furnsh('naif0012.tls')
+spice.furnsh("../de430.bsp")
+spice.furnsh('../naif0012.tls')
 
 ####
 # generate data
 ###
-def generate_data(config, parameters, *, master_row=None, saved_as=None):
-    """
-    Build inputs for the IOD solver using the per-row file(s) recorded in MASTER.
-    One run per MASTER row.
+def generate_data(config, parameters):
 
-    Pass either:
-      - saved_as: the string from MASTER['IOD_DATA_SAVED_AS'] (e.g. 'a.parquet;a.csv'), or
-      - master_row: a dict/Series with key 'IOD_DATA_SAVED_AS'
 
-    Returns (same structure as before):
-      ([sin_ra_meas, cos_ra_meas, sin_dec_meas, cos_dec_meas],
-       observer_positions,
-       observation_epochs,
-       positions,
-       velocities,
-       ra, dec,
-       sigma_ra_deg, sigma_dec_deg,
-       file_path,            # <- now chosen from MASTER
-       observer_velocities)
-    """
-
-    def _iod_dir(config):
-        num_sc = int(config['num_spacecraft'])
-        root = os.path.abspath(config['IOD_folder_path'])
-        return os.path.join(root, f"spacecraft_{num_sc}")
-
-    # ----- resolve which per-row file to use -----
-    if saved_as is None:
-        if master_row is not None:
-            saved_as = master_row.get("IOD_DATA_SAVED_AS", "")
-        else:
-            saved_as = parameters.get("MASTER_SAVED_AS", "")  # optional fallback
-
-    saved_as = str(saved_as or "")
-    if not saved_as.strip():
-        raise FileNotFoundError("MASTER row has empty IOD_DATA_SAVED_AS; cannot load per-row IOD data.")
-
-    # Multiple entries allowed, separated by ';' (we stored 'parquet;csv' in that order when both exist)
-    names = [s.strip() for s in saved_as.split(";") if s.strip()]
-    if not names:
-        raise FileNotFoundError("Parsed IOD_DATA_SAVED_AS produced no filenames.")
-
-    iod_dir = _iod_dir(config)  # points to .../IOD_folder_path/spacecraft_{num_sc}
-    # Prefer parquet if present; else take the first
-    def pick_full_path(names_list):
-        # exact join first
-        parquet = [n for n in names_list if n.lower().endswith(".parquet")]
-        ordered = (parquet + [n for n in names_list if n.lower().endswith(".csv")]) or names_list
-        for n in ordered:
-            p = os.path.join(iod_dir, n)
-            if os.path.exists(p):
-                return p
-        # last resort: recursive search (robust to subdirs)
-        for n in ordered:
-            for root, _, files in os.walk(iod_dir):
-                if n in files:
-                    return os.path.join(root, n)
-        return None
-
-    file_path = pick_full_path(names)
-    if file_path is None:
-        raise FileNotFoundError(f"Could not locate any of {names} under {iod_dir}")
-
-    # ----- load the per-row IOD data -----
+    all_files = util.get_all_files(config['IOD_folder_path'], config['save_format'])
+    run_number = parameters['RUN_NUMBER']
+    file_path = all_files[run_number]
+    print(file_path)
     iod_data = util.read_IOD_data_geo(file_path, config)
 
-    # measurements
-    sin_ra_meas  = torch.tensor(iod_data['SIN_RA_PHYS'].values, dtype=torch.float32)
-    cos_ra_meas  = torch.tensor(iod_data['COS_RA_PHYS'].values, dtype=torch.float32)
+    sin_ra_meas = torch.tensor(iod_data['SIN_RA_PHYS'].values, dtype=torch.float32)
+    cos_ra_meas = torch.tensor(iod_data['COS_RA_PHYS'].values, dtype=torch.float32)
     sin_dec_meas = torch.tensor(iod_data['SIN_DEC_PHYS'].values, dtype=torch.float32)
-
     observer_positions = torch.tensor(
         iod_data.loc[:, ["SC_GEO_X(KM)_PHYS", "SC_GEO_Y(KM)_PHYS", "SC_GEO_Z(KM)_PHYS"]].values,
-        dtype=torch.float32
-    )
+        dtype=torch.float32)
     observer_velocities = torch.tensor(
         iod_data.loc[:, ["SC_GEO_VX(KM/S)_PHYS", "SC_GEO_VY(KM/S)_PHYS", "SC_GEO_VZ(KM/S)_PHYS"]].values,
-        dtype=torch.float32
-    )
+        dtype=torch.float32)
     observation_epochs = [Time(jd, format='jd', scale='tdb') for jd in iod_data['EPOCH(JDTDB)'].values]
 
-    # truth/reference states (if present)
-    positions  = iod_data.loc[:, ["GEO_X(KM)",  "GEO_Y(KM)",  "GEO_Z(KM)"]].values
-    velocities = iod_data.loc[:, ["GEO_VX(KM/S)","GEO_VY(KM/S)","GEO_VZ(KM/S)"]].values
+    positions = iod_data.loc[:, ["GEO_X(KM)", "GEO_Y(KM)", "GEO_Z(KM)"]].values
+    velocities = iod_data.loc[:, ["GEO_VX(KM/S)", "GEO_VY(KM/S)", "GEO_VZ(KM/S)"]].values
 
-    # reconstruct angles
-    ra_meas  = torch.atan2(sin_ra_meas, cos_ra_meas)
-    ra       = ra_meas % (2 * np.pi)      # [0, 2π)
-    dec      = torch.asin(sin_dec_meas)   # [-π/2, π/2]
+    # Reconstruct RA and DEC in radians
+    ra_meas = torch.atan2(sin_ra_meas, cos_ra_meas)
+    ra = ra_meas % (2 * np.pi)  # Ensure RA in [0, 2π)
+    dec = torch.asin(sin_dec_meas)  # DEC in [-π/2, π/2]
 
-    # optional noise
-    if int(config.get('ADD_NOISE', 0)) == 1:
-        def add_noise(ra_rad, dec_rad, cfg):
-            # total (mas)
-            sigma_ra_mas  = torch.sqrt(torch.tensor(cfg['sigma_ra']**2  + cfg['sigma_pointing']**2))
-            sigma_dec_mas = torch.sqrt(torch.tensor(cfg['sigma_dec']**2 + cfg['sigma_pointing']**2))
-            # deg
-            sigma_ra_deg  = sigma_ra_mas  / cfg['MAS_TO_DEGREE']
-            sigma_dec_deg = sigma_dec_mas / cfg['MAS_TO_DEGREE']
-            # rad
-            sigma_ra_rad  = torch.deg2rad(sigma_ra_deg)
+    if config['ADD_NOISE'] == 1:
+        def add_noise(ra_rad, dec_rad, config):
+            """
+            Adds Gaussian noise to RA and DEC in radians using PyTorch.
+
+            Args:
+                ra_rad (torch.Tensor): Right Ascension in radians.
+                dec_rad (torch.Tensor): Declination in radians.
+                config (dict): Must contain:
+                    - 'sigma_ra': float, noise stddev in mas
+                    - 'sigma_dec': float, noise stddev in mas
+                    - 'sigma_pointing': float, pointing error in mas
+                    - 'MAS_TO_DEGREE': float, conversion factor (1e3 * 3600 = 3.6e6)
+
+            Returns:
+                Tuple[torch.Tensor, torch.Tensor]: Noisy RA and DEC in radians.
+            """
+            # Total noise in mas
+            sigma_ra_mas = torch.sqrt(torch.tensor(config['sigma_ra'] ** 2 + config['sigma_pointing'] ** 2))
+            sigma_dec_mas = torch.sqrt(torch.tensor(config['sigma_dec'] ** 2 + config['sigma_pointing'] ** 2))
+
+            # Convert to degrees
+            sigma_ra_deg = sigma_ra_mas / config['MAS_TO_DEGREE']
+            sigma_dec_deg = sigma_dec_mas / config['MAS_TO_DEGREE']
+
+            # Convert to radians
+            sigma_ra_rad = torch.deg2rad(sigma_ra_deg)
             sigma_dec_rad = torch.deg2rad(sigma_dec_deg)
-            # noise
-            ra_noise  = torch.normal(mean=0.0, std=sigma_ra_rad,  size=ra_rad.shape)
-            dec_noise = torch.normal(mean=0.0, std=sigma_dec_rad, size=dec_rad.shape)
-            # apply
-            ra_noisy  = (ra_rad + ra_noise) % (2 * torch.pi)
-            dec_noisy = torch.clamp(dec_rad + dec_noise, min=-torch.pi/2, max=torch.pi/2)
-            return ra_noisy, dec_noisy, sigma_ra_deg, sigma_dec_deg
 
+            # Generate noise
+            ra_noise = torch.normal(mean=0.0, std=sigma_ra_rad, size=ra_rad.shape)
+            dec_noise = torch.normal(mean=0.0, std=sigma_dec_rad, size=dec_rad.shape)
+
+            # Apply noise
+            ra_noisy = (ra_rad + ra_noise) % (2 * torch.pi)
+            dec_noisy = torch.clamp(dec_rad + dec_noise, min=-torch.pi / 2, max=torch.pi / 2)
+
+            return ra_noisy, dec_noisy, sigma_ra_deg, sigma_dec_deg
         ra_m, dec_m, sigma_ra_deg, sigma_dec_deg = add_noise(ra, dec, config)
+
     else:
         ra_m, dec_m = ra.clone(), dec.clone()
-        sigma_ra_deg = 0.0
-        sigma_dec_deg = 0.0
+        sigma_ra_deg = 0.
+        sigma_dec_deg = 0.
 
-    sin_ra_meas = torch.sin(ra_m)
-    cos_ra_meas = torch.cos(ra_m)
-    sin_dec_meas = torch.sin(dec_m)
-    cos_dec_meas = torch.cos(dec_m)
+    sin_ra_meas, cos_ra_meas, sin_dec_meas, cos_dec_meas = torch.sin(ra_m), torch.cos(ra_m), torch.sin(dec_m), torch.cos(dec_m)
 
-    return (
-        [sin_ra_meas, cos_ra_meas, sin_dec_meas, cos_dec_meas],
-        observer_positions,
-        observation_epochs,
-        positions,
-        velocities,
-        ra, dec,
-        sigma_ra_deg, sigma_dec_deg,
-        file_path,                  # used by callers as "FILE_USED"
-        observer_velocities
-    )
-
+    return ([sin_ra_meas, cos_ra_meas, sin_dec_meas, cos_dec_meas], observer_positions,
+            observation_epochs, positions, velocities, ra, dec, sigma_ra_deg, sigma_dec_deg, file_path, observer_velocities)
 
 
 ####
@@ -316,9 +259,21 @@ def run(data, config, parameters):
     epochs_nd_norm_reshaped_tensor = torch.tensor(epochs_nd_norm, dtype=torch.float32).unsqueeze(1)  # as a 2D tensor
 
     # get the indices where observations are
-    obs_mask = np.isin(colloc_points, data[2])
-    obs_indices = np.where(obs_mask)[0]
+    # obs_mask = np.isin(colloc_points, data[2])
+    # obs_indices_0 = np.where(obs_mask)[0]
+    
 
+    cp_jd = np.asarray([t.jd for t in colloc_points])
+    d2_jd = np.asarray([t.jd for t in data[2]])
+
+    unique_vals, inverse = np.unique(cp_jd, return_inverse=True)
+    first_idx_per_unique = np.unique(inverse, return_index=True)[1]
+    mask_unique = np.isin(unique_vals, d2_jd)
+    obs_indices_1 = first_idx_per_unique[mask_unique]
+    val_to_first_idx = dict(zip(unique_vals, first_idx_per_unique))
+    obs_indices = np.array([val_to_first_idx[v] for v in d2_jd if v in val_to_first_idx])
+    
+    
     data_df, positions, velocities, nlls_start, final_positions, final_velocities, comp_time, best_bh = solve(epochs_nd_norm_reshaped_tensor, data[0], obs_indices, data[1], colloc_points, c, config, parameters, data[-1])
 
     # Extract initial position/velocity

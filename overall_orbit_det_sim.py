@@ -735,7 +735,7 @@ def run_IOD(config):
             )
 
             if dynamics == 'NBD' and observer == 'SPACE' and optimizer == 'CONSTRAINED_BASIN_HOPPING':
-                import PIELM_basinhopping_w_range_nbody as pielm_ctsn
+                from to_sync import PIELM_basinhopping_w_range_nbody as pielm_ctsn
 
                 # Fixed parameters you provided
                 m_2  = 0.1

@@ -1236,7 +1236,6 @@ def main():
     # -----------------------
     # Agent positions: random in the planar region
     # -----------------------
-    theta_h = np.deg2rad(2.5)
     tau_max = 0.004
     h_max = 0.015
     m_m = 50

@@ -22,6 +22,189 @@ pd.options.mode.chained_assignment = None
 
 import numpy as np
 import pandas as pd
+from scipy.interpolate import CubicHermiteSpline
+import glob
+
+
+def wrap_to_pi(angle_rad: np.ndarray) -> np.ndarray:
+    """Wrap angle to [-pi, pi]."""
+    return (angle_rad + np.pi) % (2.0 * np.pi) - np.pi
+
+def topocentric_measurements_and_rates(obj_pos, obj_vel, sc_pos, sc_vel, eps=1e-12):
+    """
+    Compute topocentric RA/Dec/Range and their time derivatives from states.
+
+    Inputs (all arrays shape (N,3)):
+      obj_pos, obj_vel : object state (km, km/s)
+      sc_pos,  sc_vel  : spacecraft state (km, km/s)
+
+    Outputs (arrays shape (N,)):
+      ra (rad), dec (rad), rho (km),
+      ra_dot (rad/s), dec_dot (rad/s), rho_dot (km/s)
+    """
+    r_rel = obj_pos - sc_pos
+    v_rel = obj_vel - sc_vel
+
+    x = r_rel[:, 0]
+    y = r_rel[:, 1]
+    z = r_rel[:, 2]
+
+    xd = v_rel[:, 0]
+    yd = v_rel[:, 1]
+    zd = v_rel[:, 2]
+
+    r2 = x*x + y*y + z*z
+    rho = np.sqrt(np.maximum(r2, eps))
+
+    rxy2 = x*x + y*y
+    rxy = np.sqrt(np.maximum(rxy2, eps))
+
+    # Angles
+    ra = np.arctan2(y, x)                 # [-pi, pi]
+    dec = np.arctan2(z, rxy)              # stable vs asin(z/r)
+
+    # Range rate
+    rho_dot = (x*xd + y*yd + z*zd) / rho  # km/s
+
+    # RA rate: (x*yd - y*xd)/(x^2 + y^2)
+    ra_dot = (x*yd - y*xd) / np.maximum(rxy2, eps)
+
+    # Dec rate using dec = atan2(z, rxy)
+    # rxy_dot = (x*xd + y*yd)/rxy
+    rxy_dot = (x*xd + y*yd) / np.maximum(rxy, eps)
+    # dec_dot = (zd*rxy - z*rxy_dot) / (rxy^2 + z^2) = (zd*rxy - z*rxy_dot)/rho^2
+    dec_dot = (zd*rxy - z*rxy_dot) / np.maximum(r2, eps)
+
+    return ra, dec, rho, ra_dot, dec_dot, rho_dot
+
+def topocentric_rmse(
+    final_pos, final_vel,
+    true_pos, true_vel,
+    sc_positions, sc_velocities,
+):
+    """
+    Returns RMSEs between estimated vs true topocentric observables:
+      RA, Dec, Range, RA_dot, Dec_dot, Range_rate.
+    """
+    ra_f, dec_f, rho_f, ra_dot_f, dec_dot_f, rho_dot_f = topocentric_measurements_and_rates(
+        final_pos, final_vel, sc_positions, sc_velocities
+    )
+    ra_t, dec_t, rho_t, ra_dot_t, dec_dot_t, rho_dot_t = topocentric_measurements_and_rates(
+        true_pos, true_vel, sc_positions, sc_velocities
+    )
+
+
+    # Angle differences must be wrapped
+    dra = wrap_to_pi(ra_f - ra_t)
+    ddec = wrap_to_pi(dec_f - dec_t)  # dec is also an angle; wrapping is safe
+
+    # RMSEs
+    ra_rmse = float(np.sqrt(np.mean(dra**2)))
+    dec_rmse = float(np.sqrt(np.mean(ddec**2)))
+    rho_rmse = float(np.sqrt(np.mean((rho_f - rho_t)**2)))
+
+    ra_dot_rmse = float(np.sqrt(np.mean((ra_dot_f - ra_dot_t)**2)))
+    dec_dot_rmse = float(np.sqrt(np.mean((dec_dot_f - dec_dot_t)**2)))
+    rho_dot_rmse = float(np.sqrt(np.mean((rho_dot_f - rho_dot_t)**2)))
+
+    return {
+        "RA_RMSE_RAD": ra_rmse,
+        "DEC_RMSE_RAD": dec_rmse,
+        "RHO_RMSE": rho_rmse,
+        "RA_DOT_RMSE_RADPS": ra_dot_rmse,
+        "DEC_DOT_RMSE_RADPS": dec_dot_rmse,
+        "RHO_DOT_RMSE": rho_dot_rmse,
+    }
+
+
+def interpolate_sc_traj(sc_poses, sc_vels, sc_times, num_points=25):
+
+    # -----------------------------------
+    # New time grid (1000 samples)
+    # -----------------------------------
+
+
+    sc_pos = sc_poses.detach().cpu().numpy()
+    sc_vel = sc_vels.detach().cpu().numpy()
+
+    sc_time = np.array([time.value - sc_times[0].value for time in sc_times]) * 86400
+
+    t_new = np.linspace(sc_time[0], sc_time[-1], num_points)
+
+
+    # -----------------------------------
+    # Build Hermite splines per component
+    # -----------------------------------
+    splines = []
+    for k in range(3):
+        # For component k: r_k(t), v_k(t) = dr_k/dt
+        spl = CubicHermiteSpline(
+            sc_time,
+            sc_pos[:, k],
+            sc_vel[:, k]
+        )
+        splines.append(spl)
+
+    # -----------------------------------
+    # Evaluate interpolated position and velocity
+    # -----------------------------------
+    r_new = np.zeros((t_new.size, 3))
+    v_new = np.zeros((t_new.size, 3))
+
+    for k in range(3):
+        spl = splines[k]
+        r_new[:, k] = spl(t_new)  # position component
+        v_new[:, k] = spl.derivative()(t_new)  # velocity component (dr/dt)
+
+
+    # v from hermite wrong
+    from scipy.interpolate import interp1d
+
+    def interpolate_velocity_linear(sc_vels, sc_times, num_points=1000):
+        """
+        Linearly interpolate velocity vectors.
+
+        Parameters
+        ----------
+        sc_vels : torch.Tensor or np.ndarray, shape (N, 3)
+            Velocities (e.g., km/s)
+        sc_times : sequence
+            Time objects with .value in days
+        num_points : int
+            Number of output samples
+
+        Returns
+        -------
+        t_new : np.ndarray, shape (num_points,)
+            Interpolated times in seconds (relative to first)
+        v_new : np.ndarray, shape (num_points, 3)
+            Interpolated velocities (same units as input velocities)
+        """
+
+        # Convert inputs
+        if hasattr(sc_vels, "detach"):
+            v = sc_vels.detach().cpu().numpy()
+        else:
+            v = np.asarray(sc_vels)
+
+        # Time in seconds relative to first sample
+        t = np.array([t_i.value - sc_times[0].value for t_i in sc_times]) * 86400.0
+
+        # New time grid
+        t_new = np.linspace(t[0], t[-1], num_points)
+
+        # Interpolate each velocity component
+        v_new = np.zeros((num_points, 3))
+        for k in range(3):
+            f = interp1d(t, v[:, k], kind="linear")
+            v_new[:, k] = f(t_new)
+
+        return t_new, v_new
+
+    tnew, vnew = interpolate_velocity_linear(sc_vels, sc_times)
+
+    return r_new, vnew
+
 
 def generate_iod_file(file_path, final_pos, final_vel, true_pos, true_vel, epochs):
     fx, fy, fz = final_pos[1][1:-1, 0], final_pos[1][1:-1, 1], final_pos[1][1:-1, 2]
@@ -34,6 +217,9 @@ def generate_iod_file(file_path, final_pos, final_vel, true_pos, true_vel, epoch
     if len(tx) > len(fx):
         tx, ty, tz = true_pos[:-1, 0], true_pos[:-1, 1], true_pos[:-1, 2]
         tvx, tvy, tvz = true_vel[:-1, 0], true_vel[:-1, 1], true_vel[:-1, 2]
+    else:
+        pass
+
 
     data = {
         "EPOCHS": epochs,
@@ -1566,6 +1752,7 @@ def get_all_files(folder_path, filetype='csv'):
     file_paths = []
     for root, _, files in os.walk(folder_path):
         for file in files:
+
             if file.endswith(f'.{filetype}'):
                 file_paths.append(os.path.join(root, file))
     return file_paths
@@ -1980,7 +2167,7 @@ def _non_hidden_entries(path):
 def _source_basenames_in_visible(vis_dir, save_format):
     # Prefer your util if available; otherwise glob by format(s)
     try:
-        files = util.get_all_files(vis_dir, save_format)
+        files = get_all_files(vis_dir, save_format)
     except Exception:
         files = []
         if save_format in ('csv', 'both'):
