@@ -1257,12 +1257,136 @@ def topocentric_alpha_delta_rho(p_obj, p_sc, eps=1e-12):
     return alpha, delta, rho
 
 
+def unit(v, eps=1e-12):
+    n = np.linalg.norm(v)
+    if n < eps:
+        return None
+    return v / n
+
+def angle_between(u, v):
+    c = np.clip(np.dot(u, v), -1.0, 1.0)
+    return float(np.arccos(c))
+
+def keepout_safe_single(p_sc, u_boresight, theta_h, p_em, R_em, alpha_s, eps=1e-12):
+    """
+    Returns True if the entire FOV cone (half-angle theta_h) about boresight u_boresight
+    stays at least alpha_s away from the EMS sphere as seen from the spacecraft.
+
+    Condition used (simple & common):
+      gamma >= alpha_em + theta_h + alpha_s
+    where
+      gamma    = angle between boresight and direction-to-EMS-center
+      alpha_em = apparent half-angle of EMS sphere from spacecraft = asin(R_em / d)
+    """
+    r_em = p_em - p_sc
+    d = np.linalg.norm(r_em)
+    if d < eps:
+        return False  # spacecraft at EMS center -> invalid
+
+    u_em = r_em / d
+    gamma = angle_between(u_boresight, u_em)
+
+    # apparent angular radius of the EMS sphere
+    if d <= R_em:
+        return False  # inside/at sphere
+    alpha_em = float(np.arcsin(np.clip(R_em / d, 0.0, 1.0)))
+
+    return gamma >= (alpha_em + theta_h + alpha_s)
+
+
+def all_agents_can_point_to_mean(
+    dt,
+    p_hat_2d, v_target, a_target,
+    p_agents, u_curr_agents,
+    theta_h,
+    alpha_max, omega_max,
+    p_em, R_em, alpha_s,
+    eps=1e-12
+):
+    """
+    Returns (all_ok, per_agent_ok, u_mean_list, theta_req_list, theta_s_t)
+    """
+    # Slew limit for this epoch
+    theta_s_t = float(theta_s_of_dt(dt, alpha_max, omega_max))
+    theta_s_t = np.clip(theta_s_t, 0.0, np.deg2rad(179.0))
+
+    # Mean position at epoch (your quadratic model, 2D->3D)
+    p_hat_2d_t = p_hat_2d + v_target * dt + 0.5 * a_target * dt**2
+    p_hat_t = np.array([p_hat_2d_t[0], p_hat_2d_t[1], 0.0])
+
+    M = p_agents.shape[0]
+    per_ok = np.zeros(M, dtype=bool)
+    u_mean = np.zeros((M, 3))
+    theta_req = np.full(M, np.nan)
+
+    for i in range(M):
+        # Desired pointing to mean
+        u_des = unit(p_hat_t - p_agents[i], eps=eps)
+        if u_des is None:
+            per_ok[i] = False
+            continue
+        u_mean[i] = u_des
+
+        # Required slew from current
+        th = angle_between(u_curr_agents[i], u_des)
+        theta_req[i] = th
+
+        # Slew constraint
+        if th > theta_s_t + 1e-12:
+            per_ok[i] = False
+            continue
+
+        # Keep-out constraint
+        if not keepout_safe_single(p_agents[i], u_des, theta_h, p_em, R_em, alpha_s):
+            per_ok[i] = False
+            continue
+
+        per_ok[i] = True
+
+    return bool(np.all(per_ok)), per_ok, u_mean, theta_req, theta_s_t
+
+
+def earliest_epoch_all_can_point_to_mean(
+    delta_ts,
+    p_hat_2d, v_target, a_target,
+    p_agents, u_curr_agents,
+    theta_h,
+    alpha_max, omega_max,
+    p_em, R_em, alpha_s
+):
+    """
+    Scans your dt grid and returns:
+      earliest_dt (or None),
+      diagnostic dict for that dt.
+    """
+    for dt in delta_ts:
+        all_ok, per_ok, u_mean, theta_req, theta_s_t = all_agents_can_point_to_mean(
+            dt,
+            p_hat_2d, v_target, a_target,
+            p_agents, u_curr_agents,
+            theta_h,
+            alpha_max, omega_max,
+            p_em, R_em, alpha_s
+        )
+        if all_ok:
+            return float(dt), {
+                "per_agent_ok": per_ok,
+                "u_mean": u_mean,
+                "theta_required": theta_req,
+                "theta_s_allowed": theta_s_t
+            }
+
+    return None, None
+
+
+
 def main():
     # =======================
     # User parameters (generalized / randomized)
     # =======================
     seed = int(time.time())
     print(seed)
+    # seed = 1765987106
     rng = np.random.default_rng(seed)
 
     M = 3  # number of spacecraft
@@ -1319,7 +1443,7 @@ def main():
     a_target = np.array([0.0, -0.0002])  # per second^2
 
     # Growth in angular/range space (you can keep exponential)
-    growth_rate = 0.02  # scalar used below
+    growth_rate = 0.002  # scalar used below
 
     # -----------------------
     # Initial pointings: axis-aligned, chosen to best point to target
@@ -1354,12 +1478,12 @@ def main():
 
     # Pick initial 1-sigma uncertainties (tune these!)
     # Example: 20 arcsec ~ 9.7e-5 rad. Feel free to change.
-    sigma_ra0  = np.deg2rad(5)   # radians
-    sigma_dec0 = np.deg2rad(5)   # radians
+    sigma_ra0  = np.deg2rad(4.4)   # radians
+    sigma_dec0 = np.deg2rad(2.31)   # radians
 
     # Range 1-sigma in same distance units as your positions (here "simulation units")
     # If your units are km, use km; if nondimensional, set appropriately.
-    sigma_rho0 = 0.5
+    sigma_rho0 = 1.28
 
     # Optional correlations (start diagonal unless you want more realism)
     P_adr_0 = np.diag([sigma_ra0**2, sigma_dec0**2, sigma_rho0**2])
@@ -1444,6 +1568,25 @@ def main():
 
         # Update current boresights for next epoch
         # u_curr_agents = u_star.copy()
+
+    delta_ts_mean = np.linspace(10.0, 60.0 * 10, 600)
+
+    dt0, info = earliest_epoch_all_can_point_to_mean(
+        delta_ts_mean,
+        p_hat_2d, v_target, a_target,
+        p_agents, u_curr_agents,
+        theta_h,
+        alpha_max, omega_max,
+        p_em, R_em, alpha_s
+    )
+
+    if dt0 is None:
+        print("No epoch in delta_ts where ALL agents can point to the mean (slew + keep-out).")
+    else:
+        print(f"Earliest dt where all can point to mean: {dt0:.3f} s")
+        print("theta_s_allowed (deg):", np.rad2deg(info["theta_s_allowed"]))
+        print("theta_required (deg):", np.rad2deg(info["theta_required"]))
+        print("per_agent_ok:", info["per_agent_ok"])
 
     if not results:
         print("No feasible epochs found.")
