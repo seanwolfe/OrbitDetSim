@@ -10,6 +10,7 @@ except Exception:
 import itertools
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
+from typing import Dict, Any, Tuple, Optional, List
 
 
 
@@ -1016,6 +1017,7 @@ def optimize_pointing_lbfgs_joint(
         n_mc=y_cached.shape[0], y_samples_cached=y_cached
     )
 
+
     angles_best = [(thetas_best[i], phis_best[i]) for i in range(M)]
     return u_best, angles_best, J_best, history, best_cost
 
@@ -1257,14 +1259,14 @@ def topocentric_alpha_delta_rho(p_obj, p_sc, eps=1e-12):
     return alpha, delta, rho
 
 
-def unit(v, eps=1e-12):
-    n = np.linalg.norm(v)
+def unit(v: np.ndarray, eps: float = 1e-12) -> Optional[np.ndarray]:
+    n = float(np.linalg.norm(v))
     if n < eps:
         return None
     return v / n
 
-def angle_between(u, v):
-    c = np.clip(np.dot(u, v), -1.0, 1.0)
+def angle_between(u: np.ndarray, v: np.ndarray) -> float:
+    c = float(np.clip(np.dot(u, v), -1.0, 1.0))
     return float(np.arccos(c))
 
 def keepout_safe_single(p_sc, u_boresight, theta_h, p_em, R_em, alpha_s, eps=1e-12):
@@ -1385,11 +1387,14 @@ def main():
     # User parameters (generalized / randomized)
     # =======================
     seed = int(time.time())
-    print(seed)
     # seed = 1765987106
+    # seed = 1765220308
+    # seed = 1765992947
+    seed = 1765220342
+    print(seed)
     rng = np.random.default_rng(seed)
 
-    M = 3  # number of spacecraft
+    M = 4  # number of spacecraft
 
     # -----------------------
     # Agent positions: random in the planar region
@@ -1405,9 +1410,6 @@ def main():
     alpha_max = 1.63 * tau_max / I_max
     omega_max = 1.63 * h_max / I_max
 
-    # Observation epochs (slew windows)
-    delta_ts = np.linspace(10.0, 70.0, 6)  # seconds between re-pointings
-
     # Spatial region for agents / target
     x_line_min, x_line_max = -1.5, -1.5
     y_agents_min, y_agents_max = -0.8, 0.8
@@ -1418,7 +1420,6 @@ def main():
     # FOV half-angle theta_h [deg]
     theta_h_min_deg = 2.5
     theta_h_max_deg = 2.5
-    theta_h = np.deg2rad(rng.uniform(theta_h_min_deg, theta_h_max_deg))
 
     # -----------------------
     # Agent positions (2D) then embed into 3D
@@ -1426,9 +1427,6 @@ def main():
     x_agents = rng.uniform(x_line_min, x_line_max, size=M)
     y_agents = rng.uniform(y_agents_min, y_agents_max, size=M)
     p_agents_2d = np.stack([x_agents, y_agents], axis=1)
-
-    # Embed agents in 3D (z=0)
-    p_agents = np.hstack([p_agents_2d, np.zeros((M, 1))])
 
     # -----------------------
     # Target mean position (2D) then embed into 3D
@@ -1438,9 +1436,24 @@ def main():
         rng.uniform(y_t_min, y_t_max),
     ])
 
+    theta_h = np.deg2rad(rng.uniform(theta_h_min_deg, theta_h_max_deg))
+
     # Target motion model (same as yours)
-    v_target = np.array([0.01, 0.02])    # per second
-    a_target = np.array([0.0, -0.0002])  # per second^2
+    vmin = np.array([-0.02, -0.02])
+    vmax = np.array([0.02, 0.02])
+    amin = np.array([-5e-4, -5e-4])
+    amax = np.array([5e-4, 5e-4])
+
+    v_target = rng.uniform(vmin, vmax)
+    a_target = rng.uniform(amin, amax)
+
+    # Observation epochs (slew windows)
+    delta_ts_mean = np.linspace(10.0, 6000.0, 600)  # seconds between re-pointings
+
+
+    # Embed agents in 3D (z=0)
+    p_agents = np.hstack([p_agents_2d, np.zeros((M, 1))])
+
 
     # Growth in angular/range space (you can keep exponential)
     growth_rate = 0.002  # scalar used below
@@ -1496,15 +1509,40 @@ def main():
     # =======================
     p_em = np.array([0.0, 0.0, 0.0])
     R_em = 0.5
-    alpha_s = np.deg2rad(4.5)
+    alpha_s = np.deg2rad(5)
     lambda_em = 1.0
-    beta_zeta = 1500.0
+    beta_zeta = 115
+
+    # ---------------- sample a "true" point from the initial covariance at first epoch ----------------
+    # Build P_p at dt0 (first epoch)
+    dt0 = float(delta_ts_mean[0])
+    p_hat_2d_t0 = p_hat_2d + v_target * dt0 + 0.5 * a_target * dt0 ** 2
+    p_hat_t0 = np.array([p_hat_2d_t0[0], p_hat_2d_t0[1], 0.0], dtype=float)
+
+    scale0 = np.exp(growth_rate * dt0)
+    P_adr_t0 = (scale0 ** 2) * P_adr_0
+    alpha0, delta0, rho0 = topocentric_alpha_delta_rho(p_hat_t0, p_agents[i_ref])
+    P_p_t0 = cov_radec_rho_to_xyz(alpha0, delta0, rho0, P_adr_t0)
+    P_p2_t0 = P_p_t0[:2, :2]
+
+    sample_pt = sample_from_uncertainty_2d(p_hat_2d_t0, P_p2_t0, d_mahal=d_mahal, rng=rng)
+
+    # mean method
+    dt0, info = earliest_epoch_all_can_point_to_mean(
+        delta_ts_mean,
+        p_hat_2d, v_target, a_target,
+        p_agents, u_curr_agents,
+        theta_h,
+        alpha_max, omega_max,
+        p_em, R_em, alpha_s
+    )
+
 
     # =======================
     # Epoch loop
     # =======================
     results = []
-
+    delta_ts = np.linspace(10.0, dt0 + 50, int((dt0 + 50) / 10))
     for dt in delta_ts:
         # Time-dependent slew limit θ_s,t
         theta_s_t = float(theta_s_of_dt(dt, alpha_max, omega_max))
@@ -1531,9 +1569,6 @@ def main():
         P_p_t_2d = P_p_t_copy[:2, :2]
 
         if dt == delta_ts[0]:
-            # True
-            sample_pt = sample_from_uncertainty_2d(p_hat_2d_t, P_p_t_2d,
-                                                   d_mahal=d_mahal, rng=rng)
             sample_pt_t = sample_pt.copy()
         else:
             sample_pt_t = sample_pt + v_target * dt + 0.5 * a_target * dt**2
@@ -1569,16 +1604,6 @@ def main():
         # Update current boresights for next epoch
         # u_curr_agents = u_star.copy()
 
-    delta_ts_mean = np.linspace(10.0, 60.0 * 10, 600)
-
-    dt0, info = earliest_epoch_all_can_point_to_mean(
-        delta_ts_mean,
-        p_hat_2d, v_target, a_target,
-        p_agents, u_curr_agents,
-        theta_h,
-        alpha_max, omega_max,
-        p_em, R_em, alpha_s
-    )
 
     if dt0 is None:
         print("No epoch in delta_ts where ALL agents can point to the mean (slew + keep-out).")
@@ -1600,7 +1625,8 @@ def main():
     dts_res = np.array([r["dt"] for r in results])
 
     # Sort indices by J (ascending -> worst first)
-    order = np.argsort(J_values)
+    # order = np.argsort(J_values)
+    order = J_values
 
     # ===== Plot J_t and cost vs epoch (Δt) =====
     fig_tc, ax1 = plt.subplots(figsize=(8, 4))
@@ -1608,19 +1634,31 @@ def main():
     line1, = ax1.plot(dts_res, J_values, marker='o', linestyle='-',
                       label=r"$J_t$")
     ax1.set_xlabel(r"Epoch time $\Delta t_s$ [s]")
-    ax1.set_ylabel(r"$J_t$", color=line1.get_color())
-    ax1.tick_params(axis='y', labelcolor=line1.get_color())
+    ax1.set_ylabel(r"$J_t/Cost$", color=line1.get_color())
+    # ax1.tick_params(axis='y', labelcolor=line1.get_color())
 
-    ax2 = ax1.twinx()
-    line2, = ax2.plot(dts_res, -cost_values, marker='x', linestyle='--',
+    # ax2 = ax1.twinx()
+    line2, = ax1.plot(dts_res, -cost_values, marker='x', linestyle='--',
                       label="Cost (objective)")
-    ax2.set_ylabel("Cost = objective", color=line2.get_color())
-    ax2.tick_params(axis='y', labelcolor=line2.get_color())
+    # ax2.set_ylabel("Cost = objective", color=line2.get_color())
+    # ax2.tick_params(axis='y', labelcolor=line2.get_color())
 
     # Combined legend
     lines = [line1, line2]
     labels = [l.get_label() for l in lines]
     ax1.legend(lines, labels, loc='best')
+
+    # --- Force same y-limits on both axes ---
+    y_all = np.concatenate([J_values, -cost_values])
+
+    ymin = y_all.min()
+    ymax = y_all.max()
+
+    # Add a small margin (5%)
+    pad = 0.05 * (ymax - ymin if ymax > ymin else 1.0)
+
+    ax1.set_ylim(ymin - pad, ymax + pad)
+    # ax2.set_ylim(ymin - pad, ymax + pad)
 
     ax1.grid(alpha=0.3)
     fig_tc.tight_layout()
@@ -1650,6 +1688,8 @@ def main():
     if idx_median not in indices_to_plot:
         indices_to_plot.append(idx_median)
 
+
+    indices_to_plot = [1, 3, 12, 18]
     # =======================
     # 2D visualization for selected epochs
     # =======================
