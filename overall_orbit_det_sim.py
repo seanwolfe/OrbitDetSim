@@ -38,7 +38,7 @@ def run_runs_x_minimoons_MPI(minimoon_master, config):
     # ----------------- config -----------------
     N_runs   = int(config['number_of_runs'])
     M_mm     = int(len(minimoon_master))
-    rows_per_part = int(config.get('number_of_rows_per_part', 50_000))
+    rows_per_part = int(config.get('number_of_rows_per_part', 50000))
     save_format   = config.get('save_format', 'csv')  # 'csv' or 'parquet'
     base_out      = str(config['output_df_file_name'])
     base_seed     = int(config.get('seed', 12345))
@@ -707,7 +707,7 @@ def run_IOD(config):
     # Metrics / outputs block
     metrics_block = [
         "POS_RMSE","VEL_RMSE","COMPUTATION_TIME_SEC","OPTIMAL_BH_ITERATION",
-        "IOD_RESULT_SAVED_AS",
+        "IOD_RESULT_SAVED_AS", "IOD_FINAL_STATE"
     ]
 
     # Internal keys we never write to MASTER
@@ -729,13 +729,14 @@ def run_IOD(config):
             continue
 
         try:
+
             # ------------------- YOUR IOD PIPELINE (single run) -------------------
             dynamics, orbit, observer, optimizer = (
                 config['dynamics'], config['orbit'], config['observer'], config['optimizer']
             )
 
             if dynamics == 'NBD' and observer == 'SPACE' and optimizer == 'CONSTRAINED_BASIN_HOPPING':
-                from to_sync import PIELM_basinhopping_w_range_nbody as pielm_ctsn
+                import PIELM_basinhopping_w_range_nbody as pielm_ctsn
 
                 # Fixed parameters you provided
                 m_2  = 0.1
@@ -775,6 +776,7 @@ def run_IOD(config):
                 (results, positions, velocities, nlls_start,
                  final_pos, final_vel, true_pos, true_vel,
                  epochs, comp_time, optimal_bh) = pielm_ctsn.run(data, config, parameters)
+
             else:
                 # Add other branches unchanged if needed
                 raise NotImplementedError("Add other solver branches as in your code.")
@@ -797,6 +799,15 @@ def run_IOD(config):
 
             pos_rmse = float(np.sqrt(((rmse_df[["IOD_X","IOD_Y","IOD_Z"]].values - rmse_df[["TRUE_X","TRUE_Y","TRUE_Z"]].values) ** 2).mean()))
             vel_rmse = float(np.sqrt(((rmse_df[["IOD_VX","IOD_VY","IOD_VZ"]].values - rmse_df[["TRUE_VX","TRUE_VY","TRUE_VZ"]].values) ** 2).mean()))
+
+            try:
+                final_xyz = np.asarray(final_pos[0][-2, :], dtype=float).reshape(3, )
+                final_vxyz = np.asarray(final_vel[0][-2, :], dtype=float).reshape(3, )
+                final_state = np.concatenate([final_xyz, final_vxyz]).tolist()
+                final_state_str = json.dumps(final_state)
+
+            except Exception:
+                final_state_str = ""
 
             # ---- Flatten parameters to columns (TIME_DELTA → TIME_DELTA_DAYS) ----
             def params_to_update(parameters):
@@ -829,6 +840,7 @@ def run_IOD(config):
                 "COMPUTATION_TIME_SEC": float(comp_time),
                 "OPTIMAL_BH_ITERATION": float(optimal_bh),
                 "IOD_RESULT_SAVED_AS": str(file_name),
+                "IOD_FINAL_STATE": final_state_str,
             }
             upd.update(params_to_update(parameters))
 
@@ -1425,10 +1437,9 @@ def run_overall_OD(master, config):
 
 
     #-----------------
-    # Stage 4: Run the OD
+    # Stage 4: Run the ATT.COOR. + OD Pipeline
     #------------------
-
-    run_OD(master)
+    # run_OD(master)
 
     return
 
