@@ -29,6 +29,74 @@ from scipy.interpolate import CubicHermiteSpline
 import glob
 
 
+import json
+import re
+
+def parse_vec_cell(cell, expected_len=None, dtype=float, default=None):
+    """
+    Parse a MASTER cell that may contain:
+      - NaN/None/"" -> default (or NaNs)
+      - a scalar -> length-1 array (or error if expected_len>1)
+      - a list/tuple/np.ndarray -> array
+      - a string like "1,2,3" or "1 2 3" or "[1,2,3]" or JSON list
+    Returns: np.ndarray shape (N,)
+    """
+    if default is None:
+        default = np.full((expected_len,), np.nan, dtype=dtype) if expected_len else np.array([], dtype=dtype)
+
+    # None / NaN
+    if cell is None:
+        return default
+    try:
+        if isinstance(cell, float) and np.isnan(cell):
+            return default
+    except Exception:
+        pass
+
+    # already array-like
+    if isinstance(cell, (list, tuple, np.ndarray)):
+        arr = np.asarray(cell, dtype=dtype).ravel()
+        if expected_len is not None and arr.size != expected_len:
+            raise ValueError(f"Expected len={expected_len}, got {arr.size} from {cell}")
+        return arr
+
+    # numeric scalar
+    if isinstance(cell, (int, float, np.integer, np.floating)):
+        arr = np.asarray([cell], dtype=dtype)
+        if expected_len is not None and arr.size != expected_len:
+            raise ValueError(f"Expected len={expected_len}, got scalar from {cell}")
+        return arr
+
+    # string
+    s = str(cell).strip()
+    if s == "" or s.lower() in ("nan", "none", "null"):
+        return default
+
+    # Try JSON list first
+    if (s.startswith("[") and s.endswith("]")) or (s.startswith("(") and s.endswith(")")):
+        try:
+            obj = json.loads(s.replace("(", "[").replace(")", "]"))
+            arr = np.asarray(obj, dtype=dtype).ravel()
+            if expected_len is not None and arr.size != expected_len:
+                raise ValueError(f"Expected len={expected_len}, got {arr.size} from {s}")
+            return arr
+        except Exception:
+            # fall through to delimiter parsing
+            pass
+
+    # Split by comma or whitespace (robust)
+    # e.g. "1, 2, 3" or "1 2 3" or "1,2 3"
+    parts = re.split(r"[,\s]+", s)
+    parts = [p for p in parts if p != ""]
+    try:
+        arr = np.asarray([dtype(p) for p in parts], dtype=dtype).ravel()
+    except Exception as e:
+        raise ValueError(f"Could not parse vector cell: {cell!r}") from e
+
+    if expected_len is not None and arr.size != expected_len:
+        raise ValueError(f"Expected len={expected_len}, got {arr.size} from {cell!r}")
+    return arr
+
 def mahalanobis_ellipse_points(mu, Sigma, d_mahal=3.0, n=200):
     """
     Points on the ellipse (x-mu)^T Sigma^{-1} (x-mu) = d_mahal^2

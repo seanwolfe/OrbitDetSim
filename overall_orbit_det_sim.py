@@ -17,6 +17,7 @@ import csv
 import gc
 import glob
 import datetime as dt
+import matplotlib.pyplot as plt
 
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
@@ -1071,6 +1072,57 @@ def run_OD(config):
             continue
 
         try:
+
+            M = config['num_spacecraft']
+
+            # access iod master row data
+            ast_helio_ae_kms = util.parse_vec_cell(row['HELIO_AST(kms)'])
+            earth_helio_ae_kms = util.parse_vec_cell(row['EARTH_HELIO_EA(kms)'])
+            sc_helio_se_kms = np.zeros((M, 6))
+            for i in range(M):
+                sc_str = f'HELIO_SC_{i+1}(kms)'
+                sc_helio_se_kms[i, :] = util.parse_vec_cell(row[sc_str])
+
+            earth_helio_se_kms = util.parse_vec_cell(row['EARTH_HELIO_SE(kms)'])
+
+            sc_pointing_sunearth_cartesian = np.zeros((M, 3))
+            for i in range(M):
+                sc_point_str = f'POINTING_SC_{i+1}'
+                sc_pointing_sunearth_cartesian[i, :] = util.parse_vec_cell(row[sc_point_str])
+
+            ast_iod_eme_ae_kms = util.parse_vec_cell(row['IOD_FINAL_STATE'])
+
+
+            #TODO: convert IOD master data into a SECR visualization
+            agents_xy = np.array([[0, 0], [5, 1], [2, 6]], float)
+            pointing_angles_rad = np.deg2rad([10, 140, 250])
+            theta_h_rad = np.deg2rad(15)
+
+            target_mean_xy = np.array([3.0, 3.0])
+            target_cov_xy = np.array([[1.0, 0.2], [0.2, 0.8]])
+            true_target_xy = np.array([3.5, 2.7])
+
+            ems_center_xy = np.array([1.5, 4.5])
+            ems_radius = 1.2
+
+
+            fig, ax = util.plot_od_scenario_2d(
+                t_label="JD 2460000.1234",
+                agents_xy=agents_xy,
+                pointing_angles_rad=pointing_angles_rad,
+                theta_h_rad=theta_h_rad,
+                ray_length=8.0,
+                target_mean_xy=target_mean_xy,
+                target_cov_xy=target_cov_xy,
+                d_mahal=2.0,
+                true_target_xy=true_target_xy,
+                ems_center_xy=ems_center_xy,
+                ems_radius=ems_radius,
+                xlim=(-3, 10), ylim=(-3, 10),
+                agent_orbit_tracks_xy=None,  # or list of (K,2)
+            )
+            plt.show()
+            """
             # --------------------------
             # Initialization (first step)
             # --------------------------
@@ -1245,7 +1297,7 @@ def run_OD(config):
 
             # tidy
             gc.collect()
-
+        """
         except Exception as e:
             # Don’t mark done here; only after MASTER commit
             errors += 1
@@ -1445,7 +1497,7 @@ def run_overall_OD(master, config):
     #-----------------
     # Stage 4: Run the ATT.COOR. + OD Pipeline
     #------------------
-    run_OD(master)
+    run_OD(config)
 
     return
 

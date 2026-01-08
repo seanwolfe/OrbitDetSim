@@ -133,7 +133,7 @@ range_weight: [1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2, 1.0e-1, 1.0e+0, 1.0e+1]
 num_od_runs: 1
 od_file_dir: 'OD_results'
 od_duration_days: 1
-od_max_steps: None
+od_max_steps: 1000
 
 
 
