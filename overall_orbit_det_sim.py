@@ -663,6 +663,10 @@ def run_IOD(config):
     def is_done(uid: str, row_index: int) -> bool:
         return os.path.exists(done_marker_path(uid, row_index))
 
+    def serialize_vec(v):
+        """1D array-like -> 'v0,v1,...' """
+        return ",".join(f"{float(x):.16g}" for x in np.asarray(v).ravel())
+
     # Load MASTER once for reading (workers)
     df_master = pd.read_csv(master_fn)
 
@@ -753,7 +757,7 @@ def run_IOD(config):
                     'PHYSICS_WEIGHT': 1e3,
                     'LAMBDA_DIST': 1e-2,
                     'WEIGHT_SCALE_FACTOR': 1e-2,
-                    'NUMBER_OF_ITERATIONS': 20,
+                    'NUMBER_OF_ITERATIONS': 2,
                     'TEMPERATURE': 1e8,
                     'X_TOLERANCE': 1e-15, 'F_TOLERANCE': 1e-15,
                     'MAX_FUNCTION_EVAL': 1000,
@@ -804,10 +808,10 @@ def run_IOD(config):
                 final_xyz = np.asarray(final_pos[0][-2, :], dtype=float).reshape(3, )
                 final_vxyz = np.asarray(final_vel[0][-2, :], dtype=float).reshape(3, )
                 final_state = np.concatenate([final_xyz, final_vxyz]).tolist()
-                final_state_str = json.dumps(final_state)
+                # final_state_str = json.dumps(final_state)
 
             except Exception:
-                final_state_str = ""
+                final_state = None
 
             # ---- Flatten parameters to columns (TIME_DELTA → TIME_DELTA_DAYS) ----
             def params_to_update(parameters):
@@ -832,6 +836,8 @@ def run_IOD(config):
                     upd[k] = str(v)
                 return upd
 
+            ser_final = serialize_vec(final_state) if final_state is not None else ""
+
             upd = {
                 "_row_index": int(m_idx),                 # internal key for placement
                 # (MASTER_* kept internal, not written)
@@ -840,7 +846,7 @@ def run_IOD(config):
                 "COMPUTATION_TIME_SEC": float(comp_time),
                 "OPTIMAL_BH_ITERATION": float(optimal_bh),
                 "IOD_RESULT_SAVED_AS": str(file_name),
-                "IOD_FINAL_STATE": final_state_str,
+                "IOD_FINAL_STATE": ser_final,
             }
             upd.update(params_to_update(parameters))
 
