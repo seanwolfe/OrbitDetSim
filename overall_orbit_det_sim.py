@@ -1445,7 +1445,7 @@ def run_overall_OD(master, config):
     #-----------------
     # Stage 4: Run the ATT.COOR. + OD Pipeline
     #------------------
-    # run_OD(master)
+    run_OD(master)
 
     return
 

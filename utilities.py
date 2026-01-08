@@ -13,6 +13,9 @@ from matplotlib.collections import LineCollection
 import n_body_integrator as nbody
 from astropy.time import Time
 from scipy.integrate import odeint
+from matplotlib.patches import Patch
+from matplotlib.lines import Line2D
+from matplotlib.colors import ListedColormap, BoundaryNorm
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
 spice.furnsh("de430.bsp")
@@ -24,6 +27,325 @@ import numpy as np
 import pandas as pd
 from scipy.interpolate import CubicHermiteSpline
 import glob
+
+
+def mahalanobis_ellipse_points(mu, Sigma, d_mahal=3.0, n=200):
+    """
+    Points on the ellipse (x-mu)^T Sigma^{-1} (x-mu) = d_mahal^2
+    """
+    eigvals, eigvecs = np.linalg.eigh(Sigma)
+    eigvals = np.maximum(eigvals, 1e-12)
+
+    t = np.linspace(0, 2*np.pi, n)
+    circle = np.stack([np.cos(t), np.sin(t)], axis=0)
+
+    axes_lengths = d_mahal * np.sqrt(eigvals)
+    ellipse_local = np.diag(axes_lengths) @ circle
+    ellipse_world = (eigvecs @ ellipse_local).T + mu
+
+    return ellipse_world
+
+
+def plot_fov_wedge(ax, agent_pos, pointing_angle, half_angle,
+                   ray_length=50.0, color='tab:blue', alpha=0.15, lw=1.5):
+    """
+    2D infinite-range cone -> wedge with two rays.
+    pointing_angle is in radians, measured from +y axis (front) CCW.
+    """
+    x0, y0 = agent_pos
+
+    def dir_from_plus_y(theta):
+        return np.array([np.sin(theta), np.cos(theta)])
+
+    left_dir  = dir_from_plus_y(pointing_angle - half_angle)
+    right_dir = dir_from_plus_y(pointing_angle + half_angle)
+
+    left_pt  = agent_pos + ray_length * left_dir
+    right_pt = agent_pos + ray_length * right_dir
+
+    ax.plot([x0, left_pt[0]],  [y0, left_pt[1]],  color=color, lw=lw)
+    ax.plot([x0, right_pt[0]], [y0, right_pt[1]], color=color, lw=lw)
+
+    ax.fill([x0, left_pt[0], right_pt[0]],
+            [y0, left_pt[1], right_pt[1]],
+            color=color, alpha=alpha)
+
+
+def coverage_count_2d(grid_pts, p_agents_2d, pointing_angles, theta_h):
+    """
+    grid_pts: (N,2) array of xy points
+    p_agents_2d: (M,2)
+    pointing_angles: (M,) angles in radians (from +y axis CCW)
+    theta_h: FOV half-angle (scalar, radians)
+    Returns:
+        counts: (N,) array, number of FOVs that cover each point
+    """
+
+    def dir_from_plus_y(theta):
+        return np.stack([np.sin(theta), np.cos(theta)], axis=-1)  # (M,2)
+
+    M = len(p_agents_2d)
+    dirs = dir_from_plus_y(pointing_angles)  # (M,2)
+    cos_th = np.cos(theta_h)
+
+    counts = np.zeros(len(grid_pts), dtype=int)
+
+    for i in range(M):
+        v = grid_pts - p_agents_2d[i]             # (N,2)
+        v_norm = np.linalg.norm(v, axis=1)
+        good = v_norm > 1e-9                      # avoid divide-by-zero
+        v_unit = np.zeros_like(v)
+        v_unit[good] = v[good] / v_norm[good,None]
+
+        cosang = np.sum(v_unit * dirs[i], axis=1)
+        inside = cosang >= cos_th                 # boolean mask
+        counts += inside.astype(int)
+
+    return counts
+
+def plot_od_scenario_2d(
+    *,
+    # epoch/meta
+    t_label=None,
+
+    # agents
+    agents_xy,                     # (M,2)
+    pointing_angles_rad,           # (M,)
+    theta_h_rad,                   # scalar
+    ray_length=10.0,
+
+    # optional: current boresight vectors (for dotted line + slew text)
+    # if provided: u_curr_agents_xy should be (M,2), not necessarily unit (we normalize)
+    u_curr_agents_xy=None,
+    boresight_line_len=3.0,
+
+    # optional: orbit tracks / quasi-halo projections (provide whatever you have)
+    # list length M; each entry is (K,2) array for that agent
+    agent_orbit_tracks_xy=None,
+
+    # coverage grid extents (you choose)
+    xlim=None, ylim=None,
+    Nx=500, Ny=500,
+
+    # target uncertainty + truth
+    target_mean_xy=None,           # (2,)
+    target_cov_xy=None,            # (2,2)
+    d_mahal=2.0,
+    true_target_xy=None,           # (2,)
+
+    # EMS zone (2D cross-section you provide)
+    ems_center_xy=None,            # (2,)
+    ems_radius=None,               # scalar
+
+    # styling toggles
+    show_coverage=True,
+    show_uncertainty=True,
+    show_truth=True,
+    show_ems=True,
+    title=None,
+):
+    """
+    Pure visualization function: does not infer any states.
+    Everything (positions, angles, mean/cov, tracks) is passed in.
+
+    Returns (fig, ax).
+    """
+    A = np.asarray(agents_xy, dtype=float)
+    M = A.shape[0]
+    ang = np.asarray(pointing_angles_rad, dtype=float).reshape(M,)
+
+    # Determine plot bounds if not provided
+    if xlim is None or ylim is None:
+        # basic fallback using agent positions and optional target mean/truth/ems
+        xs = [A[:, 0]]
+        ys = [A[:, 1]]
+        if target_mean_xy is not None:
+            mu = np.asarray(target_mean_xy, dtype=float).reshape(2,)
+            xs.append([mu[0]]); ys.append([mu[1]])
+        if true_target_xy is not None:
+            tr = np.asarray(true_target_xy, dtype=float).reshape(2,)
+            xs.append([tr[0]]); ys.append([tr[1]])
+        if ems_center_xy is not None:
+            ec = np.asarray(ems_center_xy, dtype=float).reshape(2,)
+            xs.append([ec[0]]); ys.append([ec[1]])
+        xall = np.concatenate([np.asarray(v).ravel() for v in xs])
+        yall = np.concatenate([np.asarray(v).ravel() for v in ys])
+        pad = 2.0
+        if xlim is None:
+            xlim = (np.min(xall) - pad, np.max(xall) + pad)
+        if ylim is None:
+            ylim = (np.min(yall) - pad, np.max(yall) + pad)
+
+    # Coverage colormap (0,1,2,>=3)
+    cmap_colors = np.array([
+        [1, 1, 1, 1],      # 0 = white
+        [0.6, 0.8, 1, 1],  # 1 = light blue
+        [0.2, 0.7, 0.2, 1],# 2 = green
+        [1.0, 0.0, 0.0, 1] # >=3 = red
+    ])
+    cov_cmap = ListedColormap(cmap_colors)
+    bounds = [-0.5, 0.5, 1.5, 2.5, 3.5]
+    norm = BoundaryNorm(bounds, cov_cmap.N)
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    # Coverage grid
+    if show_coverage:
+        xg = np.linspace(xlim[0], xlim[1], int(Nx))
+        yg = np.linspace(ylim[0], ylim[1], int(Ny))
+        XX, YY = np.meshgrid(xg, yg)
+        grid = np.stack([XX.ravel(), YY.ravel()], axis=1)
+
+        cov = coverage_count_2d(grid, A, ang, theta_h_rad)
+        cov_img = cov.reshape(int(Ny), int(Nx))
+
+        ax.imshow(
+            cov_img,
+            extent=[xg.min(), xg.max(), yg.min(), yg.max()],
+            origin='lower',
+            cmap=cov_cmap,
+            norm=norm,
+            alpha=0.25,
+            zorder=-5
+        )
+
+    # Orbit tracks / quasi-halo projections
+    if agent_orbit_tracks_xy is not None:
+        for i, trk in enumerate(agent_orbit_tracks_xy):
+            if trk is None:
+                continue
+            trk = np.asarray(trk, dtype=float)
+            if trk.ndim != 2 or trk.shape[1] != 2:
+                raise ValueError(f"agent_orbit_tracks_xy[{i}] must be (K,2)")
+            ax.plot(trk[:, 0], trk[:, 1], lw=1.2, alpha=0.7,
+                    label="Agent orbit (proj.)" if i == 0 else None)
+
+    # FOV wedges + agent markers
+    agent_scatter = None
+    for i in range(M):
+        plot_fov_wedge(ax, A[i], ang[i], theta_h_rad, ray_length,
+                        color='tab:blue', alpha=0.12, lw=1.5)
+        sc = ax.scatter(A[i, 0], A[i, 1], color='tab:blue', s=60,
+                        label='Agent position' if i == 0 else None)
+        if agent_scatter is None:
+            agent_scatter = sc
+        ax.text(A[i, 0], A[i, 1] - 0.35, f"A{i}", color='tab:blue',
+                ha='center', va='top')
+
+    # Optional: initial/current boresight dotted line + slew angle annotation
+    u_axis_proxy = None
+    if u_curr_agents_xy is not None:
+        Uc = np.asarray(u_curr_agents_xy, dtype=float)
+        if Uc.shape != (M, 2):
+            raise ValueError("u_curr_agents_xy must be (M,2) matching agents")
+
+        for i in range(M):
+            u = Uc[i]
+            nu = np.linalg.norm(u)
+            if nu > 0:
+                u = u / nu
+
+            p_end = A[i] + u * float(boresight_line_len)
+            ln, = ax.plot([A[i, 0], p_end[0]], [A[i, 1], p_end[1]],
+                          linestyle=':', color='black', lw=1.2,
+                          label='Initial boresight' if i == 0 else None)
+            if u_axis_proxy is None:
+                u_axis_proxy = ln
+
+            # Compute slew between current u and optimized u (same convention)
+            u_opt = np.array([np.sin(ang[i]), np.cos(ang[i])], dtype=float)
+            dot = float(np.clip(np.dot(u, u_opt), -1.0, 1.0))
+            slew_deg = float(np.degrees(np.arccos(dot)))
+
+            ax.text(A[i, 0], A[i, 1] + 0.5, f"{slew_deg:.1f}°",
+                    ha='center', va='bottom', fontsize=9, color='black')
+
+    # Target mean + uncertainty ellipse
+    unc_mean_sc = None
+    ellipse_line = None
+    if show_uncertainty and (target_mean_xy is not None) and (target_cov_xy is not None):
+        mu = np.asarray(target_mean_xy, dtype=float).reshape(2,)
+        P = np.asarray(target_cov_xy, dtype=float).reshape(2, 2)
+
+        unc_mean_sc = ax.scatter(mu[0], mu[1], color='tab:red', s=80,
+                                 marker='x', linewidths=2,
+                                 label='Target mean')
+        ellipse_pts = mahalanobis_ellipse_points(mu, P, d_mahal=float(d_mahal), n=250)
+        ellipse_line, = ax.plot(ellipse_pts[:, 0], ellipse_pts[:, 1],
+                                color='tab:red', lw=2,
+                                label='Uncertainty ellipse')
+        ax.fill(ellipse_pts[:, 0], ellipse_pts[:, 1], color='tab:red', alpha=0.10)
+
+    # True target position
+    true_sc = None
+    if show_truth and (true_target_xy is not None):
+        tr = np.asarray(true_target_xy, dtype=float).reshape(2,)
+        true_sc = ax.scatter(tr[0], tr[1], s=60, facecolors='none',
+                             edgecolors='green', linewidths=2,
+                             label='True position')
+
+    # EMS zone (2D circle)
+    ems_line = None
+    if show_ems and (ems_center_xy is not None) and (ems_radius is not None) and (float(ems_radius) > 0):
+        c = np.asarray(ems_center_xy, dtype=float).reshape(2,)
+        R = float(ems_radius)
+        th = np.linspace(0, 2*np.pi, 240)
+        x_c = c[0] + R*np.cos(th)
+        y_c = c[1] + R*np.sin(th)
+        ems_line, = ax.plot(x_c, y_c, color='orange', lw=2,
+                            label='EMS zone (2D)')
+        ax.fill(x_c, y_c, color='orange', alpha=0.1)
+        ax.scatter(c[0], c[1], color='orange', s=60, marker='o')
+        ax.text(c[0], c[1] + 0.3, "EMS", color='orange',
+                ha='center', va='bottom')
+
+    # Axes/labels/title
+    ax.set_aspect('equal', adjustable='box')
+    ax.set_xlim(xlim)
+    ax.set_ylim(ylim)
+    ax.grid(alpha=0.25)
+
+    if title is None:
+        # minimal title if you pass a time label
+        if t_label is not None:
+            title = f"Scenario @ {t_label}"
+        else:
+            title = "Scenario (2D)"
+
+    ax.set_title(title)
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+
+    # Legend (coverage proxies + FOV proxy + others)
+    handles = []
+
+    if agent_scatter is not None:
+        handles.append(agent_scatter)
+
+    # FOV proxy
+    fov_proxy = Line2D([0], [0], color='tab:blue', lw=1.5, label='Agent FOV')
+    handles.append(fov_proxy)
+
+    if u_axis_proxy is not None:
+        handles.append(u_axis_proxy)
+
+    if unc_mean_sc is not None:
+        handles.append(unc_mean_sc)
+    if ellipse_line is not None:
+        handles.append(ellipse_line)
+    if true_sc is not None:
+        handles.append(true_sc)
+    if ems_line is not None:
+        handles.append(ems_line)
+
+    if show_coverage:
+        single_cov_patch = Patch(facecolor=cmap_colors[1], alpha=0.25, label='Single coverage')
+        double_cov_patch = Patch(facecolor=cmap_colors[2], alpha=0.25, label='Double coverage')
+        triple_cov_patch = Patch(facecolor=cmap_colors[3], alpha=0.25, label='Triple+ coverage')
+        handles.extend([single_cov_patch, double_cov_patch, triple_cov_patch])
+
+    ax.legend(handles=handles, loc='upper right')
+    return fig, ax
 
 
 def wrap_to_pi(angle_rad: np.ndarray) -> np.ndarray:
