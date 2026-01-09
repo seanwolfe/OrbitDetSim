@@ -1092,8 +1092,17 @@ def run_OD(config):
 
             ast_iod_eme_ae_kms = util.parse_vec_cell(row['IOD_FINAL_STATE'])
 
+            # convert IOD master data into a EMEJ2000 for ukf, and SECR visulazation for interpretation
+            # convert ast_helio to eme
 
-            #TODO: convert IOD master data into a SECR visualization
+            # convert s/c to SECR using SE
+            # convert s/c SECR to eme using AE
+
+            # convert pointing from SECR to eme
+            # get pointing angles
+
+            # convert uncertainty from topo to both eme and secr
+
             agents_xy = np.array([[0, 0], [5, 1], [2, 6]], float)
             pointing_angles_rad = np.deg2rad([10, 140, 250])
             theta_h_rad = np.deg2rad(15)
