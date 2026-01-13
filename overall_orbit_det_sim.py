@@ -6,6 +6,7 @@ from Formation import Formation
 import numpy as np
 import mpi4py.rc
 from astropy import units as u
+
 mpi4py.rc.threads = False
 from mpi4py import MPI
 import spiceypy as sp
@@ -18,7 +19,6 @@ import gc
 import glob
 import datetime as dt
 import matplotlib.pyplot as plt
-
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
 sp.furnsh("de430.bsp")
@@ -37,12 +37,12 @@ def run_runs_x_minimoons_MPI(minimoon_master, config):
     size = comm.Get_size()
 
     # ----------------- config -----------------
-    N_runs   = int(config['number_of_runs'])
-    M_mm     = int(len(minimoon_master))
+    N_runs = int(config['number_of_runs'])
+    M_mm = int(len(minimoon_master))
     rows_per_part = int(config.get('number_of_rows_per_part', 50000))
-    save_format   = config.get('save_format', 'csv')  # 'csv' or 'parquet'
-    base_out      = str(config['output_df_file_name'])
-    base_seed     = int(config.get('seed', 12345))
+    save_format = config.get('save_format', 'csv')  # 'csv' or 'parquet'
+    base_out = str(config['output_df_file_name'])
+    base_seed = int(config.get('seed', 12345))
 
     # required: num_spacecraft in config
     if 'num_spacecraft' not in config:
@@ -50,9 +50,9 @@ def run_runs_x_minimoons_MPI(minimoon_master, config):
     num_sc = int(config['num_spacecraft'])
 
     # ------------- output directory -----------
-    base_dir  = os.path.dirname(base_out) or "."
+    base_dir = os.path.dirname(base_out) or "."
     base_name = os.path.basename(base_out)
-    out_dir   = os.path.join(base_dir, f"spacecraft_{num_sc}")
+    out_dir = os.path.join(base_dir, f"spacecraft_{num_sc}")
 
     if rank == 0:
         os.makedirs(out_dir, exist_ok=True)
@@ -66,7 +66,7 @@ def run_runs_x_minimoons_MPI(minimoon_master, config):
     # ------------- buffers / counters ----------
     cols = ["run_number", "object_id", "spacecraft_number",
             "values", "total_length", "spacecraft_1_ini_pos"]
-    df_buffer   = pd.DataFrame(columns=cols)
+    df_buffer = pd.DataFrame(columns=cols)
     part_number = 1
 
     # ------------- helper: save buffer ----------
@@ -112,18 +112,18 @@ def run_runs_x_minimoons_MPI(minimoon_master, config):
         formation = Formation(config)
 
         asteroid_pos = current_minimoon.orbit.loc[:, ['Synodic x', 'Synodic y', 'Synodic z']].values
-        earth_pos    = np.zeros_like(asteroid_pos)
-        moon_pos     = current_minimoon.orbit.loc[:, ['Moon Synodic x', 'Moon Synodic y', 'Moon Synodic z']].values
+        earth_pos = np.zeros_like(asteroid_pos)
+        moon_pos = current_minimoon.orbit.loc[:, ['Moon Synodic x', 'Moon Synodic y', 'Moon Synodic z']].values
 
         formation.match_spacecraft_trajectory(len(asteroid_pos[:, 0]), config)
 
         new_rows = []
         for jdx, spacecraft in enumerate(formation.spacecraft):
-            sc_pos   = spacecraft.matched_trajectory
-            visible  = spacecraft.asteroid_in_fov_batch(asteroid_pos, sc_pos, earth_pos, moon_pos, config)
-            visible  = np.asarray(visible)
-            len_vis  = len(visible)
-            visible  = visible[visible >= 0]
+            sc_pos = spacecraft.matched_trajectory
+            visible = spacecraft.asteroid_in_fov_batch(asteroid_pos, sc_pos, earth_pos, moon_pos, config)
+            visible = np.asarray(visible)
+            len_vis = len(visible)
+            visible = visible[visible >= 0]
 
             new_rows.append({
                 "run_number": run_no,
@@ -160,11 +160,11 @@ def run_sim_runnumbers_MPI_getIOD(config):
     size = comm.Get_size()
 
     # ---------- paths / config ----------
-    num_sc   = int(config['num_spacecraft'])
+    num_sc = int(config['num_spacecraft'])
     vis_root = os.path.abspath(config['visible_files_folder'])
-    vis_dir  = os.path.join(vis_root, f"spacecraft_{num_sc}")           # INPUTS
+    vis_dir = os.path.join(vis_root, f"spacecraft_{num_sc}")  # INPUTS
     iod_root = os.path.abspath(config['IOD_folder_path'])
-    iod_dir  = os.path.join(iod_root, f"spacecraft_{num_sc}")           # OUTPUTS
+    iod_dir = os.path.join(iod_root, f"spacecraft_{num_sc}")  # OUTPUTS
     save_format = config.get('save_format', 'csv')  # 'csv' | 'parquet' | 'both'
 
     # Master CSV + per-row done markers (for resumability)
@@ -181,8 +181,8 @@ def run_sim_runnumbers_MPI_getIOD(config):
 
     # ---------- master column schema ----------
     # Dynamic columns for the spacecraft-dependent sections
-    helio_sc_cols = [f"HELIO_SC_{i+1}(kms)" for i in range(num_sc)]
-    pointing_cols = [f"POINTING_SC_{i+1}"   for i in range(num_sc)]
+    helio_sc_cols = [f"HELIO_SC_{i + 1}(kms)" for i in range(num_sc)]
+    pointing_cols = [f"POINTING_SC_{i + 1}" for i in range(num_sc)]
 
     master_columns = (
             ["ID_AST",
@@ -252,7 +252,7 @@ def run_sim_runnumbers_MPI_getIOD(config):
         total_files = None
         file_counter = None
 
-    all_files   = comm.bcast(all_files, root=0)
+    all_files = comm.bcast(all_files, root=0)
     total_files = comm.bcast(total_files, root=0)
 
     # ---------- helpers ----------
@@ -272,7 +272,7 @@ def run_sim_runnumbers_MPI_getIOD(config):
 
     def row_outputs_exist(base_path):
         csv_exists = os.path.exists(base_path + ".csv")
-        pq_exists  = os.path.exists(base_path + ".parquet")
+        pq_exists = os.path.exists(base_path + ".parquet")
         if save_format == 'csv':
             return csv_exists
         elif save_format == 'parquet':
@@ -354,7 +354,8 @@ def run_sim_runnumbers_MPI_getIOD(config):
         if len(my_chunk) > 0:
 
             # get spacecraft initial states / boresights aligned to my_chunk
-            detected_appended_pop_chunk, all_sc_states, detecting_id, boresights = util.get_scs_initial_states(my_chunk, config)
+            detected_appended_pop_chunk, all_sc_states, detecting_id, boresights = util.get_scs_initial_states(my_chunk,
+                                                                                                               config)
 
             # ---------- process my rows ----------
             zdx = 0
@@ -362,11 +363,11 @@ def run_sim_runnumbers_MPI_getIOD(config):
 
                 mm_id = detected_minimoon.name[1]
                 sc_id = detected_minimoon.name[2]
-                idx0  = int(detected_minimoon['min_nonnegative'])
+                idx0 = int(detected_minimoon['min_nonnegative'])
 
                 file_name = f"minimoon-{mm_id}_sc-{sc_id}_index-{idx0}_{src_base}"
                 base_path = os.path.join(iod_dir, file_name)
-                row_uid   = file_name  # used for master BEJCT_ID + dedupe
+                row_uid = file_name  # used for master BEJCT_ID + dedupe
 
                 # If this specific row was already appended to master in a previous run, skip early
                 # (we also skip heavy work if per-row outputs already exist)
@@ -377,13 +378,14 @@ def run_sim_runnumbers_MPI_getIOD(config):
                 orbit_path = os.path.join(config['minimoon_files_folder'], f"{mm_id}.csv")
                 orbit = pd.read_csv(orbit_path, sep=' ', header=0, names=config['minimoon_column_names'])
 
-                asteroid_state_helio = orbit.loc[idx0, ['Helio x','Helio y','Helio z','Helio vx','Helio vy','Helio vz']].values
+                asteroid_state_helio = orbit.loc[
+                    idx0, ['Helio x', 'Helio y', 'Helio z', 'Helio vx', 'Helio vy', 'Helio vz']].values
                 asteroid_state_helio[:3] *= (config['AU_TO_M'] / config['KM_TO_M'])
                 asteroid_state_helio[3:] *= (config['AU_TO_M'] / config['KM_TO_M'] / config['SECONDS_PER_DAY'])
                 asteroid_epoch = orbit.loc[idx0, 'Julian Date']
 
                 num_frames = int(config['number_of_frames'])
-                step_days  = config['time_between_frames'] / config['SECONDS_PER_DAY']
+                step_days = config['time_between_frames'] / config['SECONDS_PER_DAY']
                 epochs = asteroid_epoch + step_days * np.arange(num_frames)
                 total_window_s = num_frames * config['time_between_frames']
 
@@ -395,12 +397,13 @@ def run_sim_runnumbers_MPI_getIOD(config):
                     asteroid_integrated_states, asteroid_earth_states
                 )
 
-                sc_geo_eci = detected_minimoon[['GEO_ECLIP_X_(km)','GEO_ECLIP_Y_(km)','GEO_ECLIP_Z_(km)',
-                                                'GEO_ECLIP_Vx_(km/s)','GEO_ECLIP_Vy_(km/s)','GEO_ECLIP_Vz_(km/s)']].to_numpy()
-                sc_epoch   = detected_minimoon['sc_epoch']
+                sc_geo_eci = detected_minimoon[['GEO_ECLIP_X_(km)', 'GEO_ECLIP_Y_(km)', 'GEO_ECLIP_Z_(km)',
+                                                'GEO_ECLIP_Vx_(km/s)', 'GEO_ECLIP_Vy_(km/s)',
+                                                'GEO_ECLIP_Vz_(km/s)']].to_numpy()
+                sc_epoch = detected_minimoon['sc_epoch']
 
                 sun_geo_state = sp.spkgeo(10, sp.str2et(sc_epoch), "ECLIPJ2000", 399)[0]
-                sc_helio_ini  = sc_geo_eci - sun_geo_state
+                sc_helio_ini = sc_geo_eci - sun_geo_state
 
                 sc_int_states, earth_states = nbody.integrate_n_body(
                     sc_helio_ini, sc_epoch, total_window_s,
@@ -408,20 +411,20 @@ def run_sim_runnumbers_MPI_getIOD(config):
                 )
                 sc_secr = util.helio_eclip_to_sun_earth_corotating_batch_full(sc_int_states, earth_states)
 
-                sc_geo  = util.sun_earth_corotating_to_geo_eclip_batch_full(sc_secr, asteroid_earth_states)
+                sc_geo = util.sun_earth_corotating_to_geo_eclip_batch_full(sc_secr, asteroid_earth_states)
                 ast_geo = util.sun_earth_corotating_to_geo_eclip_batch_full(asteroid_state, asteroid_earth_states)
 
-                sc_geo_eme  = util.ecliptic_to_eme_batch(sc_geo)
+                sc_geo_eme = util.ecliptic_to_eme_batch(sc_geo)
                 ast_geo_eme = util.ecliptic_to_eme_batch(ast_geo)
 
                 x_rel = ast_geo_eme[0, :] - sc_geo_eme[0, :]
                 y_rel = ast_geo_eme[1, :] - sc_geo_eme[1, :]
                 z_rel = ast_geo_eme[2, :] - sc_geo_eme[2, :]
                 r_xy = np.hypot(x_rel, y_rel)
-                r    = np.sqrt(r_xy**2 + z_rel**2)
-                eps  = 1e-12
-                sin_ra  = y_rel / np.maximum(r_xy, eps)
-                cos_ra  = x_rel / np.maximum(r_xy, eps)
+                r = np.sqrt(r_xy ** 2 + z_rel ** 2)
+                eps = 1e-12
+                sin_ra = y_rel / np.maximum(r_xy, eps)
+                cos_ra = x_rel / np.maximum(r_xy, eps)
                 sin_dec = z_rel / np.maximum(r, eps)
 
                 sc_secr_ini = sc_secr[:, 0]
@@ -436,22 +439,22 @@ def run_sim_runnumbers_MPI_getIOD(config):
                 x_rel_p = ast_geo_eme[0, :] - sc_eme_states[0, :]
                 y_rel_p = ast_geo_eme[1, :] - sc_eme_states[1, :]
                 z_rel_p = ast_geo_eme[2, :] - sc_eme_states[2, :]
-                r_xy_p  = np.hypot(x_rel_p, y_rel_p)
-                r_p     = np.sqrt(r_xy_p**2 + z_rel_p**2)
-                sin_ra_p  = y_rel_p / np.maximum(r_xy_p, eps)
-                cos_ra_p  = x_rel_p / np.maximum(r_xy_p, eps)
+                r_xy_p = np.hypot(x_rel_p, y_rel_p)
+                r_p = np.sqrt(r_xy_p ** 2 + z_rel_p ** 2)
+                sin_ra_p = y_rel_p / np.maximum(r_xy_p, eps)
+                cos_ra_p = x_rel_p / np.maximum(r_xy_p, eps)
                 sin_dec_p = z_rel_p / np.maximum(r_p, eps)
 
                 # Assemble per-row IOD dataframe (unchanged)
                 data = np.array([
                     epochs,
-                    ast_geo_eme[0,:], ast_geo_eme[1,:], ast_geo_eme[2,:],
-                    ast_geo_eme[3,:], ast_geo_eme[4,:], ast_geo_eme[5,:],
-                    sc_geo_eme[0,:],  sc_geo_eme[1,:],  sc_geo_eme[2,:],
-                    sc_geo_eme[3,:],  sc_geo_eme[4,:],  sc_geo_eme[5,:],
+                    ast_geo_eme[0, :], ast_geo_eme[1, :], ast_geo_eme[2, :],
+                    ast_geo_eme[3, :], ast_geo_eme[4, :], ast_geo_eme[5, :],
+                    sc_geo_eme[0, :], sc_geo_eme[1, :], sc_geo_eme[2, :],
+                    sc_geo_eme[3, :], sc_geo_eme[4, :], sc_geo_eme[5, :],
                     sin_ra, cos_ra, sin_dec,
-                    sc_eme_states[0,:], sc_eme_states[1,:], sc_eme_states[2,:],
-                    sc_eme_states[3,:], sc_eme_states[4,:], sc_eme_states[5,:],
+                    sc_eme_states[0, :], sc_eme_states[1, :], sc_eme_states[2, :],
+                    sc_eme_states[3, :], sc_eme_states[4, :], sc_eme_states[5, :],
                     sin_ra_p, cos_ra_p, sin_dec_p
                 ]).T
                 df = pd.DataFrame(data, columns=config['IOD_data_columns_geo_and_phys'])
@@ -505,7 +508,7 @@ def run_sim_runnumbers_MPI_getIOD(config):
                     )
                     final_hsc_list.append(sc_int_states_fdx[:, -1])
 
-                all_final_hsc = np.vstack(final_hsc_list)   # shape [num_sc, 6]
+                all_final_hsc = np.vstack(final_hsc_list)  # shape [num_sc, 6]
 
                 # final earth helio (spacecraft-time integration) — use last available
                 final_hesc = earth_states_fdx[:, -1]
@@ -531,12 +534,12 @@ def run_sim_runnumbers_MPI_getIOD(config):
 
                     # Insert HELIO_SC_i
                     for i in range(num_sc):
-                        key = f"HELIO_SC_{i+1}(kms)"
+                        key = f"HELIO_SC_{i + 1}(kms)"
                         row_dict[key] = serialize_vec(all_final_hsc[i, :]) if i < all_final_hsc.shape[0] else ""
 
                     # Insert POINTING_SC_i
                     for i in range(num_sc):
-                        key = f"POINTING_SC_{i+1}"
+                        key = f"POINTING_SC_{i + 1}"
                         # boresight might be vector or None
                         bs = final_sc_boresights[i] if i < len(final_sc_boresights) else None
                         row_dict[key] = serialize_vec(bs) if bs is not None else ""
@@ -572,13 +575,13 @@ def run_sim_runnumbers_MPI_getIOD(config):
         # Rank 0: check completeness, write DONE marker if complete
         if rank == 0:
             counts = outputs_for_source_exist(src_base)
-            ok_csv = (save_format in ('csv','both'))     and (counts.get('csv', 0)     >= (expected_rows or 0))
-            ok_pq  = (save_format in ('parquet','both')) and (counts.get('parquet', 0) >= (expected_rows or 0))
+            ok_csv = (save_format in ('csv', 'both')) and (counts.get('csv', 0) >= (expected_rows or 0))
+            ok_pq = (save_format in ('parquet', 'both')) and (counts.get('parquet', 0) >= (expected_rows or 0))
             complete = (
-                (save_format == 'csv'     and ok_csv) or
-                (save_format == 'parquet' and ok_pq)  or
-                (save_format == 'both'    and ok_csv and ok_pq) or
-                (expected_rows == 0)
+                    (save_format == 'csv' and ok_csv) or
+                    (save_format == 'parquet' and ok_pq) or
+                    (save_format == 'both' and ok_csv and ok_pq) or
+                    (expected_rows == 0)
             )
             if complete:
                 with open(done_marker_path(src_base), "w") as f:
@@ -590,11 +593,11 @@ def run_sim_runnumbers_MPI_getIOD(config):
                         "num_rows_parquet": int(counts.get('parquet', 0))
                     }, f, indent=2)
                 print(f"[IOD] DONE: {os.path.basename(file_i)} "
-                      f"(expected {expected_rows}, csv={counts.get('csv',0)}, pq={counts.get('parquet',0)})",
+                      f"(expected {expected_rows}, csv={counts.get('csv', 0)}, pq={counts.get('parquet', 0)})",
                       flush=True)
             else:
                 print(f"[IOD] PARTIAL (no marker): {os.path.basename(file_i)} "
-                      f"(expected {expected_rows}, csv={counts.get('csv',0)}, pq={counts.get('parquet',0)})",
+                      f"(expected {expected_rows}, csv={counts.get('csv', 0)}, pq={counts.get('parquet', 0)})",
                       flush=True)
 
         comm.Barrier()
@@ -603,7 +606,6 @@ def run_sim_runnumbers_MPI_getIOD(config):
 
 
 def run_IOD(config):
-
     # --- MPI setup ---
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
@@ -612,7 +614,7 @@ def run_IOD(config):
     viz_flag = bool(config.get('visualization_flag', 0))
 
     # Paths
-    iod_dir   = util._iod_dir(config)
+    iod_dir = util._iod_dir(config)
     master_fn = os.path.join(iod_dir, "MASTER_IOD.csv")
     if rank == 0 and not os.path.exists(master_fn):
         print(f"[Stage: IOD Solve] No MASTER_IOD.csv at {master_fn} → skip")
@@ -625,7 +627,7 @@ def run_IOD(config):
         try:
             _head = pd.read_csv(master_fn, nrows=1)
             n_rows = sum(1 for _ in open(master_fn, "r", encoding="utf-8")) - 1
-            cols   = list(_head.columns)
+            cols = list(_head.columns)
             print(f"[Stage: IOD Solve] MASTER rows = {n_rows}")
         except Exception as e:
             print(f"[Stage: IOD Solve] Failed to inspect MASTER: {e}")
@@ -673,11 +675,11 @@ def run_IOD(config):
 
     # Column order spec (final write order)
     detection_block = [
-        "ID_AST","EPOCH_AST(jdtdb)","HELIO_AST(kms)","EARTH_HELIO_EA(kms)",
-        "EPOCH_SC(jdtdb)","DETECTING_SC_ID",
-        "HELIO_SC_1(kms)","HELIO_SC_2(kms)","HELIO_SC_3(kms)","HELIO_SC_4(kms)",
+        "ID_AST", "EPOCH_AST(jdtdb)", "HELIO_AST(kms)", "EARTH_HELIO_EA(kms)",
+        "EPOCH_SC(jdtdb)", "DETECTING_SC_ID",
+        "HELIO_SC_1(kms)", "HELIO_SC_2(kms)", "HELIO_SC_3(kms)", "HELIO_SC_4(kms)",
         "EARTH_HELIO_SE(kms)",
-        "POINTING_SC_1","POINTING_SC_2","POINTING_SC_3","POINTING_SC_4",
+        "POINTING_SC_1", "POINTING_SC_2", "POINTING_SC_3", "POINTING_SC_4",
     ]
     # Keep IOD_DATA_SAVED_AS immediately after context block
     saved_as_col = ["IOD_DATA_SAVED_AS"]
@@ -711,7 +713,7 @@ def run_IOD(config):
 
     # Metrics / outputs block
     metrics_block = [
-        "POS_RMSE","VEL_RMSE","COMPUTATION_TIME_SEC","OPTIMAL_BH_ITERATION",
+        "POS_RMSE", "VEL_RMSE", "COMPUTATION_TIME_SEC", "OPTIMAL_BH_ITERATION",
         "IOD_RESULT_SAVED_AS", "IOD_FINAL_STATE"
     ]
 
@@ -744,7 +746,7 @@ def run_IOD(config):
                 import PIELM_basinhopping_w_range_nbody as pielm_ctsn
 
                 # Fixed parameters you provided
-                m_2  = 0.1
+                m_2 = 0.1
                 m_12 = (1.0 - m_2) / 2.0
 
                 parameters = {
@@ -767,7 +769,7 @@ def run_IOD(config):
                     'MIN_RHO': 0.0006684587122,
                     'MAX_RHO': 0.06684587122,
                     'MIN_RHO_DOT': -0.05033557046,
-                    'MAX_RHO_DOT':  0.05033557046,
+                    'MAX_RHO_DOT': 0.05033557046,
                     'DELTA_RHO': 6.68459e-8,
                     'DELTA_RHO_DOT': 0.00167785234,
                 }
@@ -838,9 +840,11 @@ def run_IOD(config):
                             upd[k] = v.to_base_units().value
                         continue
                     if isinstance(v, (np.floating, np.integer)):
-                        upd[k] = v.item(); continue
+                        upd[k] = v.item();
+                        continue
                     if isinstance(v, (int, float)):
-                        upd[k] = v; continue
+                        upd[k] = v;
+                        continue
                     if isinstance(v, (list, tuple, np.ndarray)):
                         if k == "LAYER_RATIOS":
                             upd[k] = v[1][1] - v[1][0]
@@ -853,7 +857,7 @@ def run_IOD(config):
             ser_final = serialize_vec(final_state) if final_state is not None else ""
 
             upd = {
-                "_row_index": int(m_idx),                 # internal key for placement
+                "_row_index": int(m_idx),  # internal key for placement
                 # (MASTER_* kept internal, not written)
                 "POS_RMSE": float(pos_rmse),
                 "VEL_RMSE": float(vel_rmse),
@@ -895,7 +899,7 @@ def run_IOD(config):
             missing = [c for c in new_cols if c not in df.columns]
             for c in missing:
                 # Guess dtype: strings for these, else NaN numeric
-                if c in ("SAMPLING_METHOD","INPUT_RANGE","IOD_RESULT_SAVED_AS"):
+                if c in ("SAMPLING_METHOD", "INPUT_RANGE", "IOD_RESULT_SAVED_AS"):
                     df[c] = ""
                 else:
                     df[c] = np.nan
@@ -926,7 +930,8 @@ def run_IOD(config):
             # Finally, any leftover columns not in the ordered list
             leftovers = [c for c in current_cols if c not in set(ordered)]
             # Explicitly drop internal columns if they somehow exist
-            leftovers = [c for c in leftovers if c not in internal_skip_keys and c not in ("MASTER_UID","MASTER_ROW_INDEX","FILE_USED")]
+            leftovers = [c for c in leftovers if
+                         c not in internal_skip_keys and c not in ("MASTER_UID", "MASTER_ROW_INDEX", "FILE_USED")]
 
             final_cols = ordered + leftovers
             df = df[final_cols]
@@ -959,7 +964,8 @@ def run_IOD(config):
             pass
 
     if rank == 0:
-        print(f"[Stage: IOD Solve] updated_rows={len(committed_uids)}, processed={processed}, skipped={skipped}, errors={errors}")
+        print(
+            f"[Stage: IOD Solve] updated_rows={len(committed_uids)}, processed={processed}, skipped={skipped}, errors={errors}")
 
     comm.Barrier()
     return
@@ -989,7 +995,7 @@ def run_OD(config):
     size = comm.Get_size()
 
     # Paths & MASTER
-    iod_dir   = util._iod_dir(config)
+    iod_dir = util._iod_dir(config)
     master_fn = os.path.join(iod_dir, "MASTER_IOD.csv")
     if rank == 0 and not os.path.exists(master_fn):
         print(f"[Stage: OD] No MASTER_IOD.csv at {master_fn} → skip")
@@ -1056,16 +1062,16 @@ def run_OD(config):
     os.makedirs(out_dir, exist_ok=True)
 
     od_duration_days = float(config.get('od_duration_days', 1.0))
-    od_max_steps     = config.get('od_max_steps', None)
-    od_max_steps     = int(od_max_steps) if (od_max_steps is not None) else None
+    od_max_steps = config.get('od_max_steps', None)
+    od_max_steps = int(od_max_steps) if (od_max_steps is not None) else None
 
     # Columns we’ll add/update in MASTER (we’ll enforce a nice order on write)
     od_metrics_cols = [
-        "OD_RESULT_SAVED_AS",      # per-row OD time-series log filename
-        "OD_FINAL_TIME_JDTDB",     # final epoch reached (jdtdb)
-        "OD_N_STEPS",              # number of OD steps performed
-        "OD_LAST_POS_RMSE",        # last-step position RMSE [km] or your chosen units
-        "OD_LAST_VEL_RMSE",        # last-step velocity RMSE [km/s]
+        "OD_RESULT_SAVED_AS",  # per-row OD time-series log filename
+        "OD_FINAL_TIME_JDTDB",  # final epoch reached (jdtdb)
+        "OD_N_STEPS",  # number of OD steps performed
+        "OD_LAST_POS_RMSE",  # last-step position RMSE [km] or your chosen units
+        "OD_LAST_VEL_RMSE",  # last-step velocity RMSE [km/s]
     ]
 
     # Collect per-rank updates to MASTER rows
@@ -1084,291 +1090,297 @@ def run_OD(config):
             skipped += 1
             continue
 
+        # try:
+
+        M = config['num_spacecraft']
+
+        # access iod master row data
+        ast_helio_ae_kms = util.parse_vec_cell(row['HELIO_AST(kms)'])
+        earth_helio_ae_kms = util.parse_vec_cell(row['EARTH_HELIO_EA(kms)'])
+        sc_helio_se_kms = np.zeros((M, 6))
+        for i in range(M):
+            sc_str = f'HELIO_SC_{i + 1}(kms)'
+            sc_helio_se_kms[i, :] = util.parse_vec_cell(row[sc_str])
+
+        earth_helio_se_kms = util.parse_vec_cell(row['EARTH_HELIO_SE(kms)'])
+
+        sc_pointing_sunearth_cartesian = np.zeros((M, 3))
+        for i in range(M):
+            sc_point_str = f'POINTING_SC_{i + 1}'
+            sc_pointing_sunearth_cartesian[i, :] = util.parse_vec_cell(row[sc_point_str])
+
+        # convert IOD master data into a EMEJ2000 for ukf, and SECR visulazation for interpretation
+        # convert ast_helio to eme
+        ast_eme_ae_kms = util.helio_eclip_to_geo_eme_generic(ast_helio_ae_kms, earth_helio_ae_kms,
+                                                             layout="batch")
+
+
+        # convert s/c to GEO SECR using SE
+        sc_secr_se_kms = util.helio_eclip_to_geo_secr_generic(sc_helio_se_kms, earth_helio_se_kms,
+                                                              layout="batch")
+
+        # convert s/c GEO SECR to eme using AE
+        sc_geoeclip_ae_kms = util.geo_secr_to_geo_eclip_generic(sc_secr_se_kms, earth_helio_ae_kms,
+                                                                layout="batch")
+        sc_eme_ae_kms = util.geo_eclip_to_geo_eme_generic(sc_geoeclip_ae_kms, layout="batch")
+
+        # convert pointing from SECR to eme
+        sc_pointing_geoeclip_cartesian = util.geo_secr_to_geo_eclip_generic(sc_pointing_sunearth_cartesian,
+                                                                            earth_helio_ae_kms, layout="batch")
+        sc_pointing_eme_cartesian = util.geo_eclip_to_geo_eme_generic(sc_pointing_geoeclip_cartesian,
+                                                                      layout="batch")
+
+        # code working until here
+
+        # get pointing angles - both SECR and EME - ccw from +x
+        # sc_pointing_secr_angle_rad = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_sunearth_cartesian)
+        # sc_pointing_eme_angle_rad = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_eme_cartesian)
+
+        # iod solution
+        # ast_iod_eme_ae_kms = util.parse_vec_cell(row['IOD_FINAL_STATE'])
+        # ast_iod_geoeclip_ae_kms = util.eme_to_ecliptic_batch(ast_iod_eme_ae_kms)
+        # ast_iod_helioeclip_ae_kms = ast_iod_geoeclip_ae_kms + earth_helio_ae_kms
+        # ast_iod_secr_ae_kms = util.helio_eclip_to_sun_earth_corotating_batch_full(ast_iod_helioeclip_ae_kms,
+        #                                                                           earth_helio_ae_kms)
+
+        # these are (M,6), topo for each s/c
+        # ast_iod_topoeme_radecrho_radkms = util.topocentric_alpha_delta_rho_6d(
+        #     ast_iod_eme_ae_kms[:3], ast_iod_eme_ae_kms[3:],
+        #     sc_eme_ae_kms[:, :3], sc_eme_ae_kms[:, 3:]
+        # )
+
+        # ast_iod_toposecr_radecrho_radkms = util.topocentric_alpha_delta_rho_6d(
+        #     ast_iod_secr_ae_kms[:3], ast_iod_secr_ae_kms[3:],
+        #     sc_secr_se_kms[:, :3], sc_secr_se_kms[:, 3:]
+        # )
+
+        # convert uncertainty from topo to both eme and secr
+        # eme
+        # ast_iod_uncertainty_topoeme_radecrho_std_degkms = config['iod_cov_topo_std']  # ra, dec, rho, ra dot, dec dot, rho dot (deg, km, deg/s, km/s)
+        # ast_iod_uncertainty_topoeme_radecrho_std_radkms = util.topo_std_degkms_to_radkms(ast_iod_uncertainty_topoeme_radecrho_std_degkms)
+        # ast_iod_uncertainty_topoeme_radecrho_covmat_radkms = np.diag(ast_iod_uncertainty_topoeme_radecrho_std_radkms ** 2)
+        # P_topo is (6,6) in (rad, km, rad/s, km/s)
+        # ast_iod_uncertainty_topoeme_cartesian_covmat = util.cov_radec_rho_6d_to_xyz_6d(
+        #     ast_iod_topoeme_radecrho_radkms,  # (M,6)
+        #     ast_iod_uncertainty_topoeme_radecrho_covmat_radkms  # (6,6)
+        # )
+
+        # ast_iod_uncertainty_toposecr_cartesian_covmat = util.cov_radec_rho_6d_to_xyz_6d(
+        #     ast_iod_toposecr_radecrho_radkms,  # (M,6)
+        #     ast_iod_uncertainty_topoeme_radecrho_covmat_radkms  # (6,6) same measurement covariance
+        # )
+
+        agents_xy = np.array([[0, 0], [5, 1], [2, 6]], float)
+        pointing_angles_rad = np.deg2rad([10, 140, 250])
+        theta_h_rad = np.deg2rad(15)
+
+        target_mean_xy = np.array([3.0, 3.0])
+        target_cov_xy = np.array([[1.0, 0.2], [0.2, 0.8]])
+        true_target_xy = np.array([3.5, 2.7])
+
+        ems_center_xy = np.array([1.5, 4.5])
+        ems_radius = 1.2
+
+        fig, ax = util.plot_od_scenario_2d(
+            t_label="JD 2460000.1234",
+            agents_xy=agents_xy,
+            pointing_angles_rad=pointing_angles_rad,
+            theta_h_rad=theta_h_rad,
+            ray_length=8.0,
+            target_mean_xy=target_mean_xy,
+            target_cov_xy=target_cov_xy,
+            d_mahal=2.0,
+            true_target_xy=true_target_xy,
+            ems_center_xy=ems_center_xy,
+            ems_radius=ems_radius,
+            xlim=(-3, 10), ylim=(-3, 10),
+            agent_orbit_tracks_xy=None,  # or list of (K,2)
+        )
+        plt.show()
+        """
+        # --------------------------
+        # Initialization (first step)
+        # --------------------------
+        # Epochs
         try:
+            # Prefer SC epoch if present; else asteroid epoch
+            t0_jdtdb = float(row.get("EPOCH_AST(jdtdb)", np.nan))
+        except Exception:
+            t0_jdtdb = np.nan
+        if not np.isfinite(t0_jdtdb):
+            raise RuntimeError("Cannot determine initial epoch (EPOCH_AST missing).")
 
-            M = config['num_spacecraft']
+        # End time and step size
+        t_end   = t0_jdtdb + od_duration_days
 
-            # access iod master row data
-            ast_helio_ae_kms = util.parse_vec_cell(row['HELIO_AST(kms)'])
-            earth_helio_ae_kms = util.parse_vec_cell(row['EARTH_HELIO_EA(kms)'])
-            sc_helio_se_kms = np.zeros((M, 6))
-            for i in range(M):
-                sc_str = f'HELIO_SC_{i+1}(kms)'
-                sc_helio_se_kms[i, :] = util.parse_vec_cell(row[sc_str])
+        # Load IOD result to initialize OD (from Stage 3)
+        iod_result_name = str(row.get("IOD_RESULT_SAVED_AS", "") or "")
+        if not iod_result_name.strip():
+            # If user wants OD to initialize from raw IOD_DATA_SAVED_AS (time series) instead,
+            # you can fallback. We keep it strict here:
+            raise FileNotFoundError("IOD_RESULT_SAVED_AS missing in MASTER row; cannot initialize OD.")
+        iod_result_path = os.path.join(out_dir, iod_result_name)
+        if not os.path.exists(iod_result_path):
+            # If files are elsewhere, adjust to your layout.
+            # Alternatively store absolute paths in IOD_RESULT_SAVED_AS.
+            raise FileNotFoundError(f"IOD result file not found: {iod_result_path}")
 
-            earth_helio_se_kms = util.parse_vec_cell(row['EARTH_HELIO_SE(kms)'])
+        # TODO: load your IOD outputs for initialization
+        # Example (replace with your actual loader):
+        # iod_init = util.load_iod_result(iod_result_path)
+        # x0_est, P0_est = iod_init['x_est'], iod_init['P_est']  # state & covariance (example)
+        # x_true0       = iod_init.get('x_true', None)          # if available
+        # For now, use placeholders:
+        x0_est  = None    # TODO: replace with real estimate
+        P0_est  = None    # TODO: replace with real covariance
+        x_true0 = None    # TODO: replace with truth if available
 
-            sc_pointing_sunearth_cartesian = np.zeros((M, 3))
-            for i in range(M):
-                sc_point_str = f'POINTING_SC_{i+1}'
-                sc_pointing_sunearth_cartesian[i, :] = util.parse_vec_cell(row[sc_point_str])
+        # Prepare per-row OD log (unique filename, no overwrite)
+        base = f"{uid}__OD_{config['dynamics']}_{config['orbit']}_{config['observer']}_{config['optimizer']}"
+        od_log_path, od_log_name = make_unique_filename(out_dir, base, ".csv")
 
-            # convert IOD master data into a EMEJ2000 for ukf, and SECR visulazation for interpretation
-            # convert ast_helio to eme
-            ast_eme_ae_kms = util.helio_eclip_to_geo_eme_batch(ast_helio_ae_kms, earth_helio_ae_kms)
+        # Open OD log and write header
+        with open(od_log_path, "w", newline="") as f_log:
+            log_writer = csv.writer(f_log)
+            # Minimal suggested columns; extend as needed for your analysis
+            log_writer.writerow([
+                "STEP_INDEX",
+                "EPOCH_JDTDB",
+                # estimated state vector (flatten as comma-separated strings if needed)
+                "X_EST",             # stringified state estimate
+                "P_EST_TRACE",       # scalar or compact representation
+                # true state, if available
+                "X_TRUE",
+                # control/attitude targets, if applicable
+                "ATTITUDE_CMD",
+                # errors/metrics
+                "POS_RMSE",
+                "VEL_RMSE",
+            ])
 
-            # convert s/c to SECR using SE
-            sc_secr_se_kms = util.helio_eclip_to_sun_earth_corotating_batch_full(sc_helio_se_kms, earth_helio_se_kms)
+            # ----------------------------------------------------------
+            # Time loop
+            # ----------------------------------------------------------
+            step_idx = 0
+            t_cur = t0_jdtdb
 
-            # convert s/c SECR to eme using AE
-            sc_geoeclip_ae_kms = util.sun_earth_corotating_to_geo_eclip_batch_full(sc_secr_se_kms, earth_helio_ae_kms)
-            sc_eme_ae_kms = util.ecliptic_to_eme_single_posvel(sc_geoeclip_ae_kms)
+            # Working state (initialize from IOD)
+            x_est = x0_est
+            P_est = P0_est
+            x_true = x_true0
 
-            # convert pointing from SECR to eme
-            sc_pointing_geoeclip_cartesian = util.sun_earth_corotating_to_geo_eclip_batch_full(sc_pointing_sunearth_cartesian, earth_helio_ae_kms)
-            sc_pointing_eme_cartesian = util.ecliptic_to_eme_batch(sc_pointing_geoeclip_cartesian)
+            last_pos_rmse = np.nan
+            last_vel_rmse = np.nan
 
-            # get pointing angles - both SECR and EME - ccw from +x
-            sc_pointing_secr_angle_rad = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_sunearth_cartesian)
-            sc_pointing_eme_angle_rad = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_eme_cartesian)
+            while True:
+                # End condition
+                if t_cur > t_end:
+                    break
+                if od_max_steps is not None and step_idx >= od_max_steps:
+                    break
 
-            # iod solution
-            ast_iod_eme_ae_kms = util.parse_vec_cell(row['IOD_FINAL_STATE'])
-            ast_iod_geoeclip_ae_kms = util.eme_to_ecliptic_batch(ast_iod_eme_ae_kms)
-            ast_iod_helioeclip_ae_kms = ast_iod_geoeclip_ae_kms + earth_helio_ae_kms
-            ast_iod_secr_ae_kms = util.helio_eclip_to_sun_earth_corotating_batch_full(ast_iod_helioeclip_ae_kms,
-                                                                                      earth_helio_ae_kms)
+                if step_idx == 0:
+                    # -------------- INITIALIZATION STEP ---------------
+                    # TODO: any one-time initialization for your OD filter (e.g., set process noise, etc.)
+                    # Example:
+                    # od_state = od.init_filter(x0_est, P0_est, config)
+                    # (We keep using x_est, P_est variables directly here.)
+                    pass
+                else:
+                    # -------------- REGULAR OD STEP -------------------
+                    # 1) Generate measurements at time t_cur for this master row
+                    #    (You can use MASTER columns and/or per-row IOD_DATA_SAVED_AS to drive geometry)
+                    # TODO: implement your measurement generation:
+                    # meas = util.generate_od_measurements(row, t_cur, config)
+                    meas = None
 
-            # these are (M,6), topo for each s/c
-            ast_iod_topoeme_radecrho_radkms = util.topocentric_alpha_delta_rho_6d(
-                ast_iod_eme_ae_kms[:3], ast_iod_eme_ae_kms[3:],
-                sc_eme_ae_kms[:, :3], sc_eme_ae_kms[:, 3:]
-            )
+                    # 2) Propagate the filter to t_cur + dt and update with measurements
+                    # TODO: implement your OD step:
+                    # x_est, P_est = od.run_step(x_est, P_est, meas, config, t_cur, dt=dt_day)
+                    # Optionally also maintain a truth model for diagnostics:
+                    # x_true = truth.propagate(x_true, dt_day, config) if x_true is not None else None
+                    pass
 
-            ast_iod_toposecr_radecrho_radkms = util.topocentric_alpha_delta_rho_6d(
-                ast_iod_secr_ae_kms[:3], ast_iod_secr_ae_kms[3:],
-                sc_secr_se_kms[:, :3], sc_secr_se_kms[:, 3:]
-            )
+                # -------------- Post-step metrics & logging ----------
+                # TODO: compute RMSE (pos/vel) at this step if truth is available and uncertainty
+                # Example placeholders:
+                # last_pos_rmse, last_vel_rmse = util.compute_rmse(x_est, x_true)
+                # If not available, keep NaN or compute innovation-based proxies.
+                # For now, they remain as is.
 
-            # convert uncertainty from topo to both eme and secr
-            # eme
-            ast_iod_uncertainty_topoeme_radecrho_std_degkms = config['iod_cov_topo_std']  # ra, dec, rho, ra dot, dec dot, rho dot (deg, km, deg/s, km/s)
-            ast_iod_uncertainty_topoeme_radecrho_std_radkms = util.topo_std_degkms_to_radkms(ast_iod_uncertainty_topoeme_radecrho_std_degkms)
-            ast_iod_uncertainty_topoeme_radecrho_covmat_radkms = np.diag(ast_iod_uncertainty_topoeme_radecrho_std_radkms ** 2)
-            # P_topo is (6,6) in (rad, km, rad/s, km/s)
-            ast_iod_uncertainty_topoeme_cartesian_covmat = util.cov_radec_rho_6d_to_xyz_6d(
-                ast_iod_topoeme_radecrho_radkms,  # (M,6)
-                ast_iod_uncertainty_topoeme_radecrho_covmat_radkms  # (6,6)
-            )
+                # -------------- Attitude / Slew Planning (optional) --
+                # TODO: plan pointing/attitude for next step, if needed:
+                # att_cmd = util.plan_attitude(x_est, row, t_cur, config)
+                att_cmd = ""
 
-            ast_iod_uncertainty_toposecr_cartesian_covmat = util.cov_radec_rho_6d_to_xyz_6d(
-                ast_iod_toposecr_radecrho_radkms,  # (M,6)
-                ast_iod_uncertainty_topoeme_radecrho_covmat_radkms  # (6,6) same measurement covariance
-            )
+                # TODO: get time update
+                dt_day = 0.01
 
+                # TODO: get state of system after slew
+                # asteroid state, both true and predicted
+                # formation s/c states
 
-
-            agents_xy = np.array([[0, 0], [5, 1], [2, 6]], float)
-            pointing_angles_rad = np.deg2rad([10, 140, 250])
-            theta_h_rad = np.deg2rad(15)
-
-            target_mean_xy = np.array([3.0, 3.0])
-            target_cov_xy = np.array([[1.0, 0.2], [0.2, 0.8]])
-            true_target_xy = np.array([3.5, 2.7])
-
-            ems_center_xy = np.array([1.5, 4.5])
-            ems_radius = 1.2
+                # TODO: update state of the system
 
 
-            fig, ax = util.plot_od_scenario_2d(
-                t_label="JD 2460000.1234",
-                agents_xy=agents_xy,
-                pointing_angles_rad=pointing_angles_rad,
-                theta_h_rad=theta_h_rad,
-                ray_length=8.0,
-                target_mean_xy=target_mean_xy,
-                target_cov_xy=target_cov_xy,
-                d_mahal=2.0,
-                true_target_xy=true_target_xy,
-                ems_center_xy=ems_center_xy,
-                ems_radius=ems_radius,
-                xlim=(-3, 10), ylim=(-3, 10),
-                agent_orbit_tracks_xy=None,  # or list of (K,2)
-            )
-            plt.show()
-            """
-            # --------------------------
-            # Initialization (first step)
-            # --------------------------
-            # Epochs
-            try:
-                # Prefer SC epoch if present; else asteroid epoch
-                t0_jdtdb = float(row.get("EPOCH_AST(jdtdb)", np.nan))
-            except Exception:
-                t0_jdtdb = np.nan
-            if not np.isfinite(t0_jdtdb):
-                raise RuntimeError("Cannot determine initial epoch (EPOCH_AST missing).")
+                # -------------- Log the step -------------------------
+                # Stringify vectors/matrices compactly to keep CSV readable:
+                def _vec_to_str(v):
+                    if v is None:
+                        return ""
+                    try:
+                        arr = np.asarray(v).ravel()
+                        return ",".join(f"{float(x):.9g}" for x in arr)
+                    except Exception:
+                        return str(v)
 
-            # End time and step size
-            t_end   = t0_jdtdb + od_duration_days
+                def _mat_trace(m):
+                    if m is None:
+                        return np.nan
+                    try:
+                        a = np.asarray(m)
+                        return float(np.trace(a))
+                    except Exception:
+                        return np.nan
 
-            # Load IOD result to initialize OD (from Stage 3)
-            iod_result_name = str(row.get("IOD_RESULT_SAVED_AS", "") or "")
-            if not iod_result_name.strip():
-                # If user wants OD to initialize from raw IOD_DATA_SAVED_AS (time series) instead,
-                # you can fallback. We keep it strict here:
-                raise FileNotFoundError("IOD_RESULT_SAVED_AS missing in MASTER row; cannot initialize OD.")
-            iod_result_path = os.path.join(out_dir, iod_result_name)
-            if not os.path.exists(iod_result_path):
-                # If files are elsewhere, adjust to your layout.
-                # Alternatively store absolute paths in IOD_RESULT_SAVED_AS.
-                raise FileNotFoundError(f"IOD result file not found: {iod_result_path}")
-
-            # TODO: load your IOD outputs for initialization
-            # Example (replace with your actual loader):
-            # iod_init = util.load_iod_result(iod_result_path)
-            # x0_est, P0_est = iod_init['x_est'], iod_init['P_est']  # state & covariance (example)
-            # x_true0       = iod_init.get('x_true', None)          # if available
-            # For now, use placeholders:
-            x0_est  = None    # TODO: replace with real estimate
-            P0_est  = None    # TODO: replace with real covariance
-            x_true0 = None    # TODO: replace with truth if available
-
-            # Prepare per-row OD log (unique filename, no overwrite)
-            base = f"{uid}__OD_{config['dynamics']}_{config['orbit']}_{config['observer']}_{config['optimizer']}"
-            od_log_path, od_log_name = make_unique_filename(out_dir, base, ".csv")
-
-            # Open OD log and write header
-            with open(od_log_path, "w", newline="") as f_log:
-                log_writer = csv.writer(f_log)
-                # Minimal suggested columns; extend as needed for your analysis
                 log_writer.writerow([
-                    "STEP_INDEX",
-                    "EPOCH_JDTDB",
-                    # estimated state vector (flatten as comma-separated strings if needed)
-                    "X_EST",             # stringified state estimate
-                    "P_EST_TRACE",       # scalar or compact representation
-                    # true state, if available
-                    "X_TRUE",
-                    # control/attitude targets, if applicable
-                    "ATTITUDE_CMD",
-                    # errors/metrics
-                    "POS_RMSE",
-                    "VEL_RMSE",
+                    step_idx,
+                    f"{t_cur:.9f}",
+                    _vec_to_str(x_est),
+                    _mat_trace(P_est),
+                    _vec_to_str(x_true),
+                    att_cmd,
+                    f"{last_pos_rmse:.9g}" if np.isfinite(last_pos_rmse) else "",
+                    f"{last_vel_rmse:.9g}" if np.isfinite(last_vel_rmse) else "",
                 ])
 
-                # ----------------------------------------------------------
-                # Time loop
-                # ----------------------------------------------------------
-                step_idx = 0
-                t_cur = t0_jdtdb
+                # -------------- Update time/state for next loop ------
+                t_cur += dt_day
+                step_idx += 1
 
-                # Working state (initialize from IOD)
-                x_est = x0_est
-                P_est = P0_est
-                x_true = x_true0
+        # At this point, the OD row is complete; prepare MASTER update
+        upd = {
+            "_row_index": int(m_idx),
+            "OD_RESULT_SAVED_AS": od_log_name,
+            "OD_FINAL_TIME_JDTDB": float(t_cur - dt_day),  # last time step we wrote
+            "OD_N_STEPS": int(step_idx),
+            "OD_LAST_POS_RMSE": float(last_pos_rmse) if np.isfinite(last_pos_rmse) else np.nan,
+            "OD_LAST_VEL_RMSE": float(last_vel_rmse) if np.isfinite(last_vel_rmse) else np.nan,
+        }
+        updates.append(upd)
+        processed += 1
 
-                last_pos_rmse = np.nan
-                last_vel_rmse = np.nan
-
-                while True:
-                    # End condition
-                    if t_cur > t_end:
-                        break
-                    if od_max_steps is not None and step_idx >= od_max_steps:
-                        break
-
-                    if step_idx == 0:
-                        # -------------- INITIALIZATION STEP ---------------
-                        # TODO: any one-time initialization for your OD filter (e.g., set process noise, etc.)
-                        # Example:
-                        # od_state = od.init_filter(x0_est, P0_est, config)
-                        # (We keep using x_est, P_est variables directly here.)
-                        pass
-                    else:
-                        # -------------- REGULAR OD STEP -------------------
-                        # 1) Generate measurements at time t_cur for this master row
-                        #    (You can use MASTER columns and/or per-row IOD_DATA_SAVED_AS to drive geometry)
-                        # TODO: implement your measurement generation:
-                        # meas = util.generate_od_measurements(row, t_cur, config)
-                        meas = None
-
-                        # 2) Propagate the filter to t_cur + dt and update with measurements
-                        # TODO: implement your OD step:
-                        # x_est, P_est = od.run_step(x_est, P_est, meas, config, t_cur, dt=dt_day)
-                        # Optionally also maintain a truth model for diagnostics:
-                        # x_true = truth.propagate(x_true, dt_day, config) if x_true is not None else None
-                        pass
-
-                    # -------------- Post-step metrics & logging ----------
-                    # TODO: compute RMSE (pos/vel) at this step if truth is available and uncertainty
-                    # Example placeholders:
-                    # last_pos_rmse, last_vel_rmse = util.compute_rmse(x_est, x_true)
-                    # If not available, keep NaN or compute innovation-based proxies.
-                    # For now, they remain as is.
-
-                    # -------------- Attitude / Slew Planning (optional) --
-                    # TODO: plan pointing/attitude for next step, if needed:
-                    # att_cmd = util.plan_attitude(x_est, row, t_cur, config)
-                    att_cmd = ""
-
-                    # TODO: get time update
-                    dt_day = 0.01
-
-                    # TODO: get state of system after slew
-                    # asteroid state, both true and predicted
-                    # formation s/c states
-
-                    # TODO: update state of the system
-
-
-                    # -------------- Log the step -------------------------
-                    # Stringify vectors/matrices compactly to keep CSV readable:
-                    def _vec_to_str(v):
-                        if v is None:
-                            return ""
-                        try:
-                            arr = np.asarray(v).ravel()
-                            return ",".join(f"{float(x):.9g}" for x in arr)
-                        except Exception:
-                            return str(v)
-
-                    def _mat_trace(m):
-                        if m is None:
-                            return np.nan
-                        try:
-                            a = np.asarray(m)
-                            return float(np.trace(a))
-                        except Exception:
-                            return np.nan
-
-                    log_writer.writerow([
-                        step_idx,
-                        f"{t_cur:.9f}",
-                        _vec_to_str(x_est),
-                        _mat_trace(P_est),
-                        _vec_to_str(x_true),
-                        att_cmd,
-                        f"{last_pos_rmse:.9g}" if np.isfinite(last_pos_rmse) else "",
-                        f"{last_vel_rmse:.9g}" if np.isfinite(last_vel_rmse) else "",
-                    ])
-
-                    # -------------- Update time/state for next loop ------
-                    t_cur += dt_day
-                    step_idx += 1
-
-            # At this point, the OD row is complete; prepare MASTER update
-            upd = {
-                "_row_index": int(m_idx),
-                "OD_RESULT_SAVED_AS": od_log_name,
-                "OD_FINAL_TIME_JDTDB": float(t_cur - dt_day),  # last time step we wrote
-                "OD_N_STEPS": int(step_idx),
-                "OD_LAST_POS_RMSE": float(last_pos_rmse) if np.isfinite(last_pos_rmse) else np.nan,
-                "OD_LAST_VEL_RMSE": float(last_vel_rmse) if np.isfinite(last_vel_rmse) else np.nan,
-            }
-            updates.append(upd)
-            processed += 1
-
-            # tidy
-            gc.collect()
-        """
-        except Exception as e:
-            # Don’t mark done here; only after MASTER commit
-            errors += 1
+        # tidy
+        gc.collect()
+    """
+        # except Exception as e:
+        #     Don’t mark done here; only after MASTER commit
+            # print(e)
+            # errors += 1
             # Optional: you could write a per-row error note:
             # with open(os.path.join(od_done_dir, f"{uid}.err"), "w") as fe:
             #     fe.write(str(e))
-            continue
+            # continue
 
     # ===== Gather updates → rank 0 writes MASTER (ordered) → broadcast committed UIDs → write .done =====
     gathered = comm.gather(updates, root=0)
@@ -1431,11 +1443,11 @@ def run_OD(config):
             pass
 
     if rank == 0:
-        print(f"[Stage: OD] committed_rows={len(committed_uids)}, processed={processed}, skipped={skipped}, errors={errors}")
+        print(
+            f"[Stage: OD] committed_rows={len(committed_uids)}, processed={processed}, skipped={skipped}, errors={errors}")
 
     comm.Barrier()
     return
-
 
 
 def run_overall_OD(master, config):
@@ -1483,7 +1495,7 @@ def run_overall_OD(master, config):
         else:
             # A source is considered fully processed if marker exists
             done_markers = [os.path.join(iod_dir, f".done_{b}.json") for b in bases]
-            done_flags   = [os.path.exists(m) for m in done_markers]
+            done_flags = [os.path.exists(m) for m in done_markers]
             n_done = sum(done_flags)
             do_iod = not all(done_flags)
             msg = (f"[Stage: IOD] {'RUN' if do_iod else 'SKIP'} — "
@@ -1499,9 +1511,9 @@ def run_overall_OD(master, config):
         # Even if we skip, ensure all ranks stay in sync
         comm.Barrier()
 
-    #-----------------------
+    # -----------------------
     # Stage 3: Running IOD (skip if MASTER rows already committed)
-    #-----------------------
+    # -----------------------
     if rank == 0:
         master_path = os.path.join(iod_dir, "MASTER_IOD.csv")
         stage3_done_dir = os.path.join(iod_dir, "iod_stage3_done")
@@ -1534,7 +1546,7 @@ def run_overall_OD(master, config):
 
                     # count how many rows have a done marker
                     done_count = 0
-                    for i, saved_as in enumerate(dfm.get("IOD_DATA_SAVED_AS", pd.Series([None]*n_rows))):
+                    for i, saved_as in enumerate(dfm.get("IOD_DATA_SAVED_AS", pd.Series([None] * n_rows))):
                         uid = uid_for_row(i, saved_as)
                         marker = os.path.join(stage3_done_dir, f"{uid}.done")
                         if os.path.exists(marker):
@@ -1557,16 +1569,12 @@ def run_overall_OD(master, config):
     else:
         comm.Barrier()
 
-
-    #-----------------
+    # -----------------
     # Stage 4: Run the ATT.COOR. + OD Pipeline
-    #------------------
+    # ------------------
     run_OD(config)
 
     return
-
-
-
 
 
 ###########################

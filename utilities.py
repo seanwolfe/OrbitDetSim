@@ -22,15 +22,14 @@ spice.furnsh("de430.bsp")
 spice.furnsh('naif0012.tls')
 pd.options.mode.chained_assignment = None
 
-
 import numpy as np
 import pandas as pd
 from scipy.interpolate import CubicHermiteSpline
 import glob
 
-
 import json
 import re
+
 
 def parse_vec_cell(cell, expected_len=None, dtype=float, default=None):
     """
@@ -97,6 +96,7 @@ def parse_vec_cell(cell, expected_len=None, dtype=float, default=None):
         raise ValueError(f"Expected len={expected_len}, got {arr.size} from {cell!r}")
     return arr
 
+
 def mahalanobis_ellipse_points(mu, Sigma, d_mahal=3.0, n=200):
     """
     Points on the ellipse (x-mu)^T Sigma^{-1} (x-mu) = d_mahal^2
@@ -104,7 +104,7 @@ def mahalanobis_ellipse_points(mu, Sigma, d_mahal=3.0, n=200):
     eigvals, eigvecs = np.linalg.eigh(Sigma)
     eigvals = np.maximum(eigvals, 1e-12)
 
-    t = np.linspace(0, 2*np.pi, n)
+    t = np.linspace(0, 2 * np.pi, n)
     circle = np.stack([np.cos(t), np.sin(t)], axis=0)
 
     axes_lengths = d_mahal * np.sqrt(eigvals)
@@ -128,13 +128,13 @@ def plot_fov_wedge(ax, agent_pos, pointing_angle, half_angle,
     def ccw_dir_from_plus_x(theta):
         return np.stack([np.cos(theta), np.sin(theta)], axis=-1)  # (M,2)
 
-    left_dir  = ccw_dir_from_plus_x(pointing_angle - half_angle)
+    left_dir = ccw_dir_from_plus_x(pointing_angle - half_angle)
     right_dir = ccw_dir_from_plus_x(pointing_angle + half_angle)
 
-    left_pt  = agent_pos + ray_length * left_dir
+    left_pt = agent_pos + ray_length * left_dir
     right_pt = agent_pos + ray_length * right_dir
 
-    ax.plot([x0, left_pt[0]],  [y0, left_pt[1]],  color=color, lw=lw)
+    ax.plot([x0, left_pt[0]], [y0, left_pt[1]], color=color, lw=lw)
     ax.plot([x0, right_pt[0]], [y0, right_pt[1]], color=color, lw=lw)
 
     ax.fill([x0, left_pt[0], right_pt[0]],
@@ -163,10 +163,10 @@ def topo_std_degkms_to_radkms(std_degkms):
     deg2rad = np.pi / 180.0
 
     std_radkms = std.copy()
-    std_radkms[0] *= deg2rad   # RA
-    std_radkms[1] *= deg2rad   # Dec
-    std_radkms[3] *= deg2rad   # RA_dot
-    std_radkms[4] *= deg2rad   # Dec_dot
+    std_radkms[0] *= deg2rad  # RA
+    std_radkms[1] *= deg2rad  # Dec
+    std_radkms[3] *= deg2rad  # RA_dot
+    std_radkms[4] *= deg2rad  # Dec_dot
     # rho, rho_dot unchanged (km, km/s)
 
     return std_radkms
@@ -185,8 +185,8 @@ def topocentric_alpha_delta_rho_6d(p_obj, v_obj, p_sc, v_sc, eps=1e-12):
     """
     p_obj = np.asarray(p_obj, dtype=float)
     v_obj = np.asarray(v_obj, dtype=float)
-    p_sc  = np.asarray(p_sc,  dtype=float)
-    v_sc  = np.asarray(v_sc,  dtype=float)
+    p_sc = np.asarray(p_sc, dtype=float)
+    v_sc = np.asarray(v_sc, dtype=float)
 
     # Promote (3,) -> (1,3) for vectorized ops
     def to_2d(a):
@@ -200,21 +200,21 @@ def topocentric_alpha_delta_rho_6d(p_obj, v_obj, p_sc, v_sc, eps=1e-12):
 
     Pobj = to_2d(p_obj)
     Vobj = to_2d(v_obj)
-    Psc  = to_2d(p_sc)
-    Vsc  = to_2d(v_sc)
+    Psc = to_2d(p_sc)
+    Vsc = to_2d(v_sc)
 
     # Broadcast: allow single object state against many spacecraft states
     # (1,3) vs (M,3) -> (M,3)
     r = Pobj - Psc
     v = Vobj - Vsc
 
-    x, y, z  = r[:, 0], r[:, 1], r[:, 2]
+    x, y, z = r[:, 0], r[:, 1], r[:, 2]
     vx, vy, vz = v[:, 0], v[:, 1], v[:, 2]
 
     rho = np.linalg.norm(r, axis=1)
     rho = np.maximum(rho, eps)
 
-    rxy2 = x*x + y*y
+    rxy2 = x * x + y * y
     rxy2_safe = np.maximum(rxy2, eps)
     rxy = np.sqrt(rxy2_safe)
 
@@ -222,16 +222,16 @@ def topocentric_alpha_delta_rho_6d(p_obj, v_obj, p_sc, v_sc, eps=1e-12):
     delta = np.arctan2(z, rxy)
 
     # Range rate
-    rho_dot = (x*vx + y*vy + z*vz) / rho
+    rho_dot = (x * vx + y * vy + z * vz) / rho
 
     # RA rate
-    alpha_dot = (x*vy - y*vx) / rxy2_safe
+    alpha_dot = (x * vy - y * vx) / rxy2_safe
 
     # Dec rate
     # delta_dot = (vz*rxy - z*(x*vx + y*vy)/rxy) / rho^2
     # use safe rxy to avoid division by zero
     rxy_safe = np.maximum(rxy, np.sqrt(eps))
-    delta_dot = (vz*rxy_safe - z*(x*vx + y*vy)/rxy_safe) / (rho*rho)
+    delta_dot = (vz * rxy_safe - z * (x * vx + y * vy) / rxy_safe) / (rho * rho)
 
     out = np.column_stack([alpha, delta, rho, alpha_dot, delta_dot, rho_dot])
 
@@ -281,12 +281,12 @@ def cov_radec_rho_6d_to_xyz_6d(y6, P_adr6, eps=1e-12):
 
     M = Y.shape[0]
 
-    alpha     = Y[:, 0]
-    delta     = Y[:, 1]
-    rho       = Y[:, 2]
+    alpha = Y[:, 0]
+    delta = Y[:, 1]
+    rho = Y[:, 2]
     alpha_dot = Y[:, 3]
     delta_dot = Y[:, 4]
-    rho_dot   = Y[:, 5]
+    rho_dot = Y[:, 5]
 
     ca, sa = np.cos(alpha), np.sin(alpha)
     cd, sd = np.cos(delta), np.sin(delta)
@@ -295,8 +295,8 @@ def cov_radec_rho_6d_to_xyz_6d(y6, P_adr6, eps=1e-12):
     u = np.column_stack([cd * ca, cd * sa, sd])  # (M,3)
 
     # du/dalpha, du/ddelta
-    du_dalpha = np.column_stack([-cd * sa,  cd * ca, np.zeros(M)])  # (M,3)
-    du_ddelta = np.column_stack([-sd * ca, -sd * sa, cd])           # (M,3)
+    du_dalpha = np.column_stack([-cd * sa, cd * ca, np.zeros(M)])  # (M,3)
+    du_ddelta = np.column_stack([-sd * ca, -sd * sa, cd])  # (M,3)
 
     # ----- Position Jacobian J_r: (M,3,3) for [alpha, delta, rho] -----
     # columns: [rho*du_dalpha, rho*du_ddelta, u]
@@ -323,13 +323,12 @@ def cov_radec_rho_6d_to_xyz_6d(y6, P_adr6, eps=1e-12):
     # ----- Full Jacobian J: (M,6,6) -----
     J = np.zeros((M, 6, 6), dtype=float)
     J[:, 0:3, 0:3] = J_r
-    J[:, 3:6, :]   = J_v
+    J[:, 3:6, :] = J_v
 
     # Propagate: P_xyz = J P J^T for each i
     P_xyz = np.einsum('mij,jk,mlk->mil', J, P, J)
 
     return P_xyz[0] if single else P_xyz
-
 
 
 def proj_angle_xy_from_plus_x_ccw(u_agents):
@@ -380,58 +379,59 @@ def coverage_count_2d(grid_pts, p_agents_2d, pointing_angles, theta_h):
     counts = np.zeros(len(grid_pts), dtype=int)
 
     for i in range(M):
-        v = grid_pts - p_agents_2d[i]             # (N,2)
+        v = grid_pts - p_agents_2d[i]  # (N,2)
         v_norm = np.linalg.norm(v, axis=1)
-        good = v_norm > 1e-9                      # avoid divide-by-zero
+        good = v_norm > 1e-9  # avoid divide-by-zero
         v_unit = np.zeros_like(v)
-        v_unit[good] = v[good] / v_norm[good,None]
+        v_unit[good] = v[good] / v_norm[good, None]
 
         cosang = np.sum(v_unit * dirs[i], axis=1)
-        inside = cosang >= cos_th                 # boolean mask
+        inside = cosang >= cos_th  # boolean mask
         counts += inside.astype(int)
 
     return counts
 
+
 def plot_od_scenario_2d(
-    *,
-    # epoch/meta
-    t_label=None,
+        *,
+        # epoch/meta
+        t_label=None,
 
-    # agents
-    agents_xy,                     # (M,2)
-    pointing_angles_rad,           # (M,)
-    theta_h_rad,                   # scalar
-    ray_length=10.0,
+        # agents
+        agents_xy,  # (M,2)
+        pointing_angles_rad,  # (M,)
+        theta_h_rad,  # scalar
+        ray_length=10.0,
 
-    # optional: current boresight vectors (for dotted line + slew text)
-    # if provided: u_curr_agents_xy should be (M,2), not necessarily unit (we normalize)
-    u_curr_agents_xy=None,
-    boresight_line_len=3.0,
+        # optional: current boresight vectors (for dotted line + slew text)
+        # if provided: u_curr_agents_xy should be (M,2), not necessarily unit (we normalize)
+        u_curr_agents_xy=None,
+        boresight_line_len=3.0,
 
-    # optional: orbit tracks / quasi-halo projections (provide whatever you have)
-    # list length M; each entry is (K,2) array for that agent
-    agent_orbit_tracks_xy=None,
+        # optional: orbit tracks / quasi-halo projections (provide whatever you have)
+        # list length M; each entry is (K,2) array for that agent
+        agent_orbit_tracks_xy=None,
 
-    # coverage grid extents (you choose)
-    xlim=None, ylim=None,
-    Nx=500, Ny=500,
+        # coverage grid extents (you choose)
+        xlim=None, ylim=None,
+        Nx=500, Ny=500,
 
-    # target uncertainty + truth
-    target_mean_xy=None,           # (2,)
-    target_cov_xy=None,            # (2,2)
-    d_mahal=2.0,
-    true_target_xy=None,           # (2,)
+        # target uncertainty + truth
+        target_mean_xy=None,  # (2,)
+        target_cov_xy=None,  # (2,2)
+        d_mahal=2.0,
+        true_target_xy=None,  # (2,)
 
-    # EMS zone (2D cross-section you provide)
-    ems_center_xy=None,            # (2,)
-    ems_radius=None,               # scalar
+        # EMS zone (2D cross-section you provide)
+        ems_center_xy=None,  # (2,)
+        ems_radius=None,  # scalar
 
-    # styling toggles
-    show_coverage=True,
-    show_uncertainty=True,
-    show_truth=True,
-    show_ems=True,
-    title=None,
+        # styling toggles
+        show_coverage=True,
+        show_uncertainty=True,
+        show_truth=True,
+        show_ems=True,
+        title=None,
 ):
     """
     Pure visualization function: does not infer any states.
@@ -441,7 +441,7 @@ def plot_od_scenario_2d(
     """
     A = np.asarray(agents_xy, dtype=float)
     M = A.shape[0]
-    ang = np.asarray(pointing_angles_rad, dtype=float).reshape(M,)
+    ang = np.asarray(pointing_angles_rad, dtype=float).reshape(M, )
 
     # Determine plot bounds if not provided
     if xlim is None or ylim is None:
@@ -449,14 +449,17 @@ def plot_od_scenario_2d(
         xs = [A[:, 0]]
         ys = [A[:, 1]]
         if target_mean_xy is not None:
-            mu = np.asarray(target_mean_xy, dtype=float).reshape(2,)
-            xs.append([mu[0]]); ys.append([mu[1]])
+            mu = np.asarray(target_mean_xy, dtype=float).reshape(2, )
+            xs.append([mu[0]]);
+            ys.append([mu[1]])
         if true_target_xy is not None:
-            tr = np.asarray(true_target_xy, dtype=float).reshape(2,)
-            xs.append([tr[0]]); ys.append([tr[1]])
+            tr = np.asarray(true_target_xy, dtype=float).reshape(2, )
+            xs.append([tr[0]]);
+            ys.append([tr[1]])
         if ems_center_xy is not None:
-            ec = np.asarray(ems_center_xy, dtype=float).reshape(2,)
-            xs.append([ec[0]]); ys.append([ec[1]])
+            ec = np.asarray(ems_center_xy, dtype=float).reshape(2, )
+            xs.append([ec[0]]);
+            ys.append([ec[1]])
         xall = np.concatenate([np.asarray(v).ravel() for v in xs])
         yall = np.concatenate([np.asarray(v).ravel() for v in ys])
         pad = 2.0
@@ -467,10 +470,10 @@ def plot_od_scenario_2d(
 
     # Coverage colormap (0,1,2,>=3)
     cmap_colors = np.array([
-        [1, 1, 1, 1],      # 0 = white
+        [1, 1, 1, 1],  # 0 = white
         [0.6, 0.8, 1, 1],  # 1 = light blue
-        [0.2, 0.7, 0.2, 1],# 2 = green
-        [1.0, 0.0, 0.0, 1] # >=3 = red
+        [0.2, 0.7, 0.2, 1],  # 2 = green
+        [1.0, 0.0, 0.0, 1]  # >=3 = red
     ])
     cov_cmap = ListedColormap(cmap_colors)
     bounds = [-0.5, 0.5, 1.5, 2.5, 3.5]
@@ -513,7 +516,7 @@ def plot_od_scenario_2d(
     agent_scatter = None
     for i in range(M):
         plot_fov_wedge(ax, A[i], ang[i], theta_h_rad, ray_length,
-                        color='tab:blue', alpha=0.12, lw=1.5)
+                       color='tab:blue', alpha=0.12, lw=1.5)
         sc = ax.scatter(A[i, 0], A[i, 1], color='tab:blue', s=60,
                         label='Agent position' if i == 0 else None)
         if agent_scatter is None:
@@ -553,7 +556,7 @@ def plot_od_scenario_2d(
     unc_mean_sc = None
     ellipse_line = None
     if show_uncertainty and (target_mean_xy is not None) and (target_cov_xy is not None):
-        mu = np.asarray(target_mean_xy, dtype=float).reshape(2,)
+        mu = np.asarray(target_mean_xy, dtype=float).reshape(2, )
         P = np.asarray(target_cov_xy, dtype=float).reshape(2, 2)
 
         unc_mean_sc = ax.scatter(mu[0], mu[1], color='tab:red', s=80,
@@ -568,7 +571,7 @@ def plot_od_scenario_2d(
     # True target position
     true_sc = None
     if show_truth and (true_target_xy is not None):
-        tr = np.asarray(true_target_xy, dtype=float).reshape(2,)
+        tr = np.asarray(true_target_xy, dtype=float).reshape(2, )
         true_sc = ax.scatter(tr[0], tr[1], s=60, facecolors='none',
                              edgecolors='green', linewidths=2,
                              label='True position')
@@ -576,11 +579,11 @@ def plot_od_scenario_2d(
     # EMS zone (2D circle)
     ems_line = None
     if show_ems and (ems_center_xy is not None) and (ems_radius is not None) and (float(ems_radius) > 0):
-        c = np.asarray(ems_center_xy, dtype=float).reshape(2,)
+        c = np.asarray(ems_center_xy, dtype=float).reshape(2, )
         R = float(ems_radius)
-        th = np.linspace(0, 2*np.pi, 240)
-        x_c = c[0] + R*np.cos(th)
-        y_c = c[1] + R*np.sin(th)
+        th = np.linspace(0, 2 * np.pi, 240)
+        x_c = c[0] + R * np.cos(th)
+        y_c = c[1] + R * np.sin(th)
         ems_line, = ax.plot(x_c, y_c, color='orange', lw=2,
                             label='EMS zone (2D)')
         ax.fill(x_c, y_c, color='orange', alpha=0.1)
@@ -641,6 +644,7 @@ def wrap_to_pi(angle_rad: np.ndarray) -> np.ndarray:
     """Wrap angle to [-pi, pi]."""
     return (angle_rad + np.pi) % (2.0 * np.pi) - np.pi
 
+
 def topocentric_measurements_and_rates(obj_pos, obj_vel, sc_pos, sc_vel, eps=1e-12):
     """
     Compute topocentric RA/Dec/Range and their time derivatives from states.
@@ -664,34 +668,35 @@ def topocentric_measurements_and_rates(obj_pos, obj_vel, sc_pos, sc_vel, eps=1e-
     yd = v_rel[:, 1]
     zd = v_rel[:, 2]
 
-    r2 = x*x + y*y + z*z
+    r2 = x * x + y * y + z * z
     rho = np.sqrt(np.maximum(r2, eps))
 
-    rxy2 = x*x + y*y
+    rxy2 = x * x + y * y
     rxy = np.sqrt(np.maximum(rxy2, eps))
 
     # Angles
-    ra = np.arctan2(y, x)                 # [-pi, pi]
-    dec = np.arctan2(z, rxy)              # stable vs asin(z/r)
+    ra = np.arctan2(y, x)  # [-pi, pi]
+    dec = np.arctan2(z, rxy)  # stable vs asin(z/r)
 
     # Range rate
-    rho_dot = (x*xd + y*yd + z*zd) / rho  # km/s
+    rho_dot = (x * xd + y * yd + z * zd) / rho  # km/s
 
     # RA rate: (x*yd - y*xd)/(x^2 + y^2)
-    ra_dot = (x*yd - y*xd) / np.maximum(rxy2, eps)
+    ra_dot = (x * yd - y * xd) / np.maximum(rxy2, eps)
 
     # Dec rate using dec = atan2(z, rxy)
     # rxy_dot = (x*xd + y*yd)/rxy
-    rxy_dot = (x*xd + y*yd) / np.maximum(rxy, eps)
+    rxy_dot = (x * xd + y * yd) / np.maximum(rxy, eps)
     # dec_dot = (zd*rxy - z*rxy_dot) / (rxy^2 + z^2) = (zd*rxy - z*rxy_dot)/rho^2
-    dec_dot = (zd*rxy - z*rxy_dot) / np.maximum(r2, eps)
+    dec_dot = (zd * rxy - z * rxy_dot) / np.maximum(r2, eps)
 
     return ra, dec, rho, ra_dot, dec_dot, rho_dot
 
+
 def topocentric_rmse(
-    final_pos, final_vel,
-    true_pos, true_vel,
-    sc_positions, sc_velocities,
+        final_pos, final_vel,
+        true_pos, true_vel,
+        sc_positions, sc_velocities,
 ):
     """
     Returns RMSEs between estimated vs true topocentric observables:
@@ -704,19 +709,18 @@ def topocentric_rmse(
         true_pos, true_vel, sc_positions, sc_velocities
     )
 
-
     # Angle differences must be wrapped
     dra = wrap_to_pi(ra_f - ra_t)
     ddec = wrap_to_pi(dec_f - dec_t)  # dec is also an angle; wrapping is safe
 
     # RMSEs
-    ra_rmse = float(np.sqrt(np.mean(dra**2)))
-    dec_rmse = float(np.sqrt(np.mean(ddec**2)))
-    rho_rmse = float(np.sqrt(np.mean((rho_f - rho_t)**2)))
+    ra_rmse = float(np.sqrt(np.mean(dra ** 2)))
+    dec_rmse = float(np.sqrt(np.mean(ddec ** 2)))
+    rho_rmse = float(np.sqrt(np.mean((rho_f - rho_t) ** 2)))
 
-    ra_dot_rmse = float(np.sqrt(np.mean((ra_dot_f - ra_dot_t)**2)))
-    dec_dot_rmse = float(np.sqrt(np.mean((dec_dot_f - dec_dot_t)**2)))
-    rho_dot_rmse = float(np.sqrt(np.mean((rho_dot_f - rho_dot_t)**2)))
+    ra_dot_rmse = float(np.sqrt(np.mean((ra_dot_f - ra_dot_t) ** 2)))
+    dec_dot_rmse = float(np.sqrt(np.mean((dec_dot_f - dec_dot_t) ** 2)))
+    rho_dot_rmse = float(np.sqrt(np.mean((rho_dot_f - rho_dot_t) ** 2)))
 
     return {
         "RA_RMSE_RAD": ra_rmse,
@@ -729,11 +733,9 @@ def topocentric_rmse(
 
 
 def interpolate_sc_traj(sc_poses, sc_vels, sc_times, num_points=25):
-
     # -----------------------------------
     # New time grid (1000 samples)
     # -----------------------------------
-
 
     sc_pos = sc_poses.detach().cpu().numpy()
     sc_vel = sc_vels.detach().cpu().numpy()
@@ -741,7 +743,6 @@ def interpolate_sc_traj(sc_poses, sc_vels, sc_times, num_points=25):
     sc_time = np.array([time.value - sc_times[0].value for time in sc_times]) * 86400
 
     t_new = np.linspace(sc_time[0], sc_time[-1], num_points)
-
 
     # -----------------------------------
     # Build Hermite splines per component
@@ -766,7 +767,6 @@ def interpolate_sc_traj(sc_poses, sc_vels, sc_times, num_points=25):
         spl = splines[k]
         r_new[:, k] = spl(t_new)  # position component
         v_new[:, k] = spl.derivative()(t_new)  # velocity component (dr/dt)
-
 
     # v from hermite wrong
     from scipy.interpolate import interp1d
@@ -831,7 +831,6 @@ def generate_iod_file(file_path, final_pos, final_vel, true_pos, true_vel, epoch
     else:
         pass
 
-
     data = {
         "EPOCHS": epochs,
         "IOD_X": fx, "IOD_Y": fy, "IOD_Z": fz,
@@ -846,7 +845,6 @@ def generate_iod_file(file_path, final_pos, final_vel, true_pos, true_vel, epoch
 
     df.to_csv(file_path, index=False)
     return df
-
 
 
 def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, config, rmse_df):
@@ -1075,7 +1073,8 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
     if config['dynamics'] == 'CR3BP':
         ax21.plot(*(pred_positions[-1][:, :2] * config['AU_TO_M'] / config['KM_TO_M']).T, label=label)
         ax21.scatter(
-            *(iod_data.loc[:, ["SC_GEO_X(KM)_PHYS", "SC_GEO_Y(KM)_PHYS"]].values * config['AU_TO_M'] / config['KM_TO_M']).T,
+            *(iod_data.loc[:, ["SC_GEO_X(KM)_PHYS", "SC_GEO_Y(KM)_PHYS"]].values * config['AU_TO_M'] / config[
+                'KM_TO_M']).T,
             label='Observer Position')
     else:
         ax21.plot(*(pred_positions[-1][:, :2]).T, label=label)
@@ -1115,7 +1114,8 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
         res = odeint(nbody.cr3bp, state, iod_data["EPOCH(JDTDB)"].values, args=(mu,))
         asteroid_cr3bp_position = np.array(res[:, :3])
         ax7.plot(*(pred_positions[-1][:, :2] * config['AU_TO_M'] / config['KM_TO_M']).T, label=label, zorder=10)
-        ax7.plot(*(asteroid_cr3bp_position[:, :2] * config['AU_TO_M'] / config['KM_TO_M']).T, label='CR3BP Integrated', linestyle='--', linewidth=3, zorder=5)
+        ax7.plot(*(asteroid_cr3bp_position[:, :2] * config['AU_TO_M'] / config['KM_TO_M']).T, label='CR3BP Integrated',
+                 linestyle='--', linewidth=3, zorder=5)
     else:
         # calc epochs
         num_frames = config['number_of_frames']
@@ -1169,13 +1169,13 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
         true_v_rmse = rmse_df.loc[:, ['TRUE_VX', 'TRUE_VY', 'TRUE_VZ']].values * 29.8
         nlls_vel_rmse = rmse_df.loc[:, ['IOD_VX_NLLS', 'IOD_VY_NLLS', 'IOD_VZ_NLLS']].values * 29.8
         true_rmse = rmse_df.loc[:, ['TRUE_X', 'TRUE_Y', 'TRUE_Z']].values * config['AU_TO_M'] / config['KM_TO_M']
-        pos_rmse = rmse_df.loc[:, ['IOD_X_NLLS', 'IOD_Y_NLLS', 'IOD_Z_NLLS']].values * config['AU_TO_M'] / config['KM_TO_M']
+        pos_rmse = rmse_df.loc[:, ['IOD_X_NLLS', 'IOD_Y_NLLS', 'IOD_Z_NLLS']].values * config['AU_TO_M'] / config[
+            'KM_TO_M']
     else:
         true_v_rmse = rmse_df.loc[:, ['TRUE_VX', 'TRUE_VY', 'TRUE_VZ']].values
         nlls_vel_rmse = rmse_df.loc[:, ['IOD_VX_NLLS', 'IOD_VY_NLLS', 'IOD_VZ_NLLS']].values
         true_rmse = rmse_df.loc[:, ['TRUE_X', 'TRUE_Y', 'TRUE_Z']].values
         pos_rmse = rmse_df.loc[:, ['IOD_X_NLLS', 'IOD_Y_NLLS', 'IOD_Z_NLLS']].values
-
 
     errors_xyz = np.abs(true_rmse - pos_rmse)
     x = errors_xyz[:, 0]
@@ -1186,7 +1186,6 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
     vx = errors_vxyz[:, 0]
     vy = errors_vxyz[:, 1]
     vz = errors_vxyz[:, 2]
-
 
     bins = 10
 
@@ -1264,6 +1263,7 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
     plt.show()
 
     return
+
 
 def viz(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, configs):
     # asteroid position
@@ -1444,7 +1444,6 @@ def viz_geo_and_secr(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, m
             fov_poly = Poly3DCollection([fov_corners], color='cyan', alpha=0.3, edgecolor='k')
             ax.add_collection3d(fov_poly)
 
-
             # print the obtained ra and dec
             ra = np.arctan2(ra_dec[0], ra_dec[1])  # returns radians in [-pi, pi]
             ra_deg = np.degrees(ra) % 360
@@ -1475,9 +1474,6 @@ def viz_geo_and_secr(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, m
     ax.plot(minimoon_pos[0, :], minimoon_pos[1, :], minimoon_pos[2, :], color=colors[-2], linewidth=5,
             label='Integrated traj minimoon', zorder=14)
 
-
-
-
     ax.set_xlabel('X (KM)')
     ax.set_ylabel('Y (KM)')
     ax.set_zlabel('Z (KM)')
@@ -1501,14 +1497,14 @@ def viz_geo_and_secr(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, m
     moon_pos = (minimoon.orbit.loc[:, ["Moon x (Helio)",
                                        "Moon y (Helio)", "Moon z (Helio)", "Moon vx (Helio)",
                                        "Moon vy (Helio)", "Moon vz (Helio)"]].values - minimoon.orbit.loc[:,
-                                                                                     ["Earth x (Helio)",
-                                                                                      "Earth y (Helio)",
-                                                                                      "Earth z (Helio)", "Earth vx (Helio)",
-                                                                                      "Earth vy (Helio)",
-                                                                                      "Earth vz (Helio)"]].values)
+                                                                                       ["Earth x (Helio)",
+                                                                                        "Earth y (Helio)",
+                                                                                        "Earth z (Helio)",
+                                                                                        "Earth vx (Helio)",
+                                                                                        "Earth vy (Helio)",
+                                                                                        "Earth vz (Helio)"]].values)
     moon_pos[:, :3] *= configs['AU_TO_M'] / configs['KM_TO_M']
     moon_pos[:, 3:] *= (configs['AU_TO_M'] / configs['KM_TO_M'] / configs['SECONDS_PER_DAY'])
-
 
     asteroid_pos_eme = ecliptic_to_eme_batch(asteroid_pos.T).T
     moon_pos_eme = ecliptic_to_eme_batch(moon_pos.T).T
@@ -1528,7 +1524,7 @@ def viz_geo_and_secr(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, m
     ax2 = fig2.add_subplot(projection='3d')
     ax2.plot(moon_pos_eme[:, 0], moon_pos_eme[:, 1], moon_pos_eme[:, 2], label='Moon')  # plot moon traj
     ax2.plot(asteroid_pos_eme[:, 0], asteroid_pos_eme[:, 1], asteroid_pos_eme[:, 2], label='Asteroid', color='green',
-            zorder=15)  # plot asteroid traj
+             zorder=15)  # plot asteroid traj
     ax2.plot_wireframe(x, y, z, color="blue", linewidth=0.5, alpha=0.7)  # Plot wireframe Earth
 
     # start index is first instance asteroid is FOV of a sc, without occlusion from Earth or moon
@@ -1551,25 +1547,26 @@ def viz_geo_and_secr(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, m
             earth_state = minimoon.orbit.loc[traj_index, [
                 "Earth x (Helio)", "Earth y (Helio)", "Earth z (Helio)",
                 "Earth vx (Helio)", "Earth vy (Helio)", "Earth vz (Helio)"
-            ]].values * (configs['AU_TO_M'] / configs['KM_TO_M']) # Reshape to (6, 1)
+            ]].values * (configs['AU_TO_M'] / configs['KM_TO_M'])  # Reshape to (6, 1)
 
             # Call the function with correctly shaped inputs
             geo_boresight = sun_earth_corotating_to_geo_eclip_single(boresight_vec, earth_state)
             geo_eme_boresight = ecliptic_to_eme_single(geo_boresight)
 
-            fov_corners = plot_fov_projection_geo(geo_eme_boresight[:3], spacecraft_pos, asteroid_pos_eme[traj_index, :],
+            fov_corners = plot_fov_projection_geo(geo_eme_boresight[:3], spacecraft_pos,
+                                                  asteroid_pos_eme[traj_index, :],
                                                   spacecraft.fov)
             # fov_corners = [fov_corner * (configs['AU_TO_M'] / configs['KM_TO_M']) for fov_corner in fov_corners]
 
             # plot fov related things
             ax2.scatter(*asteroid_pos_eme[traj_index, :], s=20,
-                       color='green',
-                       zorder=20)  # instant of detection on minimoon traj
+                        color='green',
+                        zorder=20)  # instant of detection on minimoon traj
             # Plot dotted lines from spacecraft to FOV corners
             for corner in fov_corners:
                 ax2.plot([spacecraft_pos[0], corner[0]],
-                        [spacecraft_pos[1], corner[1]],
-                        [spacecraft_pos[2], corner[2]], 'k--', alpha=0.5)
+                         [spacecraft_pos[1], corner[1]],
+                         [spacecraft_pos[2], corner[2]], 'k--', alpha=0.5)
 
             # Draw FOV projection as a polygon
             fov_poly = Poly3DCollection([fov_corners], color='cyan', alpha=0.3, edgecolor='k')
@@ -1611,17 +1608,19 @@ def viz_geo_and_secr(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, m
 
     # plot integration results
     ax2.scatter(spacecraft_geo[0, 0], spacecraft_geo[1, 0], spacecraft_geo[2, 0], color=colors[-1], s=30,
-               label='Integration start sc', zorder=19)  # s/c integration trajectory and initial position
+                label='Integration start sc', zorder=19)  # s/c integration trajectory and initial position
     ax2.scatter(spacecraft_geo[0, :], spacecraft_geo[1, :], spacecraft_geo[2, :], color=colors[-1], linewidth=5,
-            label='Integrated traj sc', zorder=14)
-    ax2.scatter(sc_eme_states_physically_sound[0, 0], sc_eme_states_physically_sound[1, 0], sc_eme_states_physically_sound[2, 0], color=colors[-3], s=50,
+                label='Integrated traj sc', zorder=14)
+    ax2.scatter(sc_eme_states_physically_sound[0, 0], sc_eme_states_physically_sound[1, 0],
+                sc_eme_states_physically_sound[2, 0], color=colors[-3], s=50,
                 label='Physically sound start', zorder=18)  # s/c integration trajectory and initial position
-    ax2.plot(sc_eme_states_physically_sound[0, :], sc_eme_states_physically_sound[1, :], sc_eme_states_physically_sound[2, :], color=colors[-3], linewidth=5,
-                label='Physically sound', zorder=14)
+    ax2.plot(sc_eme_states_physically_sound[0, :], sc_eme_states_physically_sound[1, :],
+             sc_eme_states_physically_sound[2, :], color=colors[-3], linewidth=5,
+             label='Physically sound', zorder=14)
     ax2.scatter(asteroid_geo[0, 0], asteroid_geo[1, 0], asteroid_geo[2, 0], color=colors[-2], s=30,
-               label='Integration start minimoon', zorder=19)  # minimoon integration trajectory and initial position
+                label='Integration start minimoon', zorder=19)  # minimoon integration trajectory and initial position
     ax2.scatter(asteroid_geo[0, :], asteroid_geo[1, :], asteroid_geo[2, :], color=colors[-2], linewidth=5,
-            label='Integrated traj minimoon', zorder=14)
+                label='Integrated traj minimoon', zorder=14)
 
     # plot ra and dec lines
     cos_dec = np.sqrt(1 - ra_dec[2] ** 2)
@@ -1748,6 +1747,454 @@ def add_noise_to_angles(df, std_ra_deg=1.0, std_dec_deg=1.0):
     return df
 
 
+def helio_eclip_to_geo_secr_generic(obj, earth, eps=1e-12, layout="auto"):
+    """
+    Convert heliocentric ECLIPJ2000 position(s) or state(s) to Earth-centered
+    Sun–Earth co-rotating (SECR) frame with +Z fixed to ecliptic north.
+
+    STRICT RULES:
+    - obj dim = 3 → earth may be 3 or 6 (earth velocity ignored)
+    - obj dim = 6 → earth MUST be 6 (otherwise ValueError)
+
+    Supported obj shapes:
+      Position: (3,), (M,3), (N,3), (3,N), (M,N,3)
+      State:    (6,), (M,6), (N,6), (6,N), (M,N,6)
+
+    Supported earth shapes:
+      Position: (3,), (3,1), (1,3), (N,3), (3,N)
+      State:    (6,), (6,1), (1,6), (N,6), (6,N)
+
+    layout resolves ambiguity when obj is (K,dim):
+      - "batch": interpret as (M,dim) objects at one time (N=1)
+      - "time" : interpret as (N,dim) time series for one object (M=1)
+      - "auto" : infer from earth shape when possible, else default to "batch"
+
+    Returns: same layout as obj.
+    """
+
+    if layout not in ("auto", "batch", "time"):
+        raise ValueError("layout must be one of {'auto','batch','time'}")
+
+    O = np.asarray(obj, dtype=float)
+    E = np.asarray(earth, dtype=float)
+
+    # --- infer dim (3 or 6) ---
+    def infer_dim(A, name):
+        if A.ndim == 1:
+            if A.shape in [(3,), (6,)]:
+                return A.shape[0]
+            raise ValueError(f"{name} expected (3,) or (6,), got {A.shape}")
+        if A.ndim == 2:
+            if A.shape[0] in (3, 6):
+                return A.shape[0]  # (dim,N)
+            if A.shape[1] in (3, 6):
+                return A.shape[1]  # (K,dim) or (N,dim)
+        if A.ndim == 3:
+            if A.shape[2] in (3, 6):
+                return A.shape[2]
+        raise ValueError(f"Could not infer dim for {name} with shape {A.shape}")
+
+    obj_dim   = infer_dim(O, "obj")
+    earth_dim = infer_dim(E, "earth")
+
+    # --- STRICT RULE ---
+    if obj_dim == 6 and earth_dim == 3:
+        raise ValueError(
+            "Invalid input: obj is 6D state but earth is 3D position. "
+            "Earth velocity is required to compute omega and the SECR velocity correction."
+        )
+
+    # --- normalize earth to (N,earth_dim) ---
+    def earth_to_Nd(E, N, dim):
+        if E.ndim == 1:
+            if E.shape != (dim,):
+                raise ValueError(f"earth expected ({dim},), got {E.shape}")
+            return np.repeat(E[None, :], N, axis=0)
+
+        if E.ndim == 2:
+            if E.shape == (dim, 1):
+                return np.repeat(E[:, 0][None, :], N, axis=0)
+            if E.shape == (1, dim):
+                return np.repeat(E[0, :][None, :], N, axis=0)
+            if E.shape[1] == dim:  # (N,dim)
+                if E.shape[0] != N:
+                    raise ValueError(f"earth has N={E.shape[0]} but obj has N={N}")
+                return E
+            if E.shape[0] == dim:  # (dim,N)
+                if E.shape[1] != N:
+                    raise ValueError(f"earth has N={E.shape[1]} but obj has N={N}")
+                return E.T
+
+        raise ValueError(f"earth unsupported shape {E.shape} for dim={dim}")
+
+    # --- normalize obj to internal (M,N,obj_dim) and remember return style ---
+    if O.ndim == 1:
+        if O.shape != (obj_dim,):
+            raise ValueError(f"obj expected ({obj_dim},), got {O.shape}")
+        O_int = O[None, None, :]
+        out_style = ("single",)
+
+    elif O.ndim == 2:
+        if O.shape == (obj_dim, 1):
+            O_int = O[:, 0][None, None, :]
+            out_style = ("single",)
+
+        elif O.shape[0] == obj_dim:  # (dim,N)
+            O_int = O.T[None, :, :]  # (1,N,dim)
+            out_style = ("dimxN",)
+
+        elif O.shape[1] == obj_dim:  # (K,dim) ambiguous
+            K = O.shape[0]
+
+            if layout == "batch":
+                O_int = O[:, None, :]  # (M,1,dim)
+                out_style = ("Mxdim",)
+
+            elif layout == "time":
+                O_int = O[None, :, :]  # (1,N,dim)
+                out_style = ("Nxdim_time",)
+
+            else:  # auto
+                earth_time_like = (
+                    E.ndim == 2 and (
+                        (E.shape[1] == earth_dim and E.shape[0] == K) or
+                        (E.shape[0] == earth_dim and E.shape[1] == K)
+                    )
+                )
+                if earth_time_like:
+                    O_int = O[None, :, :]  # (1,K,dim)
+                    out_style = ("Nxdim_time",)
+                else:
+                    O_int = O[:, None, :]  # (K,1,dim)
+                    out_style = ("Mxdim",)
+        else:
+            raise ValueError(f"obj unsupported shape {O.shape}")
+
+    elif O.ndim == 3:
+        if O.shape[2] != obj_dim:
+            raise ValueError(f"obj expected (M,N,{obj_dim}), got {O.shape}")
+        O_int = O
+        out_style = ("MNdim",)
+
+    else:
+        raise ValueError(f"obj unsupported ndim={O.ndim}")
+
+    M, N, _ = O_int.shape
+
+    # Earth normalized to (N, earth_dim)
+    E_N = earth_to_Nd(E, N, earth_dim)
+
+    # Build Earth vector compatible with obj_dim
+    if obj_dim == 3:
+        # use only Earth position; ignore Earth velocity even if present
+        E_use = E_N[:, :3]                # (N,3)
+    else:
+        # obj_dim==6 implies earth_dim==6 (strict)
+        E_use = E_N                       # (N,6)
+
+    # --- core math ---
+    rE = E_use[:, :3]                     # (N,3)
+    vE = E_use[:, 3:] if obj_dim == 6 else None
+
+    rO = O_int[:, :, :3]                  # (M,N,3)
+    rel_r = rO - rE[None, :, :]           # (M,N,3)
+
+    if obj_dim == 6:
+        vO = O_int[:, :, 3:]              # (M,N,3)
+        rel_v = vO - vE[None, :, :]       # (M,N,3)
+
+    # rotation angle from Earth->Sun direction (same convention as your original)
+    angles = np.arctan2(-rE[:, 1], -rE[:, 0])  # (N,)
+    c = np.cos(-angles)
+    s = np.sin(-angles)
+
+    R = np.zeros((N, 3, 3), dtype=float)
+    R[:, 0, 0] = c;  R[:, 0, 1] = -s
+    R[:, 1, 0] = s;  R[:, 1, 1] =  c
+    R[:, 2, 2] = 1.0
+
+    # position in rotating frame
+    r_prime = np.einsum('nij,mnj->mni', R, rel_r)  # (M,N,3)
+
+    if obj_dim == 3:
+        out_int = r_prime
+    else:
+        # omega magnitude from Earth motion
+        rE_norm2 = np.sum(rE * rE, axis=1)
+        rE_norm2 = np.maximum(rE_norm2, eps)
+        omega_mag = np.linalg.norm(np.cross(rE, vE), axis=1) / rE_norm2  # (N,)
+
+        omega = np.zeros((N, 3), dtype=float)
+        omega[:, 2] = omega_mag
+
+        v_rel_rot = np.einsum('nij,mnj->mni', R, rel_v)        # (M,N,3)
+        omega_prime = np.einsum('nij,nj->ni', R, omega)        # (N,3)
+
+        v_rot = np.cross(omega_prime[None, :, :], r_prime)     # (M,N,3)
+        v_prime = v_rel_rot - v_rot                            # (M,N,3)
+
+        out_int = np.concatenate([r_prime, v_prime], axis=2)   # (M,N,6)
+
+    # --- restore original layout ---
+    if out_style[0] == "single":
+        return out_int[0, 0, :]
+    if out_style[0] == "Mxdim":
+        return out_int[:, 0, :]
+    if out_style[0] == "dimxN":
+        return out_int[0, :, :].T
+    if out_style[0] == "Nxdim_time":
+        return out_int[0, :, :]
+    return out_int
+
+
+def geo_eclip_to_geo_eme_generic(x, eps=1e-12, layout="auto"):
+    """
+    Convert geocentric ECLIPJ2000 position(s) or state(s) to geocentric EME/J2000.
+
+    If x has 3 components -> treat as position, return position.
+    If x has 6 components -> treat as full state, return full state.
+
+    Supported x shapes:
+      Position: (3,), (M,3), (N,3), (3,N), (M,N,3)
+      State:    (6,), (M,6), (N,6), (6,N), (M,N,6)
+
+    layout resolves ambiguity when x is (K,3) or (K,6):
+      - "batch": interpret as (M,dim) objects at one time (N=1)
+      - "time" : interpret as (N,dim) time series for one object (M=1)
+      - "auto" : default to "batch" (safer)
+
+    Returns: same layout as x.
+    """
+    if layout not in ("auto", "batch", "time"):
+        raise ValueError("layout must be one of {'auto','batch','time'}")
+
+    X = np.asarray(x, dtype=float)
+
+    # --- infer dim (3 or 6) ---
+    def infer_dim(A):
+        if A.ndim == 1 and A.shape in [(3,), (6,)]:
+            return A.shape[0]
+        if A.ndim == 2:
+            if A.shape[0] in (3, 6):  # (dim,N)
+                return A.shape[0]
+            if A.shape[1] in (3, 6):  # (K,dim) or (N,dim)
+                return A.shape[1]
+        if A.ndim == 3 and A.shape[2] in (3, 6):
+            return A.shape[2]
+        raise ValueError(f"Input must be position (3) or state (6); got shape {A.shape}")
+
+    dim = infer_dim(X)
+
+    # --- normalize to internal (M,N,dim) and remember output layout ---
+    if X.ndim == 1:
+        if X.shape != (dim,):
+            raise ValueError(f"Expected ({dim},), got {X.shape}")
+        X_int = X[None, None, :]
+        out_style = ("single",)
+
+    elif X.ndim == 2:
+        if X.shape == (dim, 1):
+            X_int = X[:, 0][None, None, :]
+            out_style = ("single",)
+
+        elif X.shape[0] == dim:              # (dim,N)
+            X_int = X.T[None, :, :]          # (1,N,dim)
+            out_style = ("dimxN",)
+
+        elif X.shape[1] == dim:              # (K,dim) ambiguous
+            if layout == "time":
+                X_int = X[None, :, :]        # (1,N,dim)
+                out_style = ("Nxdim_time",)
+            else:
+                X_int = X[:, None, :]        # (M,1,dim)
+                out_style = ("Mxdim",)
+        else:
+            raise ValueError(f"Unsupported shape {X.shape} for dim={dim}")
+
+    elif X.ndim == 3:
+        if X.shape[2] != dim:
+            raise ValueError(f"Expected (M,N,{dim}), got {X.shape}")
+        X_int = X
+        out_style = ("MNdim",)
+
+    else:
+        raise ValueError(f"Unsupported ndim={X.ndim}")
+
+    # ---- rotation ecliptic -> EME about +x by +eps ----
+    eps_deg = 23.439281
+    eps_rad = np.deg2rad(eps_deg)
+    c, s = np.cos(eps_rad), np.sin(eps_rad)
+
+    R = np.array([
+        [1.0, 0.0, 0.0],
+        [0.0,  c, -s],
+        [0.0,  s,  c]
+    ], dtype=float)
+
+    r = X_int[:, :, :3]
+    r_eme = np.einsum("ij,mnj->mni", R, r)
+
+    if dim == 3:
+        out_int = r_eme
+    else:
+        v = X_int[:, :, 3:]
+        v_eme = np.einsum("ij,mnj->mni", R, v)
+        out_int = np.concatenate([r_eme, v_eme], axis=2)  # (M,N,6)
+
+    # ---- restore original layout ----
+    if out_style[0] == "single":
+        return out_int[0, 0, :]
+    if out_style[0] == "Mxdim":
+        return out_int[:, 0, :]
+    if out_style[0] == "dimxN":
+        return out_int[0, :, :].T
+    if out_style[0] == "Nxdim_time":
+        return out_int[0, :, :]
+    return out_int
+
+
+
+
+def helio_eclip_to_geo_eme_generic(obj, earth, eps=1e-12, layout="auto"):
+    """
+    Convert heliocentric ECLIPJ2000 position(s) or state(s) to geocentric EME/J2000.
+
+    Rules:
+    - obj dim = 3 → earth may be 3 or 6 (earth velocity ignored)
+    - obj dim = 6 → earth MUST be 6 (otherwise ValueError)
+
+    Supported obj shapes:
+      Position: (3,), (M,3), (N,3), (3,N), (M,N,3)
+      State:    (6,), (M,6), (N,6), (6,N), (M,N,6)
+
+    Supported earth shapes:
+      Position: (3,), (3,1), (1,3), (N,3), (3,N)
+      State:    (6,), (6,1), (1,6), (N,6), (6,N)
+
+    layout resolves ambiguity when obj is (K,dim):
+      - "batch": interpret as (M,dim) objects at one time (N=1)
+      - "time" : interpret as (N,dim) time series for one object (M=1)
+      - "auto" : infer from earth shape when possible, else default to "batch"
+
+    Returns: same layout as obj.
+    """
+
+    if layout not in ("auto", "batch", "time"):
+        raise ValueError("layout must be one of {'auto','batch','time'}")
+
+    O = np.asarray(obj, dtype=float)
+    E = np.asarray(earth, dtype=float)
+
+    # ---------- infer dimension (3 or 6) ----------
+    def infer_dim(A, name):
+        if A.ndim == 1:
+            if A.shape in [(3,), (6,)]:
+                return A.shape[0]
+        elif A.ndim == 2:
+            if A.shape[0] in (3, 6):
+                return A.shape[0]
+            if A.shape[1] in (3, 6):
+                return A.shape[1]
+        elif A.ndim == 3:
+            if A.shape[2] in (3, 6):
+                return A.shape[2]
+        raise ValueError(f"Could not infer dim for {name} with shape {A.shape}")
+
+    obj_dim   = infer_dim(O, "obj")
+    earth_dim = infer_dim(E, "earth")
+
+    # ---------- STRICT RULE ----------
+    if obj_dim == 6 and earth_dim == 3:
+        raise ValueError(
+            "Invalid input: obj is 6D state but earth is 3D position. "
+            "Earth velocity is required for 6D transformation."
+        )
+
+    # ---------- normalize obj to (M,N,obj_dim) ----------
+    if O.ndim == 1:
+        O_int = O[None, None, :]
+        out_style = ("single",)
+
+    elif O.ndim == 2:
+        if O.shape[0] == obj_dim:             # (dim,N)
+            O_int = O.T[None, :, :]
+            out_style = ("dimxN",)
+        elif O.shape[1] == obj_dim:           # (K,dim)
+            if layout == "time":
+                O_int = O[None, :, :]
+                out_style = ("Nxdim_time",)
+            else:
+                O_int = O[:, None, :]
+                out_style = ("Mxdim",)
+        else:
+            raise ValueError(f"Unsupported obj shape {O.shape}")
+
+    elif O.ndim == 3:
+        if O.shape[2] != obj_dim:
+            raise ValueError(f"Expected last dim {obj_dim}, got {O.shape}")
+        O_int = O
+        out_style = ("MNdim",)
+
+    else:
+        raise ValueError(f"Unsupported obj ndim {O.ndim}")
+
+    M, N, _ = O_int.shape
+
+    # ---------- normalize earth to (N,earth_dim) ----------
+    def earth_to_Nd(E, N, dim):
+        if E.ndim == 1:
+            return np.repeat(E[None, :], N, axis=0)
+        if E.ndim == 2:
+            if E.shape[0] == dim:
+                return E.T
+            if E.shape[1] == dim:
+                return E
+        raise ValueError(f"Unsupported earth shape {E.shape}")
+
+    E_N = earth_to_Nd(E, N, earth_dim)
+
+    # ---------- build Earth vector compatible with obj_dim ----------
+    if obj_dim == 3:
+        E_use = E_N[:, :3]
+    else:
+        E_use = E_N   # earth_dim == 6 guaranteed here
+
+    # ---------- heliocentric → geocentric ----------
+    geo_ecl = O_int - E_use[None, :, :]
+
+    # ---------- rotate ecliptic → EME ----------
+    eps_rad = np.deg2rad(23.439281)
+    c, s = np.cos(eps_rad), np.sin(eps_rad)
+
+    R = np.array([
+        [1.0, 0.0, 0.0],
+        [0.0,  c, -s],
+        [0.0,  s,  c]
+    ])
+
+    r = geo_ecl[:, :, :3]
+    r_eme = np.einsum("ij,mnj->mni", R, r)
+
+    if obj_dim == 3:
+        out_int = r_eme
+    else:
+        v = geo_ecl[:, :, 3:]
+        v_eme = np.einsum("ij,mnj->mni", R, v)
+        out_int = np.concatenate([r_eme, v_eme], axis=2)
+
+    # ---------- restore original layout ----------
+    if out_style[0] == "single":
+        return out_int[0, 0]
+    if out_style[0] == "Mxdim":
+        return out_int[:, 0]
+    if out_style[0] == "dimxN":
+        return out_int[0].T
+    if out_style[0] == "Nxdim_time":
+        return out_int[0]
+    return out_int
+
+
+
 def helio_eclip_to_sun_earth_corotating_batch_full(states, earth_states):
     """
     Converts a batch of position and velocity state vectors from heliocentric ECLIPJ2000
@@ -1819,9 +2266,7 @@ def sun_earth_corotating_to_geo_eclip_batch_full(states_corotating, earth_states
     - states_geocentric: (6, N) array in geocentric ECLIPJ2000
     """
 
-
     _, N = states_corotating.shape
-
 
     # Earth's heliocentric position (used only for rotation)
     h_r_E = earth_states[:3, :].T  # (N, 3)
@@ -1833,7 +2278,6 @@ def sun_earth_corotating_to_geo_eclip_batch_full(states_corotating, earth_states
 
     # Compute rotation angles from Earth-Sun vector (negate for SECR to inertial)
     angles = np.arctan2(-h_r_E[:, 1], -h_r_E[:, 0])  # Shape: (N,)
-
 
     # Rotation matrices: from SECR to ECLIPJ2000
     cos_angles = np.cos(angles)
@@ -1870,6 +2314,204 @@ def sun_earth_corotating_to_geo_eclip_batch_full(states_corotating, earth_states
     return states_geocentric
 
 
+def geo_secr_to_geo_eclip_generic(obj, earth, eps=1e-12, layout="auto"):
+    """
+    Convert SECR (Earth-centered rotating) position(s) or state(s) to geocentric ECLIPJ2000.
+
+    STRICT RULES:
+    - obj dim = 3 → earth may be 3 or 6 (earth velocity ignored)
+    - obj dim = 6 → earth MUST be 6 (otherwise ValueError)
+
+    Supported obj shapes:
+      Position: (3,), (M,3), (N,3), (3,N), (M,N,3)
+      State:    (6,), (M,6), (N,6), (6,N), (M,N,6)
+
+    Supported earth shapes:
+      Position: (3,), (3,1), (1,3), (N,3), (3,N)
+      State:    (6,), (6,1), (1,6), (N,6), (6,N)
+
+    layout resolves ambiguity when obj is (K,dim):
+      - "batch": interpret as (M,dim) objects at one time (N=1)
+      - "time" : interpret as (N,dim) time series for one object (M=1)
+      - "auto" : infer from earth shape when possible, else default to "batch"
+
+    Returns: same layout as obj.
+    """
+
+    if layout not in ("auto", "batch", "time"):
+        raise ValueError("layout must be one of {'auto','batch','time'}")
+
+    O = np.asarray(obj, dtype=float)
+    E = np.asarray(earth, dtype=float)
+
+    # --- infer dim (3 vs 6) ---
+    def infer_dim(A, name):
+        if A.ndim == 1:
+            if A.shape in [(3,), (6,)]:
+                return A.shape[0]
+            raise ValueError(f"{name} expected (3,) or (6,), got {A.shape}")
+        if A.ndim == 2:
+            if A.shape[0] in (3, 6):
+                return A.shape[0]  # (dim,N)
+            if A.shape[1] in (3, 6):
+                return A.shape[1]  # (K,dim) or (N,dim)
+        if A.ndim == 3:
+            if A.shape[2] in (3, 6):
+                return A.shape[2]
+        raise ValueError(f"Could not infer dim for {name} with shape {A.shape}")
+
+    obj_dim   = infer_dim(O, "obj")
+    earth_dim = infer_dim(E, "earth")
+
+    # --- STRICT RULE ---
+    if obj_dim == 6 and earth_dim == 3:
+        raise ValueError(
+            "Invalid input: obj is 6D state but earth is 3D position. "
+            "Earth velocity is required to compute omega and the inertial velocity correction."
+        )
+
+    # --- normalize earth to (N,earth_dim) ---
+    def earth_to_Nd(E, N, dim):
+        if E.ndim == 1:
+            if E.shape != (dim,):
+                raise ValueError(f"earth expected ({dim},), got {E.shape}")
+            return np.repeat(E[None, :], N, axis=0)
+
+        if E.ndim == 2:
+            if E.shape == (dim, 1):
+                return np.repeat(E[:, 0][None, :], N, axis=0)
+            if E.shape == (1, dim):
+                return np.repeat(E[0, :][None, :], N, axis=0)
+            if E.shape[1] == dim:  # (N,dim)
+                if E.shape[0] != N:
+                    raise ValueError(f"earth has N={E.shape[0]} but obj has N={N}")
+                return E
+            if E.shape[0] == dim:  # (dim,N)
+                if E.shape[1] != N:
+                    raise ValueError(f"earth has N={E.shape[1]} but obj has N={N}")
+                return E.T
+
+        raise ValueError(f"earth unsupported shape {E.shape} for dim={dim}")
+
+    # --- normalize obj to internal (M,N,obj_dim) and remember return style ---
+    if O.ndim == 1:
+        if O.shape != (obj_dim,):
+            raise ValueError(f"obj expected ({obj_dim},), got {O.shape}")
+        O_int = O[None, None, :]
+        out_style = ("single",)
+
+    elif O.ndim == 2:
+        if O.shape == (obj_dim, 1):
+            O_int = O[:, 0][None, None, :]
+            out_style = ("single",)
+
+        elif O.shape[0] == obj_dim:  # (dim,N)
+            O_int = O.T[None, :, :]  # (1,N,dim)
+            out_style = ("dimxN",)
+
+        elif O.shape[1] == obj_dim:  # (K,dim) ambiguous
+            K = O.shape[0]
+
+            if layout == "batch":
+                O_int = O[:, None, :]  # (M,1,dim)
+                out_style = ("Mxdim",)
+
+            elif layout == "time":
+                O_int = O[None, :, :]  # (1,N,dim)
+                out_style = ("Nxdim_time",)
+
+            else:  # auto
+                earth_time_like = (
+                    E.ndim == 2 and (
+                        (E.shape[1] == earth_dim and E.shape[0] == K) or
+                        (E.shape[0] == earth_dim and E.shape[1] == K)
+                    )
+                )
+                if earth_time_like:
+                    O_int = O[None, :, :]  # (1,K,dim)
+                    out_style = ("Nxdim_time",)
+                else:
+                    O_int = O[:, None, :]  # (K,1,dim)
+                    out_style = ("Mxdim",)
+        else:
+            raise ValueError(f"obj unsupported shape {O.shape}")
+
+    elif O.ndim == 3:
+        if O.shape[2] != obj_dim:
+            raise ValueError(f"obj expected (M,N,{obj_dim}), got {O.shape}")
+        O_int = O
+        out_style = ("MNdim",)
+
+    else:
+        raise ValueError(f"obj unsupported ndim={O.ndim}")
+
+    M, N, _ = O_int.shape
+
+    # Earth normalized to (N, earth_dim)
+    E_N = earth_to_Nd(E, N, earth_dim)
+
+    # For obj_dim==3, allow earth_dim==6 but ignore vel; for obj_dim==6 earth_dim==6 is guaranteed
+    if obj_dim == 3:
+        h_r_E = E_N[:, :3]          # (N,3)
+        h_v_E = None
+    else:
+        h_r_E = E_N[:, :3]          # (N,3)
+        h_v_E = E_N[:, 3:]          # (N,3)
+
+    # ---- unpack SECR obj ----
+    r_p = O_int[:, :, :3]          # (M,N,3) in SECR
+
+    if obj_dim == 6:
+        v_p = O_int[:, :, 3:]      # (M,N,3) in SECR
+
+    # angles from Earth-Sun direction (same convention as forward function)
+    angles = np.arctan2(-h_r_E[:, 1], -h_r_E[:, 0])  # (N,)
+
+    c = np.cos(angles)
+    s = np.sin(angles)
+
+    # Rotation SECR -> inertial ecliptic: Rz(+angles)
+    R = np.zeros((N, 3, 3), dtype=float)
+    R[:, 0, 0] = c;  R[:, 0, 1] = -s
+    R[:, 1, 0] = s;  R[:, 1, 1] =  c
+    R[:, 2, 2] = 1.0
+
+    # inertial geocentric position: r = R * r'
+    geo_r = np.einsum('nij,mnj->mni', R, r_p)  # (M,N,3)
+
+    if obj_dim == 3:
+        out_int = geo_r
+    else:
+        # omega magnitude from Earth motion
+        rE_norm2 = np.sum(h_r_E * h_r_E, axis=1)
+        rE_norm2 = np.maximum(rE_norm2, eps)
+        omega_mag = np.linalg.norm(np.cross(h_r_E, h_v_E), axis=1) / rE_norm2  # (N,)
+
+        omega = np.zeros((N, 3), dtype=float)
+        omega[:, 2] = omega_mag
+
+        # omega in SECR coordinates (rotate inertial omega into SECR using same R)
+        omega_p = np.einsum('nij,nj->ni', R, omega)  # (N,3)
+
+        # inertial relative velocity: v = R * (v' + omega' x r')
+        v_rel_p = v_p + np.cross(omega_p[None, :, :], r_p)  # (M,N,3)
+        geo_v = np.einsum('nij,mnj->mni', R, v_rel_p)        # (M,N,3)
+
+        out_int = np.concatenate([geo_r, geo_v], axis=2)     # (M,N,6)
+
+    # ---- restore original layout ----
+    if out_style[0] == "single":
+        return out_int[0, 0, :]
+    if out_style[0] == "Mxdim":
+        return out_int[:, 0, :]
+    if out_style[0] == "dimxN":
+        return out_int[0, :, :].T
+    if out_style[0] == "Nxdim_time":
+        return out_int[0, :, :]
+    return out_int
+
+
+
 def sun_earth_corotating_to_geo_eclip_single(pos_corot, earth_state_helio):
     """
     Convert a single position from Sun-Earth co-rotating frame to geocentric ECLIPJ2000.
@@ -1892,48 +2534,13 @@ def sun_earth_corotating_to_geo_eclip_single(pos_corot, earth_state_helio):
     c = np.cos(angle)
     s = np.sin(angle)
     R = np.array([[c, -s, 0],
-                  [s,  c, 0],
-                  [0,  0, 1]])
+                  [s, c, 0],
+                  [0, 0, 1]])
 
     # Rotate position vector from co-rotating to inertial ECLIPJ2000 frame
     pos_inertial = R @ pos_corot
 
     return pos_inertial
-
-
-def ecliptic_to_eme_batch(state_vectors_ecliptic):
-    """
-    Transforms a batch of full state vectors from Ecliptic J2000 to EME J2000.
-
-    Parameters:
-    - state_vectors_ecliptic (numpy array): 6xN array representing N state vectors
-      in Ecliptic J2000 (rows: [x, y, z, vx, vy, vz]).
-
-    Returns:
-    - numpy array: 6xN array representing N state vectors in EME J2000.
-    """
-
-    # Obliquity of the ecliptic at J2000 (in degrees)
-    epsilon = 23.439281
-    epsilon_rad = np.radians(epsilon)
-
-    # Rotation matrix about the x-axis (−epsilon for Ecliptic to EME)
-    R = np.array([
-        [1, 0, 0],
-        [0, np.cos(-epsilon_rad), np.sin(-epsilon_rad)],
-        [0, -np.sin(-epsilon_rad), np.cos(-epsilon_rad)]
-    ])
-
-    # Separate position and velocity (each 3xN)
-    pos = state_vectors_ecliptic[0:3, :]
-    vel = state_vectors_ecliptic[3:6, :]
-
-    # Apply rotation
-    pos_eme = R @ pos
-    vel_eme = R @ vel
-
-    # Stack back into 6xN
-    return np.vstack((pos_eme, vel_eme))
 
 
 def ecliptic_to_eme_single(state_vectors_ecliptic):
@@ -2125,7 +2732,6 @@ def get_scs_initial_states(detected_pop, config):
 
         all_sc_boresights = np.vstack(sc_boresights)  # (num_sc, 3)
         all_sc_boresights_list.append(all_sc_boresights)
-
 
     # 7) Write the detecting s/c info back into the DataFrame (no chained assignment)
     out_df.loc[:, 'detecting_sc_lpf_orbit_index'] = closest_indices
@@ -2642,7 +3248,7 @@ def sun_earth_corotating_to_helio_eclip_single(state_corotating, earth_state):
     """
 
     # Extract Earth's position and velocity from heliocentric ECLIPJ2000
-    h_r_E = earth_state[:3] # ( 3)
+    h_r_E = earth_state[:3]  # ( 3)
     h_v_E = earth_state[3:]  # (3)
     E_r_o_prime = state_corotating[:3]
     E_v_o_prime = state_corotating[3:]
@@ -2669,7 +3275,7 @@ def sun_earth_corotating_to_helio_eclip_single(state_corotating, earth_state):
 
     # Angular velocity vector assuming uniform circular motion in ecliptic plane
     h_omega_mag = np.linalg.norm(np.cross(h_r_E, h_v_E)) / (np.linalg.norm(h_r_E) ** 2)  # (N,)
-    h_omega = np.zeros(3,)
+    h_omega = np.zeros(3, )
     h_omega[2] = h_omega_mag  # Only z-component for ecliptic plane rotation
 
     E_omega = rotation_matrix.T @ h_omega
@@ -2684,12 +3290,113 @@ def sun_earth_corotating_to_helio_eclip_single(state_corotating, earth_state):
     return state_heliocentric
 
 
+def ecliptic_to_eme_batch(state_vectors_ecliptic):
+    """
+    Transform state vector(s) from Ecliptic J2000 to EME (Equatorial) J2000.
+
+    Accepts:
+      - shape (6,)      -> returns (6,)
+      - shape (6, N)    -> returns (6, N)
+      - shape (N, 6)    -> returns (N, 6)
+
+    State ordering: [x, y, z, vx, vy, vz]
+    """
+
+    X = np.asarray(state_vectors_ecliptic, dtype=float)
+
+    # Remember input shape style
+    if X.ndim == 1:
+        if X.shape != (6,):
+            raise ValueError(f"Expected shape (6,), got {X.shape}")
+        X2 = X.reshape(6, 1)  # (6,1)
+        out_style = "vec"
+    elif X.ndim == 2:
+        if X.shape[0] == 6:
+            X2 = X  # (6,N)
+            out_style = "6xN"
+        elif X.shape[1] == 6:
+            X2 = X.T  # (6,N)
+            out_style = "Nx6"
+        else:
+            raise ValueError(f"Expected (6,N) or (N,6), got {X.shape}")
+    else:
+        raise ValueError(f"Expected 1D or 2D array, got ndim={X.ndim}")
+
+    # J2000 mean obliquity (deg)
+    epsilon_deg = 23.439281
+    eps = np.deg2rad(epsilon_deg)
+
+    # Rotation about +x by +eps (Ecliptic -> Equatorial/EME)
+    c, s = np.cos(eps), np.sin(eps)
+    R = np.array([
+        [1.0, 0.0, 0.0],
+        [0.0, c, -s],
+        [0.0, s, c]
+    ])
+
+    pos = X2[0:3, :]
+    vel = X2[3:6, :]
+
+    pos_eme = R @ pos
+    vel_eme = R @ vel
+
+    Y2 = np.vstack((pos_eme, vel_eme))  # (6,N)
+
+    # Return in the same shape style as input
+    if out_style == "vec":
+        return Y2[:, 0]
+    elif out_style == "6xN":
+        return Y2
+    else:  # "Nx6"
+        return Y2.T
+
+
 def helio_eclip_to_geo_eme_batch(states_helio_eclip, earth_helio_eclip):
+    """
+    Convert heliocentric-ecliptic state(s) to geocentric-EME state(s).
 
-    # convert from helio eclip to geo eclip
-    states_geo_eclip = states_helio_eclip - earth_helio_eclip
-    return ecliptic_to_eme_batch(states_geo_eclip)
+    Accepts:
+      states_helio_eclip: (6,), (6,N), or (N,6)
+      earth_helio_eclip : (6,) or same batch shape as states
 
+    Returns in same shape style as states_helio_eclip.
+    """
+    S = np.asarray(states_helio_eclip, dtype=float)
+    E = np.asarray(earth_helio_eclip, dtype=float)
+
+    # Normalize shapes into (6,N) for subtraction
+    def to_6xN(A, name):
+        if A.ndim == 1:
+            if A.shape != (6,):
+                raise ValueError(f"{name}: expected (6,), got {A.shape}")
+            return A.reshape(6, 1), "vec"
+        if A.ndim == 2:
+            if A.shape[0] == 6:
+                return A, "6xN"
+            if A.shape[1] == 6:
+                return A.T, "Nx6"
+        raise ValueError(f"{name}: expected (6,), (6,N) or (N,6), got {A.shape}")
+
+    S2, style = to_6xN(S, "states_helio_eclip")
+
+    # Earth can be (6,) or batch
+    if E.ndim == 1 and E.shape == (6,):
+        E2 = E.reshape(6, 1)  # will broadcast across N
+    else:
+        E2, _ = to_6xN(E, "earth_helio_eclip")
+        if E2.shape[1] not in (1, S2.shape[1]):
+            raise ValueError(f"earth batch length {E2.shape[1]} doesn't match states {S2.shape[1]}")
+
+    states_geo_eclip = S2 - E2  # broadcasting ok
+    states_geo_eme = ecliptic_to_eme_batch(states_geo_eclip)  # returns (6,N)
+
+    # Return in original style of states input
+    if style == "vec":
+        return states_geo_eme[:, 0]
+    elif style == "6xN":
+        return states_geo_eme
+    else:  # "Nx6"
+        return states_geo_eme.T
 
 
 def helio_eclip_from_geo_eme(eme_vectors, earth_helio_state):
@@ -2761,13 +3468,13 @@ def ecliptic_to_eme_single_posvel(state_vectors_ecliptic):
 
 def _visible_dir(config):
     num_sc = int(config['num_spacecraft'])
-    root   = os.path.abspath(config['visible_files_folder'])
+    root = os.path.abspath(config['visible_files_folder'])
     return os.path.join(root, f"spacecraft_{num_sc}")
 
 
 def _iod_dir(config):
     num_sc = int(config['num_spacecraft'])
-    root   = os.path.abspath(config['IOD_folder_path'])
+    root = os.path.abspath(config['IOD_folder_path'])
     return os.path.join(root, f"spacecraft_{num_sc}")
 
 
