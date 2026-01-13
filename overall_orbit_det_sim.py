@@ -802,8 +802,21 @@ def run_IOD(config):
 
             rmse_df = util.generate_iod_file(file_path, final_pos, final_vel, true_pos, true_vel, epochs)
 
-            pos_rmse = float(np.sqrt(((rmse_df[["IOD_X","IOD_Y","IOD_Z"]].values - rmse_df[["TRUE_X","TRUE_Y","TRUE_Z"]].values) ** 2).mean()))
-            vel_rmse = float(np.sqrt(((rmse_df[["IOD_VX","IOD_VY","IOD_VZ"]].values - rmse_df[["TRUE_VX","TRUE_VY","TRUE_VZ"]].values) ** 2).mean()))
+            # Position RMSE (Euclidean)
+            pos_err_sq = np.sum(
+                (rmse_df[["IOD_X", "IOD_Y", "IOD_Z"]].values -
+                 rmse_df[["TRUE_X", "TRUE_Y", "TRUE_Z"]].values) ** 2,
+                axis=1
+            )
+            pos_rmse = float(np.sqrt(np.mean(pos_err_sq)))
+
+            # Velocity RMSE (Euclidean)
+            vel_err_sq = np.sum(
+                (rmse_df[["IOD_VX", "IOD_VY", "IOD_VZ"]].values -
+                 rmse_df[["TRUE_VX", "TRUE_VY", "TRUE_VZ"]].values) ** 2,
+                axis=1
+            )
+            vel_rmse = float(np.sqrt(np.mean(vel_err_sq)))
 
             try:
                 final_xyz = np.asarray(final_pos[0][-2, :], dtype=float).reshape(3, )
@@ -1090,18 +1103,60 @@ def run_OD(config):
                 sc_point_str = f'POINTING_SC_{i+1}'
                 sc_pointing_sunearth_cartesian[i, :] = util.parse_vec_cell(row[sc_point_str])
 
-            ast_iod_eme_ae_kms = util.parse_vec_cell(row['IOD_FINAL_STATE'])
-
             # convert IOD master data into a EMEJ2000 for ukf, and SECR visulazation for interpretation
             # convert ast_helio to eme
+            ast_eme_ae_kms = util.helio_eclip_to_geo_eme_batch(ast_helio_ae_kms, earth_helio_ae_kms)
 
             # convert s/c to SECR using SE
+            sc_secr_se_kms = util.helio_eclip_to_sun_earth_corotating_batch_full(sc_helio_se_kms, earth_helio_se_kms)
+
             # convert s/c SECR to eme using AE
+            sc_geoeclip_ae_kms = util.sun_earth_corotating_to_geo_eclip_batch_full(sc_secr_se_kms, earth_helio_ae_kms)
+            sc_eme_ae_kms = util.ecliptic_to_eme_single_posvel(sc_geoeclip_ae_kms)
 
             # convert pointing from SECR to eme
-            # get pointing angles
+            sc_pointing_geoeclip_cartesian = util.sun_earth_corotating_to_geo_eclip_batch_full(sc_pointing_sunearth_cartesian, earth_helio_ae_kms)
+            sc_pointing_eme_cartesian = util.ecliptic_to_eme_batch(sc_pointing_geoeclip_cartesian)
+
+            # get pointing angles - both SECR and EME - ccw from +x
+            sc_pointing_secr_angle_rad = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_sunearth_cartesian)
+            sc_pointing_eme_angle_rad = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_eme_cartesian)
+
+            # iod solution
+            ast_iod_eme_ae_kms = util.parse_vec_cell(row['IOD_FINAL_STATE'])
+            ast_iod_geoeclip_ae_kms = util.eme_to_ecliptic_batch(ast_iod_eme_ae_kms)
+            ast_iod_helioeclip_ae_kms = ast_iod_geoeclip_ae_kms + earth_helio_ae_kms
+            ast_iod_secr_ae_kms = util.helio_eclip_to_sun_earth_corotating_batch_full(ast_iod_helioeclip_ae_kms,
+                                                                                      earth_helio_ae_kms)
+
+            # these are (M,6), topo for each s/c
+            ast_iod_topoeme_radecrho_radkms = util.topocentric_alpha_delta_rho_6d(
+                ast_iod_eme_ae_kms[:3], ast_iod_eme_ae_kms[3:],
+                sc_eme_ae_kms[:, :3], sc_eme_ae_kms[:, 3:]
+            )
+
+            ast_iod_toposecr_radecrho_radkms = util.topocentric_alpha_delta_rho_6d(
+                ast_iod_secr_ae_kms[:3], ast_iod_secr_ae_kms[3:],
+                sc_secr_se_kms[:, :3], sc_secr_se_kms[:, 3:]
+            )
 
             # convert uncertainty from topo to both eme and secr
+            # eme
+            ast_iod_uncertainty_topoeme_radecrho_std_degkms = config['iod_cov_topo_std']  # ra, dec, rho, ra dot, dec dot, rho dot (deg, km, deg/s, km/s)
+            ast_iod_uncertainty_topoeme_radecrho_std_radkms = util.topo_std_degkms_to_radkms(ast_iod_uncertainty_topoeme_radecrho_std_degkms)
+            ast_iod_uncertainty_topoeme_radecrho_covmat_radkms = np.diag(ast_iod_uncertainty_topoeme_radecrho_std_radkms ** 2)
+            # P_topo is (6,6) in (rad, km, rad/s, km/s)
+            ast_iod_uncertainty_topoeme_cartesian_covmat = util.cov_radec_rho_6d_to_xyz_6d(
+                ast_iod_topoeme_radecrho_radkms,  # (M,6)
+                ast_iod_uncertainty_topoeme_radecrho_covmat_radkms  # (6,6)
+            )
+
+            ast_iod_uncertainty_toposecr_cartesian_covmat = util.cov_radec_rho_6d_to_xyz_6d(
+                ast_iod_toposecr_radecrho_radkms,  # (M,6)
+                ast_iod_uncertainty_topoeme_radecrho_covmat_radkms  # (6,6) same measurement covariance
+            )
+
+
 
             agents_xy = np.array([[0, 0], [5, 1], [2, 6]], float)
             pointing_angles_rad = np.deg2rad([10, 140, 250])

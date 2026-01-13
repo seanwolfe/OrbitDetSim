@@ -125,8 +125,11 @@ def plot_fov_wedge(ax, agent_pos, pointing_angle, half_angle,
     def dir_from_plus_y(theta):
         return np.array([np.sin(theta), np.cos(theta)])
 
-    left_dir  = dir_from_plus_y(pointing_angle - half_angle)
-    right_dir = dir_from_plus_y(pointing_angle + half_angle)
+    def ccw_dir_from_plus_x(theta):
+        return np.stack([np.cos(theta), np.sin(theta)], axis=-1)  # (M,2)
+
+    left_dir  = ccw_dir_from_plus_x(pointing_angle - half_angle)
+    right_dir = ccw_dir_from_plus_x(pointing_angle + half_angle)
 
     left_pt  = agent_pos + ray_length * left_dir
     right_pt = agent_pos + ray_length * right_dir
@@ -137,6 +140,221 @@ def plot_fov_wedge(ax, agent_pos, pointing_angle, half_angle,
     ax.fill([x0, left_pt[0], right_pt[0]],
             [y0, left_pt[1], right_pt[1]],
             color=color, alpha=alpha)
+
+
+def topo_std_degkms_to_radkms(std_degkms):
+    """
+    Convert topocentric uncertainty std vector from
+    (deg, km, deg/s, km/s) -> (rad, km, rad/s, km/s)
+
+    Parameters
+    ----------
+    std_degkms : array_like, shape (6,)
+        [ra, dec, rho, ra_dot, dec_dot, rho_dot]
+
+    Returns
+    -------
+    std_radkms : ndarray, shape (6,)
+    """
+    std = np.asarray(std_degkms, dtype=float)
+    if std.shape != (6,):
+        raise ValueError("Expected std vector of shape (6,)")
+
+    deg2rad = np.pi / 180.0
+
+    std_radkms = std.copy()
+    std_radkms[0] *= deg2rad   # RA
+    std_radkms[1] *= deg2rad   # Dec
+    std_radkms[3] *= deg2rad   # RA_dot
+    std_radkms[4] *= deg2rad   # Dec_dot
+    # rho, rho_dot unchanged (km, km/s)
+
+    return std_radkms
+
+
+def topocentric_alpha_delta_rho_6d(p_obj, v_obj, p_sc, v_sc, eps=1e-12):
+    """
+    Vectorized topocentric (alpha, delta, rho, alpha_dot, delta_dot, rho_dot).
+
+    Accepts either:
+      - p_obj, v_obj shape (3,) and p_sc, v_sc shape (3,)  -> returns (6,)
+      - p_obj, v_obj shape (3,) and p_sc, v_sc shape (M,3) -> returns (M,6)
+      - p_obj, v_obj shape (M,3) and p_sc, v_sc shape (M,3)-> returns (M,6)
+
+    Angles in radians, rho in distance units, rates in rad/s and distance/s.
+    """
+    p_obj = np.asarray(p_obj, dtype=float)
+    v_obj = np.asarray(v_obj, dtype=float)
+    p_sc  = np.asarray(p_sc,  dtype=float)
+    v_sc  = np.asarray(v_sc,  dtype=float)
+
+    # Promote (3,) -> (1,3) for vectorized ops
+    def to_2d(a):
+        if a.ndim == 1:
+            if a.shape != (3,):
+                raise ValueError(f"Expected shape (3,), got {a.shape}")
+            return a[None, :]
+        if a.ndim == 2 and a.shape[1] == 3:
+            return a
+        raise ValueError(f"Expected shape (3,) or (M,3), got {a.shape}")
+
+    Pobj = to_2d(p_obj)
+    Vobj = to_2d(v_obj)
+    Psc  = to_2d(p_sc)
+    Vsc  = to_2d(v_sc)
+
+    # Broadcast: allow single object state against many spacecraft states
+    # (1,3) vs (M,3) -> (M,3)
+    r = Pobj - Psc
+    v = Vobj - Vsc
+
+    x, y, z  = r[:, 0], r[:, 1], r[:, 2]
+    vx, vy, vz = v[:, 0], v[:, 1], v[:, 2]
+
+    rho = np.linalg.norm(r, axis=1)
+    rho = np.maximum(rho, eps)
+
+    rxy2 = x*x + y*y
+    rxy2_safe = np.maximum(rxy2, eps)
+    rxy = np.sqrt(rxy2_safe)
+
+    alpha = np.arctan2(y, x)
+    delta = np.arctan2(z, rxy)
+
+    # Range rate
+    rho_dot = (x*vx + y*vy + z*vz) / rho
+
+    # RA rate
+    alpha_dot = (x*vy - y*vx) / rxy2_safe
+
+    # Dec rate
+    # delta_dot = (vz*rxy - z*(x*vx + y*vy)/rxy) / rho^2
+    # use safe rxy to avoid division by zero
+    rxy_safe = np.maximum(rxy, np.sqrt(eps))
+    delta_dot = (vz*rxy_safe - z*(x*vx + y*vy)/rxy_safe) / (rho*rho)
+
+    out = np.column_stack([alpha, delta, rho, alpha_dot, delta_dot, rho_dot])
+
+    # If all inputs were (3,), return (6,)
+    all_1d = (p_obj.ndim == 1 and v_obj.ndim == 1 and p_sc.ndim == 1 and v_sc.ndim == 1)
+    if all_1d:
+        return out[0, :]
+    return out
+
+
+def cov_radec_rho_6d_to_xyz_6d(y6, P_adr6, eps=1e-12):
+    """
+    Propagate covariance from (alpha, delta, rho, alpha_dot, delta_dot, rho_dot)
+    to Cartesian (x, y, z, vx, vy, vz), using linearization.
+
+    Parameters
+    ----------
+    y6 : array_like, shape (6,) or (M,6)
+        [alpha, delta, rho, alpha_dot, delta_dot, rho_dot]
+        angles in rad, rho in distance units, rates in rad/s and dist/s
+    P_adr6 : array_like, shape (6,6)
+        Covariance in (alpha, delta, rho, alpha_dot, delta_dot, rho_dot)
+        with consistent units (rad, km, rad/s, km/s).
+
+    Returns
+    -------
+    P_xyz6 : ndarray, shape (6,6) or (M,6,6)
+        Cartesian covariance/covariances in (x,y,z,vx,vy,vz).
+    """
+    Y = np.asarray(y6, dtype=float)
+    P = np.asarray(P_adr6, dtype=float)
+
+    if P.shape != (6, 6):
+        raise ValueError(f"P_adr6 must have shape (6,6); got {P.shape}")
+
+    single = False
+    if Y.ndim == 1:
+        if Y.shape != (6,):
+            raise ValueError(f"y6 must have shape (6,) or (M,6); got {Y.shape}")
+        Y = Y[None, :]
+        single = True
+    elif Y.ndim == 2:
+        if Y.shape[1] != 6:
+            raise ValueError(f"y6 must have shape (M,6); got {Y.shape}")
+    else:
+        raise ValueError(f"y6 must have ndim 1 or 2; got ndim={Y.ndim}")
+
+    M = Y.shape[0]
+
+    alpha     = Y[:, 0]
+    delta     = Y[:, 1]
+    rho       = Y[:, 2]
+    alpha_dot = Y[:, 3]
+    delta_dot = Y[:, 4]
+    rho_dot   = Y[:, 5]
+
+    ca, sa = np.cos(alpha), np.sin(alpha)
+    cd, sd = np.cos(delta), np.sin(delta)
+
+    # u(alpha,delta)
+    u = np.column_stack([cd * ca, cd * sa, sd])  # (M,3)
+
+    # du/dalpha, du/ddelta
+    du_dalpha = np.column_stack([-cd * sa,  cd * ca, np.zeros(M)])  # (M,3)
+    du_ddelta = np.column_stack([-sd * ca, -sd * sa, cd])           # (M,3)
+
+    # ----- Position Jacobian J_r: (M,3,3) for [alpha, delta, rho] -----
+    # columns: [rho*du_dalpha, rho*du_ddelta, u]
+    J_r = np.zeros((M, 3, 3), dtype=float)
+    J_r[:, :, 0] = rho[:, None] * du_dalpha
+    J_r[:, :, 1] = rho[:, None] * du_ddelta
+    J_r[:, :, 2] = u
+
+    # ----- Velocity Jacobian J_v: (M,3,6) for [alpha, delta, rho, alpha_dot, delta_dot, rho_dot] -----
+    J_v = np.zeros((M, 3, 6), dtype=float)
+
+    # ∂v/∂alpha, ∂v/∂delta
+    J_v[:, :, 0] = rho_dot[:, None] * du_dalpha
+    J_v[:, :, 1] = rho_dot[:, None] * du_ddelta
+
+    # ∂v/∂rho
+    J_v[:, :, 2] = alpha_dot[:, None] * du_dalpha + delta_dot[:, None] * du_ddelta
+
+    # ∂v/∂alpha_dot, ∂v/∂delta_dot, ∂v/∂rho_dot
+    J_v[:, :, 3] = rho[:, None] * du_dalpha
+    J_v[:, :, 4] = rho[:, None] * du_ddelta
+    J_v[:, :, 5] = u
+
+    # ----- Full Jacobian J: (M,6,6) -----
+    J = np.zeros((M, 6, 6), dtype=float)
+    J[:, 0:3, 0:3] = J_r
+    J[:, 3:6, :]   = J_v
+
+    # Propagate: P_xyz = J P J^T for each i
+    P_xyz = np.einsum('mij,jk,mlk->mil', J, P, J)
+
+    return P_xyz[0] if single else P_xyz
+
+
+
+def proj_angle_xy_from_plus_x_ccw(u_agents):
+    """
+    Compute the 2D projected angle of 3D pointing vectors onto the xy-plane,
+    measured from +x, CCW, in radians.
+
+    Parameters
+    ----------
+    u_agents : array_like, shape (M, 3)
+        Pointing vectors (ideally unit). Only x,y are used for the angle.
+
+    Returns
+    -------
+    alpha : ndarray, shape (M,)
+        Angles in radians in (-pi, pi], from +x CCW.
+        (Use np.mod(alpha, 2*np.pi) if you want [0, 2*pi).)
+    """
+    u = np.asarray(u_agents, dtype=float)
+    if u.ndim != 2 or u.shape[1] != 3:
+        raise ValueError(f"u_agents must have shape (M,3); got {u.shape}")
+
+    x = u[:, 0]
+    y = u[:, 1]
+    return np.arctan2(y, x)
 
 
 def coverage_count_2d(grid_pts, p_agents_2d, pointing_angles, theta_h):
@@ -152,8 +370,11 @@ def coverage_count_2d(grid_pts, p_agents_2d, pointing_angles, theta_h):
     def dir_from_plus_y(theta):
         return np.stack([np.sin(theta), np.cos(theta)], axis=-1)  # (M,2)
 
+    def ccw_dir_from_plus_x(theta):
+        return np.stack([np.cos(theta), np.sin(theta)], axis=-1)  # (M,2)
+
     M = len(p_agents_2d)
-    dirs = dir_from_plus_y(pointing_angles)  # (M,2)
+    dirs = ccw_dir_from_plus_x(pointing_angles)  # (M,2)
     cos_th = np.cos(theta_h)
 
     counts = np.zeros(len(grid_pts), dtype=int)
