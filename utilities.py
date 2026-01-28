@@ -482,6 +482,7 @@ def plot_od_scenario_2d(
     fig, ax = plt.subplots(figsize=(8, 6))
 
     # Coverage grid
+    space = 5e6
     if show_coverage:
         xg = np.linspace(xlim[0], xlim[1], int(Nx))
         yg = np.linspace(ylim[0], ylim[1], int(Ny))
@@ -593,8 +594,8 @@ def plot_od_scenario_2d(
 
     # Axes/labels/title
     ax.set_aspect('equal', adjustable='box')
-    ax.set_xlim(xlim)
-    ax.set_ylim(ylim)
+    # ax.set_xlim(xlim)
+    # ax.set_ylim(ylim)
     ax.grid(alpha=0.25)
 
     if title is None:
@@ -2053,6 +2054,113 @@ def geo_eclip_to_geo_eme_generic(x, eps=1e-12, layout="auto"):
     return out_int
 
 
+def geo_eme_to_geo_eclip_generic(x, eps=1e-12, layout="auto"):
+    """
+    Convert geocentric EME/J2000 position(s) or state(s) to geocentric ECLIPJ2000.
+
+    If x has 3 components -> treat as position, return position.
+    If x has 6 components -> treat as full state, return full state.
+
+    Supported x shapes:
+      Position: (3,), (M,3), (N,3), (3,N), (M,N,3)
+      State:    (6,), (M,6), (N,6), (6,N), (M,N,6)
+
+    layout resolves ambiguity when x is (K,3) or (K,6):
+      - "batch": interpret as (M,dim) objects at one time (N=1)
+      - "time" : interpret as (N,dim) time series for one object (M=1)
+      - "auto" : default to "batch" (safer)
+
+    Returns: same layout as x.
+    """
+    if layout not in ("auto", "batch", "time"):
+        raise ValueError("layout must be one of {'auto','batch','time'}")
+
+    X = np.asarray(x, dtype=float)
+
+    # --- infer dim (3 or 6) ---
+    def infer_dim(A):
+        if A.ndim == 1 and A.shape in [(3,), (6,)]:
+            return A.shape[0]
+        if A.ndim == 2:
+            if A.shape[0] in (3, 6):  # (dim,N)
+                return A.shape[0]
+            if A.shape[1] in (3, 6):  # (K,dim) or (N,dim)
+                return A.shape[1]
+        if A.ndim == 3 and A.shape[2] in (3, 6):
+            return A.shape[2]
+        raise ValueError(f"Input must be position (3) or state (6); got shape {A.shape}")
+
+    dim = infer_dim(X)
+
+    # --- normalize to internal (M,N,dim) and remember output layout ---
+    if X.ndim == 1:
+        if X.shape != (dim,):
+            raise ValueError(f"Expected ({dim},), got {X.shape}")
+        X_int = X[None, None, :]
+        out_style = ("single",)
+
+    elif X.ndim == 2:
+        if X.shape == (dim, 1):
+            X_int = X[:, 0][None, None, :]
+            out_style = ("single",)
+
+        elif X.shape[0] == dim:              # (dim,N)
+            X_int = X.T[None, :, :]          # (1,N,dim)
+            out_style = ("dimxN",)
+
+        elif X.shape[1] == dim:              # (K,dim) ambiguous
+            if layout == "time":
+                X_int = X[None, :, :]        # (1,N,dim)
+                out_style = ("Nxdim_time",)
+            else:
+                X_int = X[:, None, :]        # (M,1,dim)
+                out_style = ("Mxdim",)
+        else:
+            raise ValueError(f"Unsupported shape {X.shape} for dim={dim}")
+
+    elif X.ndim == 3:
+        if X.shape[2] != dim:
+            raise ValueError(f"Expected (M,N,{dim}), got {X.shape}")
+        X_int = X
+        out_style = ("MNdim",)
+
+    else:
+        raise ValueError(f"Unsupported ndim={X.ndim}")
+
+    # ---- rotation EME -> ecliptic is inverse of (ecliptic -> EME) ----
+    eps_deg = 23.439281
+    eps_rad = np.deg2rad(eps_deg)
+    c, s = np.cos(eps_rad), np.sin(eps_rad)
+
+    # If ecliptic->EME used:
+    # R = [[1,0,0],[0,c,-s],[0,s,c]]
+    # then EME->ecliptic is R^T:
+    R_T = np.array([
+        [1.0, 0.0, 0.0],
+        [0.0,  c,  s],
+        [0.0, -s,  c]
+    ], dtype=float)
+
+    r = X_int[:, :, :3]
+    r_ecl = np.einsum("ij,mnj->mni", R_T, r)
+
+    if dim == 3:
+        out_int = r_ecl
+    else:
+        v = X_int[:, :, 3:]
+        v_ecl = np.einsum("ij,mnj->mni", R_T, v)
+        out_int = np.concatenate([r_ecl, v_ecl], axis=2)  # (M,N,6)
+
+    # ---- restore original layout ----
+    if out_style[0] == "single":
+        return out_int[0, 0, :]
+    if out_style[0] == "Mxdim":
+        return out_int[:, 0, :]
+    if out_style[0] == "dimxN":
+        return out_int[0, :, :].T
+    if out_style[0] == "Nxdim_time":
+        return out_int[0, :, :]
+    return out_int
 
 
 def helio_eclip_to_geo_eme_generic(obj, earth, eps=1e-12, layout="auto"):
@@ -2192,126 +2300,6 @@ def helio_eclip_to_geo_eme_generic(obj, earth, eps=1e-12, layout="auto"):
     if out_style[0] == "Nxdim_time":
         return out_int[0]
     return out_int
-
-
-
-def helio_eclip_to_sun_earth_corotating_batch_full(states, earth_states):
-    """
-    Converts a batch of position and velocity state vectors from heliocentric ECLIPJ2000
-    to the Earth-centered Sun-Earth co-rotating frame with fixed ecliptic north.
-
-    Parameters:
-    - states: (M, 6, N) array of states in heliocentric ECLIPJ2000, for M objects and N timesteps
-    - earth_states: (6, N) array of Earth state vectors in the same frame at each timestep
-
-    Returns:
-    - states_corotating: (M, 6, N) array of transformed states in the SECR frame
-    """
-
-    _, N = states.shape
-
-    h_r_E = earth_states[:3, :].T  # (N, 3)
-    h_v_E = earth_states[3:, :].T  # (N, 3)
-
-    # Compute Earth's orbital angle (angle in the ecliptic plane)
-    angles = np.arctan2(-h_r_E[:, 1], -h_r_E[:, 0])  # Shape: (N,)
-
-    # Compute cosines and sines of rotation angles
-    cos_angles = np.cos(-angles)
-    sin_angles = np.sin(-angles)
-
-    # Construct rotation matrices (shape: Nx3x3), Z axis is fixed along ecliptic north
-    rotation_matrices = np.zeros((N, 3, 3))
-    rotation_matrices[:, 0, 0] = cos_angles
-    rotation_matrices[:, 0, 1] = -sin_angles
-    rotation_matrices[:, 1, 0] = sin_angles
-    rotation_matrices[:, 1, 1] = cos_angles
-    rotation_matrices[:, 2, 2] = 1  # Z remains unchanged (ecliptic north)
-
-    # Angular velocity vector assuming uniform circular motion in ecliptic plane
-    h_omega_mag = np.linalg.norm(np.cross(h_r_E, h_v_E), axis=1) / (np.linalg.norm(h_r_E, axis=1) ** 2)  # (N,)
-    h_omega = np.zeros((N, 3))
-    h_omega[:, 2] = h_omega_mag  # Only z-component for ecliptic plane rotation
-
-    states_corotating = np.zeros_like(states)
-
-    h_r_O = states[:3, :].T  # (N, 3)
-    h_v_O = states[3:, :].T  # (N, 3)
-
-    h_rel_r = h_r_O - h_r_E  # position relative to Earth (in inertial)
-    h_rel_v = h_v_O - h_v_E  # velocity relative to Earth (in inertial)
-
-    E_r_o_prime = np.einsum('nij,nj->ni', rotation_matrices, h_rel_r)  # now co-rotating frame
-    v_rel_rot = np.einsum('nij,nj->ni', rotation_matrices, h_rel_v)
-    E_omega = np.einsum('nij,nj->ni', rotation_matrices, h_omega)
-    v_rot = np.cross(E_omega, E_r_o_prime)  # correct: using rotated position
-    E_v_o_prime = v_rel_rot - v_rot  # total velocity in rotating frame
-
-    states_corotating[:3, :] = E_r_o_prime.T
-    states_corotating[3:, :] = E_v_o_prime.T
-
-    return states_corotating
-
-
-def sun_earth_corotating_to_geo_eclip_batch_full(states_corotating, earth_states):
-    """
-    Converts a batch of state vectors from the Sun-Earth co-rotating (SECR) frame
-    to geocentric ECLIPJ2000 coordinates.
-
-    Parameters:
-    - states_corotating: (6, N) array in SECR frame; first 3 rows = position, last 3 = velocity
-    - earth_states: (6, N) array in heliocentric ECLIPJ2000; used only for rotation angle
-
-    Returns:
-    - states_geocentric: (6, N) array in geocentric ECLIPJ2000
-    """
-
-    _, N = states_corotating.shape
-
-    # Earth's heliocentric position (used only for rotation)
-    h_r_E = earth_states[:3, :].T  # (N, 3)
-    h_v_E = earth_states[3:, :].T  # (N, 3)
-
-    # Co-rotating frame state
-    E_r_o_prime = states_corotating[:3, :].T  # (N, 3)
-    E_v_o_prime = states_corotating[3:, :].T  # (N, 3)
-
-    # Compute rotation angles from Earth-Sun vector (negate for SECR to inertial)
-    angles = np.arctan2(-h_r_E[:, 1], -h_r_E[:, 0])  # Shape: (N,)
-
-    # Rotation matrices: from SECR to ECLIPJ2000
-    cos_angles = np.cos(angles)
-    sin_angles = np.sin(angles)
-
-    rotation_matrices = np.zeros((N, 3, 3))
-    rotation_matrices[:, 0, 0] = cos_angles
-    rotation_matrices[:, 0, 1] = -sin_angles
-    rotation_matrices[:, 1, 0] = sin_angles
-    rotation_matrices[:, 1, 1] = cos_angles
-    rotation_matrices[:, 2, 2] = 1  # z-axis (ecliptic north) unchanged
-
-    # Rotate position to ECLIPJ2000 (geocentric)
-    geo_r_o = np.einsum('nij,nj->ni', rotation_matrices, E_r_o_prime)  # (N, 3)
-
-    # Angular velocity vector (magnitude from Earth's motion)
-    h_omega_mag = np.linalg.norm(np.cross(h_r_E, h_v_E), axis=1) / (np.linalg.norm(h_r_E, axis=1) ** 2)  # (N,)
-    h_omega = np.zeros((N, 3))
-    h_omega[:, 2] = h_omega_mag  # z-axis angular velocity
-
-    # Rotate angular velocity to SECR frame
-    E_omega = np.einsum('nij,nj->ni', rotation_matrices, h_omega)
-
-    # Add Coriolis term to get inertial velocity
-    v_rot = np.cross(E_omega, E_r_o_prime)  # (N, 3)
-    v_rel_rot = E_v_o_prime + v_rot  # (N, 3)
-    geo_v_o = np.einsum('nij,nj->ni', rotation_matrices, v_rel_rot)  # (N, 3)
-
-    # Assemble full state vector
-    states_geocentric = np.zeros_like(states_corotating)
-    states_geocentric[:3, :] = geo_r_o.T
-    states_geocentric[3:, :] = geo_v_o.T
-
-    return states_geocentric
 
 
 def geo_secr_to_geo_eclip_generic(obj, earth, eps=1e-12, layout="auto"):
@@ -2510,6 +2498,124 @@ def geo_secr_to_geo_eclip_generic(obj, earth, eps=1e-12, layout="auto"):
         return out_int[0, :, :]
     return out_int
 
+
+def helio_eclip_to_sun_earth_corotating_batch_full(states, earth_states):
+    """
+    Converts a batch of position and velocity state vectors from heliocentric ECLIPJ2000
+    to the Earth-centered Sun-Earth co-rotating frame with fixed ecliptic north.
+
+    Parameters:
+    - states: (M, 6, N) array of states in heliocentric ECLIPJ2000, for M objects and N timesteps
+    - earth_states: (6, N) array of Earth state vectors in the same frame at each timestep
+
+    Returns:
+    - states_corotating: (M, 6, N) array of transformed states in the SECR frame
+    """
+
+    _, N = states.shape
+
+    h_r_E = earth_states[:3, :].T  # (N, 3)
+    h_v_E = earth_states[3:, :].T  # (N, 3)
+
+    # Compute Earth's orbital angle (angle in the ecliptic plane)
+    angles = np.arctan2(-h_r_E[:, 1], -h_r_E[:, 0])  # Shape: (N,)
+
+    # Compute cosines and sines of rotation angles
+    cos_angles = np.cos(-angles)
+    sin_angles = np.sin(-angles)
+
+    # Construct rotation matrices (shape: Nx3x3), Z axis is fixed along ecliptic north
+    rotation_matrices = np.zeros((N, 3, 3))
+    rotation_matrices[:, 0, 0] = cos_angles
+    rotation_matrices[:, 0, 1] = -sin_angles
+    rotation_matrices[:, 1, 0] = sin_angles
+    rotation_matrices[:, 1, 1] = cos_angles
+    rotation_matrices[:, 2, 2] = 1  # Z remains unchanged (ecliptic north)
+
+    # Angular velocity vector assuming uniform circular motion in ecliptic plane
+    h_omega_mag = np.linalg.norm(np.cross(h_r_E, h_v_E), axis=1) / (np.linalg.norm(h_r_E, axis=1) ** 2)  # (N,)
+    h_omega = np.zeros((N, 3))
+    h_omega[:, 2] = h_omega_mag  # Only z-component for ecliptic plane rotation
+
+    states_corotating = np.zeros_like(states)
+
+    h_r_O = states[:3, :].T  # (N, 3)
+    h_v_O = states[3:, :].T  # (N, 3)
+
+    h_rel_r = h_r_O - h_r_E  # position relative to Earth (in inertial)
+    h_rel_v = h_v_O - h_v_E  # velocity relative to Earth (in inertial)
+
+    E_r_o_prime = np.einsum('nij,nj->ni', rotation_matrices, h_rel_r)  # now co-rotating frame
+    v_rel_rot = np.einsum('nij,nj->ni', rotation_matrices, h_rel_v)
+    E_omega = np.einsum('nij,nj->ni', rotation_matrices, h_omega)
+    v_rot = np.cross(E_omega, E_r_o_prime)  # correct: using rotated position
+    E_v_o_prime = v_rel_rot - v_rot  # total velocity in rotating frame
+
+    states_corotating[:3, :] = E_r_o_prime.T
+    states_corotating[3:, :] = E_v_o_prime.T
+
+    return states_corotating
+
+
+def sun_earth_corotating_to_geo_eclip_batch_full(states_corotating, earth_states):
+    """
+    Converts a batch of state vectors from the Sun-Earth co-rotating (SECR) frame
+    to geocentric ECLIPJ2000 coordinates.
+
+    Parameters:
+    - states_corotating: (6, N) array in SECR frame; first 3 rows = position, last 3 = velocity
+    - earth_states: (6, N) array in heliocentric ECLIPJ2000; used only for rotation angle
+
+    Returns:
+    - states_geocentric: (6, N) array in geocentric ECLIPJ2000
+    """
+
+    _, N = states_corotating.shape
+
+    # Earth's heliocentric position (used only for rotation)
+    h_r_E = earth_states[:3, :].T  # (N, 3)
+    h_v_E = earth_states[3:, :].T  # (N, 3)
+
+    # Co-rotating frame state
+    E_r_o_prime = states_corotating[:3, :].T  # (N, 3)
+    E_v_o_prime = states_corotating[3:, :].T  # (N, 3)
+
+    # Compute rotation angles from Earth-Sun vector (negate for SECR to inertial)
+    angles = np.arctan2(-h_r_E[:, 1], -h_r_E[:, 0])  # Shape: (N,)
+
+    # Rotation matrices: from SECR to ECLIPJ2000
+    cos_angles = np.cos(angles)
+    sin_angles = np.sin(angles)
+
+    rotation_matrices = np.zeros((N, 3, 3))
+    rotation_matrices[:, 0, 0] = cos_angles
+    rotation_matrices[:, 0, 1] = -sin_angles
+    rotation_matrices[:, 1, 0] = sin_angles
+    rotation_matrices[:, 1, 1] = cos_angles
+    rotation_matrices[:, 2, 2] = 1  # z-axis (ecliptic north) unchanged
+
+    # Rotate position to ECLIPJ2000 (geocentric)
+    geo_r_o = np.einsum('nij,nj->ni', rotation_matrices, E_r_o_prime)  # (N, 3)
+
+    # Angular velocity vector (magnitude from Earth's motion)
+    h_omega_mag = np.linalg.norm(np.cross(h_r_E, h_v_E), axis=1) / (np.linalg.norm(h_r_E, axis=1) ** 2)  # (N,)
+    h_omega = np.zeros((N, 3))
+    h_omega[:, 2] = h_omega_mag  # z-axis angular velocity
+
+    # Rotate angular velocity to SECR frame
+    E_omega = np.einsum('nij,nj->ni', rotation_matrices, h_omega)
+
+    # Add Coriolis term to get inertial velocity
+    v_rot = np.cross(E_omega, E_r_o_prime)  # (N, 3)
+    v_rel_rot = E_v_o_prime + v_rot  # (N, 3)
+    geo_v_o = np.einsum('nij,nj->ni', rotation_matrices, v_rel_rot)  # (N, 3)
+
+    # Assemble full state vector
+    states_geocentric = np.zeros_like(states_corotating)
+    states_geocentric[:3, :] = geo_r_o.T
+    states_geocentric[3:, :] = geo_v_o.T
+
+    return states_geocentric
 
 
 def sun_earth_corotating_to_geo_eclip_single(pos_corot, earth_state_helio):

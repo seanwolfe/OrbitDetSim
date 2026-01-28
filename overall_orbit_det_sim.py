@@ -1113,7 +1113,9 @@ def run_OD(config):
         # convert ast_helio to eme
         ast_eme_ae_kms = util.helio_eclip_to_geo_eme_generic(ast_helio_ae_kms, earth_helio_ae_kms,
                                                              layout="batch")
-
+        # covert ast_helio to geo secr
+        ast_secr_ae_kms = util.helio_eclip_to_geo_secr_generic(ast_helio_ae_kms, earth_helio_ae_kms,
+                                                             layout="batch")
 
         # convert s/c to GEO SECR using SE
         sc_secr_se_kms = util.helio_eclip_to_geo_secr_generic(sc_helio_se_kms, earth_helio_se_kms,
@@ -1130,46 +1132,80 @@ def run_OD(config):
         sc_pointing_eme_cartesian = util.geo_eclip_to_geo_eme_generic(sc_pointing_geoeclip_cartesian,
                                                                       layout="batch")
 
-        # code working until here
-
         # get pointing angles - both SECR and EME - ccw from +x
-        # sc_pointing_secr_angle_rad = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_sunearth_cartesian)
-        # sc_pointing_eme_angle_rad = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_eme_cartesian)
+        sc_pointing_secr_angle_rad = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_sunearth_cartesian)
+        sc_pointing_eme_angle_rad = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_eme_cartesian)
 
         # iod solution
-        # ast_iod_eme_ae_kms = util.parse_vec_cell(row['IOD_FINAL_STATE'])
-        # ast_iod_geoeclip_ae_kms = util.eme_to_ecliptic_batch(ast_iod_eme_ae_kms)
-        # ast_iod_helioeclip_ae_kms = ast_iod_geoeclip_ae_kms + earth_helio_ae_kms
-        # ast_iod_secr_ae_kms = util.helio_eclip_to_sun_earth_corotating_batch_full(ast_iod_helioeclip_ae_kms,
-        #                                                                           earth_helio_ae_kms)
+        ast_iod_eme_ae_kms = util.parse_vec_cell(row['IOD_FINAL_STATE'])
+        ast_iod_geoeclip_ae_kms = util.geo_eme_to_geo_eclip_generic(ast_iod_eme_ae_kms)
+        ast_iod_helioeclip_ae_kms = ast_iod_geoeclip_ae_kms + earth_helio_ae_kms
+        ast_iod_secr_ae_kms = util.helio_eclip_to_geo_secr_generic(ast_iod_helioeclip_ae_kms,
+                                                                                  earth_helio_ae_kms, layout="batch")
+
 
         # these are (M,6), topo for each s/c
-        # ast_iod_topoeme_radecrho_radkms = util.topocentric_alpha_delta_rho_6d(
-        #     ast_iod_eme_ae_kms[:3], ast_iod_eme_ae_kms[3:],
-        #     sc_eme_ae_kms[:, :3], sc_eme_ae_kms[:, 3:]
-        # )
+        ast_iod_topoeme_radecrho_radkms = util.topocentric_alpha_delta_rho_6d(
+            ast_iod_eme_ae_kms[:3], ast_iod_eme_ae_kms[3:],
+            sc_eme_ae_kms[:, :3], sc_eme_ae_kms[:, 3:]
+        )
 
-        # ast_iod_toposecr_radecrho_radkms = util.topocentric_alpha_delta_rho_6d(
-        #     ast_iod_secr_ae_kms[:3], ast_iod_secr_ae_kms[3:],
-        #     sc_secr_se_kms[:, :3], sc_secr_se_kms[:, 3:]
-        # )
+        ast_iod_toposecr_radecrho_radkms = util.topocentric_alpha_delta_rho_6d(
+            ast_iod_secr_ae_kms[:3], ast_iod_secr_ae_kms[3:],
+            sc_secr_se_kms[:, :3], sc_secr_se_kms[:, 3:]
+        )
 
         # convert uncertainty from topo to both eme and secr
         # eme
-        # ast_iod_uncertainty_topoeme_radecrho_std_degkms = config['iod_cov_topo_std']  # ra, dec, rho, ra dot, dec dot, rho dot (deg, km, deg/s, km/s)
-        # ast_iod_uncertainty_topoeme_radecrho_std_radkms = util.topo_std_degkms_to_radkms(ast_iod_uncertainty_topoeme_radecrho_std_degkms)
-        # ast_iod_uncertainty_topoeme_radecrho_covmat_radkms = np.diag(ast_iod_uncertainty_topoeme_radecrho_std_radkms ** 2)
+        ast_iod_uncertainty_topoeme_radecrho_std_degkms = config['iod_cov_topo_std']  # ra, dec, rho, ra dot, dec dot, rho dot (deg, km, deg/s, km/s)
+        ast_iod_uncertainty_topoeme_radecrho_std_radkms = util.topo_std_degkms_to_radkms(ast_iod_uncertainty_topoeme_radecrho_std_degkms)
+        ast_iod_uncertainty_topoeme_radecrho_covmat_radkms = np.diag(ast_iod_uncertainty_topoeme_radecrho_std_radkms ** 2)
+
         # P_topo is (6,6) in (rad, km, rad/s, km/s)
-        # ast_iod_uncertainty_topoeme_cartesian_covmat = util.cov_radec_rho_6d_to_xyz_6d(
-        #     ast_iod_topoeme_radecrho_radkms,  # (M,6)
-        #     ast_iod_uncertainty_topoeme_radecrho_covmat_radkms  # (6,6)
-        # )
+        ast_iod_uncertainty_topoeme_cartesian_covmat = util.cov_radec_rho_6d_to_xyz_6d(
+            ast_iod_topoeme_radecrho_radkms,  # (M,6)
+            ast_iod_uncertainty_topoeme_radecrho_covmat_radkms  # (6,6)
+        )
 
-        # ast_iod_uncertainty_toposecr_cartesian_covmat = util.cov_radec_rho_6d_to_xyz_6d(
-        #     ast_iod_toposecr_radecrho_radkms,  # (M,6)
-        #     ast_iod_uncertainty_topoeme_radecrho_covmat_radkms  # (6,6) same measurement covariance
-        # )
+        ast_iod_uncertainty_toposecr_cartesian_covmat = util.cov_radec_rho_6d_to_xyz_6d(
+            ast_iod_toposecr_radecrho_radkms,  # (M,6)
+            ast_iod_uncertainty_topoeme_radecrho_covmat_radkms  # (6,6) same measurement covariance
+        )
 
+        # SECR Visualization
+        agents_xy = sc_secr_se_kms[:, :2]
+        pointing_angles_rad = sc_pointing_secr_angle_rad
+        theta_h_rad = np.deg2rad(2.5)
+
+        target_mean_xy = ast_iod_secr_ae_kms[:2]
+        target_cov_xy = ast_iod_uncertainty_toposecr_cartesian_covmat[:, :2, :2]
+        true_target_xy = ast_secr_ae_kms[:2]
+
+        ems_center_xy = np.array([0, 0])
+        ems_radius = 5e5
+
+        ray_length = 5e6
+
+        fig, ax = util.plot_od_scenario_2d(
+            agents_xy=agents_xy,
+            pointing_angles_rad=pointing_angles_rad,
+            theta_h_rad=theta_h_rad,
+            ray_length=ray_length,
+            target_mean_xy=target_mean_xy,
+            target_cov_xy=target_cov_xy,
+            d_mahal=2.0,
+            true_target_xy=true_target_xy,
+            ems_center_xy=ems_center_xy,
+            ems_radius=ems_radius,
+            xlim=(-5e6, 2e6), ylim=(-3e6, 3e6),
+            agent_orbit_tracks_xy=None,  # or list of (K,2)
+        )
+
+
+        # confirmed for secr viz and one spacecraft, need to confirm for mutiple
+
+
+        # Generic visualization example ############################
         agents_xy = np.array([[0, 0], [5, 1], [2, 6]], float)
         pointing_angles_rad = np.deg2rad([10, 140, 250])
         theta_h_rad = np.deg2rad(15)
@@ -1196,6 +1232,8 @@ def run_OD(config):
             xlim=(-3, 10), ylim=(-3, 10),
             agent_orbit_tracks_xy=None,  # or list of (K,2)
         )
+        ##################################################
+
         plt.show()
         """
         # --------------------------
