@@ -354,8 +354,7 @@ def run_sim_runnumbers_MPI_getIOD(config):
         if len(my_chunk) > 0:
 
             # get spacecraft initial states / boresights aligned to my_chunk
-            detected_appended_pop_chunk, all_sc_states, detecting_id, boresights = util.get_scs_initial_states(my_chunk,
-                                                                                                               config)
+            detected_appended_pop_chunk = util.get_scs_initial_states_new(my_chunk, config)
 
             # ---------- process my rows ----------
             zdx = 0
@@ -393,8 +392,8 @@ def run_sim_runnumbers_MPI_getIOD(config):
                     asteroid_state_helio, asteroid_epoch, total_window_s,
                     config['time_between_frames'], type="ASTEROID"
                 )
-                asteroid_state = util.helio_eclip_to_sun_earth_corotating_batch_full(
-                    asteroid_integrated_states, asteroid_earth_states
+                asteroid_state = util.helio_eclip_to_geo_secr_generic(
+                    asteroid_integrated_states, asteroid_earth_states, layout="time"
                 )
 
                 sc_geo_eci = detected_minimoon[['GEO_ECLIP_X_(km)', 'GEO_ECLIP_Y_(km)', 'GEO_ECLIP_Z_(km)',
@@ -409,13 +408,13 @@ def run_sim_runnumbers_MPI_getIOD(config):
                     sc_helio_ini, sc_epoch, total_window_s,
                     config['time_between_frames'], type="SPACECRAFT"
                 )
-                sc_secr = util.helio_eclip_to_sun_earth_corotating_batch_full(sc_int_states, earth_states)
+                sc_secr = util.helio_eclip_to_geo_secr_generic(sc_int_states, earth_states, layout="time")
 
-                sc_geo = util.sun_earth_corotating_to_geo_eclip_batch_full(sc_secr, asteroid_earth_states)
-                ast_geo = util.sun_earth_corotating_to_geo_eclip_batch_full(asteroid_state, asteroid_earth_states)
+                sc_geo = util.geo_secr_to_geo_eclip_generic(sc_secr, asteroid_earth_states, layout="time")
+                ast_geo = util.geo_secr_to_geo_eclip_generic(asteroid_state, asteroid_earth_states, layout="time")
 
-                sc_geo_eme = util.ecliptic_to_eme_batch(sc_geo)
-                ast_geo_eme = util.ecliptic_to_eme_batch(ast_geo)
+                sc_geo_eme = util.geo_eclip_to_geo_eme_generic(sc_geo, layout="time")
+                ast_geo_eme = util.geo_eclip_to_geo_eme_generic(ast_geo, layout="time")
 
                 x_rel = ast_geo_eme[0, :] - sc_geo_eme[0, :]
                 y_rel = ast_geo_eme[1, :] - sc_geo_eme[1, :]
@@ -429,12 +428,12 @@ def run_sim_runnumbers_MPI_getIOD(config):
 
                 sc_secr_ini = sc_secr[:, 0]
                 earth_helio_ini = asteroid_earth_states[:, 0]
-                sc_helio_ini_state = util.sun_earth_corotating_to_helio_eclip_single(sc_secr_ini, earth_helio_ini)
+                sc_helio_ini_state = util.geo_secr_to_helio_eclip_generic(sc_secr_ini, earth_helio_ini)
                 sc_helio_states, asteroid_earth_states_2 = nbody.integrate_n_body(
                     sc_helio_ini_state, asteroid_epoch, total_window_s,
                     config['time_between_frames'], type="SPACECRAFT-ASTEROIDTIME"
                 )
-                sc_eme_states = util.helio_eclip_to_geo_eme_batch(sc_helio_states, asteroid_earth_states)
+                sc_eme_states = util.helio_eclip_to_geo_eme_generic(sc_helio_states, asteroid_earth_states, layout="time")
 
                 x_rel_p = ast_geo_eme[0, :] - sc_eme_states[0, :]
                 y_rel_p = ast_geo_eme[1, :] - sc_eme_states[1, :]

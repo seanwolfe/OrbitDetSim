@@ -482,7 +482,6 @@ def plot_od_scenario_2d(
     fig, ax = plt.subplots(figsize=(8, 6))
 
     # Coverage grid
-    space = 5e6
     if show_coverage:
         xg = np.linspace(xlim[0], xlim[1], int(Nx))
         yg = np.linspace(ylim[0], ylim[1], int(Ny))
@@ -1136,7 +1135,7 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
         asteroid_ini_pos_geo = pred_positions[-1][0, :]
         asteroid_ini_vel_geo = pred_velocities[-1][0, :]
         asteroid_state_geo = np.concatenate([asteroid_ini_pos_geo, asteroid_ini_vel_geo])
-        asteroid_state_helio = eme_to_ecliptic_batch(asteroid_state_geo) + earth_state
+        asteroid_state_helio = geo_eme_to_geo_eclip_generic(asteroid_state_geo) + earth_state
 
         # integrate s/c traj
         asteroid_integrated_states, asteroid_earth_states = nbody.integrate_n_body(asteroid_state_helio,
@@ -1147,7 +1146,7 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
                                                                                    type="ASTEROID")  # integrator takes seconds
 
         asteroid_int_geo = (asteroid_integrated_states - asteroid_earth_states)
-        asteroid_eme = ecliptic_to_eme_batch(asteroid_int_geo)
+        asteroid_eme = geo_eclip_to_geo_eme_generic(asteroid_int_geo, layout="time")
         ast_epoch = Time(observation_epochs[0], format='jd', scale='tdb')
         asteroid_2bd_position, asteroid_2bd_velocity, asteroid_2bd_times = nbody.two_body_integrator(
             asteroid_ini_pos_geo,
@@ -1507,8 +1506,8 @@ def viz_geo_and_secr(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, m
     moon_pos[:, :3] *= configs['AU_TO_M'] / configs['KM_TO_M']
     moon_pos[:, 3:] *= (configs['AU_TO_M'] / configs['KM_TO_M'] / configs['SECONDS_PER_DAY'])
 
-    asteroid_pos_eme = ecliptic_to_eme_batch(asteroid_pos.T).T
-    moon_pos_eme = ecliptic_to_eme_batch(moon_pos.T).T
+    asteroid_pos_eme = geo_eclip_to_geo_eme_generic(asteroid_pos.T, layout='time').T
+    moon_pos_eme = geo_eclip_to_geo_eme_generic(moon_pos.T, layout="time").T
     asteroid_pos_eme = asteroid_pos_eme[:, :3]
     moon_pos_eme = moon_pos_eme[:, :3]
 
@@ -1551,8 +1550,8 @@ def viz_geo_and_secr(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, m
             ]].values * (configs['AU_TO_M'] / configs['KM_TO_M'])  # Reshape to (6, 1)
 
             # Call the function with correctly shaped inputs
-            geo_boresight = sun_earth_corotating_to_geo_eclip_single(boresight_vec, earth_state)
-            geo_eme_boresight = ecliptic_to_eme_single(geo_boresight)
+            geo_boresight = geo_secr_to_geo_eclip_generic(boresight_vec, earth_state)
+            geo_eme_boresight = geo_eclip_to_geo_eme_generic(geo_boresight)
 
             fov_corners = plot_fov_projection_geo(geo_eme_boresight[:3], spacecraft_pos,
                                                   asteroid_pos_eme[traj_index, :],
@@ -2074,7 +2073,315 @@ def helio_eclip_to_geo_secr_generic(obj, earth, eps=1e-12, layout="auto",
     return out_int
 
 
-def geo_eclip_to_geo_eme_generic(x, eps=1e-12, layout="auto"):
+def geo_secr_to_helio_eclip_generic(obj, earth, eps=1e-12, layout="auto",
+                                   obj_hint=None, earth_hint=None):
+    """
+    Convert Earth-centered Sun–Earth co-rotating (SECR) position(s) or state(s)
+    to heliocentric ECLIPJ2000.
+
+    This is the inverse of `helio_eclip_to_geo_secr_generic` in the sense:
+      helio_eclip_to_geo_secr:  r' = R(-θ) (r_obj - r_E)
+                               v' = R(-θ) (v_obj - v_E) - ω' x r'
+    Here we do:
+      r_rel = R(+θ) r'
+      v_rel = R(+θ) (v' + ω' x r')
+      r_obj = r_E + r_rel
+      v_obj = v_E + v_rel
+
+    STRICT RULES:
+    - obj dim = 3 → earth may be 3 or 6 (earth velocity ignored)
+    - obj dim = 6 → earth MUST be 6 (otherwise ValueError)
+
+    Supported obj shapes:
+      Position: (3,), (M,3), (N,3), (3,N), (M,N,3)
+      State:    (6,), (M,6), (N,6), (6,N), (M,N,6)
+
+    Supported earth shapes:
+      Position: (3,), (3,1), (1,3), (N,3), (3,N)
+      State:    (6,), (6,1), (1,6), (N,6), (6,N)
+
+    layout resolves ambiguity when obj is (K,dim):
+      - "batch": interpret as (M,dim) objects at one time (N=1)
+      - "time" : interpret as (N,dim) time series for one object (M=1)
+      - "auto" : infer from earth shape when possible, else default to "batch"
+
+    NEW: obj_hint / earth_hint (optional) to resolve 2D edge cases cleanly.
+      Accepts things like:
+        "(batch, 6)", "(time, 3)", "(6, batch)", "(time, batch, 6)" (order doesn't matter)
+      Rules:
+        - Any occurrence of 'batch' or 'time' sets the interpretation for ambiguous (K,dim) inputs.
+        - Any occurrence of 3 or 6 forces the dimensionality (position vs state) if ambiguous.
+        - For truly square ambiguous cases like (3,3) or (6,6), hints without an axis-spec still
+          can't disambiguate; we raise a ValueError rather than guessing.
+
+    Returns: same layout as obj.
+    """
+    import numpy as np
+
+    if layout not in ("auto", "batch", "time"):
+        raise ValueError("layout must be one of {'auto','batch','time'}")
+
+    O = np.asarray(obj, dtype=float)
+    E = np.asarray(earth, dtype=float)
+
+    # -----------------------
+    # Hint parsing
+    # -----------------------
+    def _parse_hint(h):
+        if h is None:
+            return None, None
+
+        if isinstance(h, (tuple, list, set)):
+            tokens = list(h)
+        elif isinstance(h, str):
+            s = h.strip()
+            if s.startswith("(") and s.endswith(")"):
+                s = s[1:-1]
+            tokens = [t.strip() for t in s.split(",") if t.strip()]
+        else:
+            raise ValueError("hint must be None, a tuple/list/set, or a string like '(batch,6)'")
+
+        mode = None
+        forced_dim = None
+        for t in tokens:
+            if isinstance(t, (int, np.integer)):
+                if int(t) in (3, 6):
+                    forced_dim = int(t)
+                else:
+                    raise ValueError(f"Invalid hint dim {t} (use 3 or 6)")
+                continue
+
+            ts = str(t).strip().lower()
+            if ts in ("batch", "time"):
+                if mode is None:
+                    mode = ts
+                elif mode != ts:
+                    raise ValueError(f"Conflicting hint modes: got both '{mode}' and '{ts}'")
+            elif ts in ("3", "6"):
+                forced_dim = int(ts)
+            elif ts == "":
+                continue
+            else:
+                raise ValueError(f"Unrecognized hint token '{t}'. Use 'batch', 'time', 3, or 6.")
+
+        return mode, forced_dim
+
+    obj_mode_hint, obj_dim_hint = _parse_hint(obj_hint)
+    earth_mode_hint, earth_dim_hint = _parse_hint(earth_hint)
+
+    # -----------------------
+    # Infer dim (3 or 6) robustly
+    # -----------------------
+    def infer_dim(A, name, forced_dim=None):
+        if A.ndim == 1:
+            if A.shape in [(3,), (6,)]:
+                return A.shape[0]
+            raise ValueError(f"{name} expected (3,) or (6,), got {A.shape}")
+
+        if A.ndim == 2:
+            r, c = A.shape
+
+            if forced_dim is not None:
+                if forced_dim not in (3, 6):
+                    raise ValueError(f"{name} forced_dim must be 3 or 6")
+                if (r != forced_dim) and (c != forced_dim):
+                    raise ValueError(f"{name} hint forces dim={forced_dim} but shape is {A.shape}")
+                return forced_dim
+
+            r_is = r in (3, 6)
+            c_is = c in (3, 6)
+
+            if r_is and not c_is:
+                return r
+            if c_is and not r_is:
+                return c
+
+            if r_is and c_is:
+                if (r == 6) or (c == 6):
+                    return 6
+                return 3
+
+        if A.ndim == 3 and A.shape[2] in (3, 6):
+            return A.shape[2]
+
+        raise ValueError(f"Could not infer dim for {name} with shape {A.shape}")
+
+    obj_dim = infer_dim(O, "obj", obj_dim_hint)
+    earth_dim = infer_dim(E, "earth", earth_dim_hint)
+
+    # --- STRICT RULE ---
+    if obj_dim == 6 and earth_dim == 3:
+        raise ValueError(
+            "Invalid input: obj is 6D state but earth is 3D position. "
+            "Earth velocity is required to compute omega and the inertial velocity."
+        )
+
+    # -----------------------
+    # Normalize earth to (N,earth_dim)
+    # -----------------------
+    def earth_to_Nd(Earr, N, dim):
+        if Earr.ndim == 1:
+            if Earr.shape != (dim,):
+                raise ValueError(f"earth expected ({dim},), got {Earr.shape}")
+            return np.repeat(Earr[None, :], N, axis=0)
+
+        if Earr.ndim == 2:
+            if Earr.shape == (dim, 1):
+                return np.repeat(Earr[:, 0][None, :], N, axis=0)
+            if Earr.shape == (1, dim):
+                return np.repeat(Earr[0, :][None, :], N, axis=0)
+            if Earr.shape[1] == dim:  # (N,dim)
+                if Earr.shape[0] != N:
+                    raise ValueError(f"earth has N={Earr.shape[0]} but obj has N={N}")
+                return Earr
+            if Earr.shape[0] == dim:  # (dim,N)
+                if Earr.shape[1] != N:
+                    raise ValueError(f"earth has N={Earr.shape[1]} but obj has N={N}")
+                return Earr.T
+
+        raise ValueError(f"earth unsupported shape {Earr.shape} for dim={dim}")
+
+    # -----------------------
+    # Normalize obj (SECR) to internal (M,N,obj_dim)
+    # -----------------------
+    def _choose_mode_for_Kdim(K):
+        if obj_mode_hint in ("batch", "time"):
+            return obj_mode_hint
+        if layout in ("batch", "time"):
+            return layout
+
+        earth_time_like = (
+            E.ndim == 2 and (
+                (E.shape[1] == earth_dim and E.shape[0] == K) or
+                (E.shape[0] == earth_dim and E.shape[1] == K)
+            )
+        )
+        return "time" if earth_time_like else "batch"
+
+    if O.ndim == 1:
+        if O.shape != (obj_dim,):
+            raise ValueError(f"obj expected ({obj_dim},), got {O.shape}")
+        O_int = O[None, None, :]
+        out_style = ("single",)
+
+    elif O.ndim == 2:
+        if O.shape == (obj_dim, 1):
+            O_int = O[:, 0][None, None, :]
+            out_style = ("single",)
+
+        elif O.shape == (1, obj_dim):
+            O_int = O[0, :][None, None, :]
+            out_style = ("single",)
+
+        elif O.shape[0] == obj_dim and O.shape[1] != obj_dim:  # (dim,N)
+            O_int = O.T[None, :, :]
+            out_style = ("dimxN",)
+
+        elif O.shape[1] == obj_dim and O.shape[0] != obj_dim:  # (K,dim)
+            K = O.shape[0]
+            mode = _choose_mode_for_Kdim(K)
+            if mode == "batch":
+                O_int = O[:, None, :]
+                out_style = ("Mxdim",)
+            else:
+                O_int = O[None, :, :]
+                out_style = ("Nxdim_time",)
+
+        elif O.shape[0] == obj_dim and O.shape[1] == obj_dim:
+            raise ValueError(
+                f"Ambiguous obj shape {O.shape}. This could be (dim,N) or (K,dim) with K=dim. "
+                f"Reshape explicitly to (dim,N) or (K,dim), or pass obj as 3D (M,N,dim)."
+            )
+        else:
+            raise ValueError(f"obj unsupported shape {O.shape}")
+
+    elif O.ndim == 3:
+        if O.shape[2] != obj_dim:
+            raise ValueError(f"obj expected (M,N,{obj_dim}), got {O.shape}")
+        O_int = O
+        out_style = ("MNdim",)
+
+    else:
+        raise ValueError(f"obj unsupported ndim={O.ndim}")
+
+    M, N, _ = O_int.shape
+
+    # Earth normalized to (N, earth_dim)
+    E_N = earth_to_Nd(E, N, earth_dim)
+
+    # Build Earth vector compatible with obj_dim
+    if obj_dim == 3:
+        E_use = E_N[:, :3]  # ignore Earth velocity if present
+    else:
+        E_use = E_N         # earth_dim == 6 guaranteed
+
+    rE = E_use[:, :3]                    # (N,3)
+    vE = E_use[:, 3:] if obj_dim == 6 else None
+
+    # ---- unpack SECR obj ----
+    r_p = O_int[:, :, :3]                # (M,N,3) SECR
+    v_p = O_int[:, :, 3:] if obj_dim == 6 else None
+
+    # SECR convention (same as forward): angles = atan2(-yE, -xE)
+    angles = np.arctan2(-rE[:, 1], -rE[:, 0])       # (N,)
+
+    # In forward: r' = R(-θ) rel_r, with R built using cos(-θ), sin(-θ).
+    # So inverse here: rel_r = R(+θ) r'
+    c = np.cos(angles)
+    s = np.sin(angles)
+
+    R = np.zeros((N, 3, 3), dtype=float)
+    R[:, 0, 0] = c
+    R[:, 0, 1] = -s
+    R[:, 1, 0] = s
+    R[:, 1, 1] = c
+    R[:, 2, 2] = 1.0
+
+    # rel position in inertial ecliptic: rel_r = R(+θ) r'
+    rel_r = np.einsum("nij,mnj->mni", R, r_p)       # (M,N,3)
+
+    if obj_dim == 3:
+        # heliocentric position
+        helio_r = rel_r + rE[None, :, :]            # (M,N,3)
+        out_int = helio_r
+    else:
+        # omega magnitude from Earth motion
+        rE_norm2 = np.sum(rE * rE, axis=1)
+        rE_norm2 = np.maximum(rE_norm2, eps)
+        omega_mag = np.linalg.norm(np.cross(rE, vE), axis=1) / rE_norm2   # (N,)
+
+        omega = np.zeros((N, 3), dtype=float)
+        omega[:, 2] = omega_mag
+
+        # omega' in SECR coordinates = R(+θ) * omega  (since R maps SECR -> inertial for vectors here)
+        omega_p = np.einsum("nij,nj->ni", R, omega)  # (N,3)
+
+        # In forward: v' = R(-θ) rel_v - (omega' x r')
+        # => R(-θ) rel_v = v' + (omega' x r')
+        # => rel_v = R(+θ) [ v' + (omega' x r') ]
+        v_rel_rot = v_p + np.cross(omega_p[None, :, :], r_p)   # (M,N,3)
+        rel_v = np.einsum("nij,mnj->mni", R, v_rel_rot)        # (M,N,3)
+
+        # heliocentric velocity
+        helio_r = rel_r + rE[None, :, :]
+        helio_v = rel_v + vE[None, :, :]
+
+        out_int = np.concatenate([helio_r, helio_v], axis=2)   # (M,N,6)
+
+    # --- restore original layout ---
+    if out_style[0] == "single":
+        return out_int[0, 0, :]
+    if out_style[0] == "Mxdim":
+        return out_int[:, 0, :]
+    if out_style[0] == "dimxN":
+        return out_int[0, :, :].T
+    if out_style[0] == "Nxdim_time":
+        return out_int[0, :, :]
+    return out_int
+
+
+
+def geo_eclip_to_geo_eme_generic(x, eps=1e-12, layout="auto", hint=None):
     """
     Convert geocentric ECLIPJ2000 position(s) or state(s) to geocentric EME/J2000.
 
@@ -2090,29 +2397,123 @@ def geo_eclip_to_geo_eme_generic(x, eps=1e-12, layout="auto"):
       - "time" : interpret as (N,dim) time series for one object (M=1)
       - "auto" : default to "batch" (safer)
 
+    NEW: hint (optional) to disambiguate awkward 2D cases like (3,6), (6,3), (3,3), (6,6).
+      Accepts permutations of tokens in a tuple/list/set or string, e.g.:
+        "(batch, 6)", "(time, 3)", "(6, batch)", "(time, batch, 6)"
+      Rules:
+        - Any occurrence of 'batch' or 'time' sets the interpretation for ambiguous (K,dim) inputs.
+        - Any occurrence of 3 or 6 forces the dimensionality if ambiguous.
+        - If hint contains both 'batch' and 'time' -> ValueError.
+
     Returns: same layout as x.
     """
+
     if layout not in ("auto", "batch", "time"):
         raise ValueError("layout must be one of {'auto','batch','time'}")
 
     X = np.asarray(x, dtype=float)
 
-    # --- infer dim (3 or 6) ---
-    def infer_dim(A):
+    # -----------------------
+    # Hint parsing
+    # -----------------------
+    def _parse_hint(h):
+        """
+        Returns (mode, forced_dim) where:
+          mode in {None,'batch','time'}
+          forced_dim in {None,3,6}
+        """
+        if h is None:
+            return None, None
+
+        if isinstance(h, (tuple, list, set)):
+            tokens = list(h)
+        elif isinstance(h, str):
+            s = h.strip()
+            if s.startswith("(") and s.endswith(")"):
+                s = s[1:-1]
+            tokens = [t.strip() for t in s.split(",") if t.strip()]
+        else:
+            raise ValueError("hint must be None, a tuple/list/set, or a string like '(batch,6)'")
+
+        mode = None
+        forced_dim = None
+
+        for t in tokens:
+            if isinstance(t, (int, np.integer)):
+                if int(t) in (3, 6):
+                    forced_dim = int(t)
+                else:
+                    raise ValueError(f"Invalid hint dim {t} (use 3 or 6)")
+                continue
+
+            ts = str(t).strip().lower()
+            if ts in ("batch", "time"):
+                if mode is None:
+                    mode = ts
+                elif mode != ts:
+                    raise ValueError(f"Conflicting hint modes: got both '{mode}' and '{ts}'")
+            elif ts in ("3", "6"):
+                forced_dim = int(ts)
+            elif ts == "":
+                continue
+            else:
+                raise ValueError(f"Unrecognized hint token '{t}'. Use 'batch', 'time', 3, or 6.")
+
+        return mode, forced_dim
+
+    hint_mode, hint_dim = _parse_hint(hint)
+
+    # -----------------------
+    # Infer dim (3 or 6) robustly
+    # -----------------------
+    def infer_dim(A, forced_dim=None):
         if A.ndim == 1 and A.shape in [(3,), (6,)]:
             return A.shape[0]
+
         if A.ndim == 2:
-            if A.shape[0] in (3, 6):  # (dim,N)
-                return A.shape[0]
-            if A.shape[1] in (3, 6):  # (K,dim) or (N,dim)
-                return A.shape[1]
+            r, c = A.shape
+
+            if forced_dim is not None:
+                if forced_dim not in (3, 6):
+                    raise ValueError("forced dim must be 3 or 6")
+                if (r != forced_dim) and (c != forced_dim):
+                    raise ValueError(f"hint forces dim={forced_dim} but shape is {A.shape}")
+                return forced_dim
+
+            r_is = r in (3, 6)
+            c_is = c in (3, 6)
+
+            # Unambiguous: only one axis matches {3,6}
+            if r_is and not c_is:
+                return r
+            if c_is and not r_is:
+                return c
+
+            # Ambiguous: both axes match {3,6}
+            if r_is and c_is:
+                # Prefer 6 if present (state beats position)
+                if (r == 6) or (c == 6):
+                    return 6
+                return 3  # still structurally ambiguous, but dim itself is 3
+
         if A.ndim == 3 and A.shape[2] in (3, 6):
             return A.shape[2]
+
         raise ValueError(f"Input must be position (3) or state (6); got shape {A.shape}")
 
-    dim = infer_dim(X)
+    dim = infer_dim(X, hint_dim)
 
-    # --- normalize to internal (M,N,dim) and remember output layout ---
+    # -----------------------
+    # Normalize to internal (M,N,dim) and remember output layout
+    # -----------------------
+    def _choose_mode_for_Kdim(K):
+        # Priority: hint -> layout -> (auto -> batch)
+        if hint_mode in ("batch", "time"):
+            return hint_mode
+        if layout in ("batch", "time"):
+            return layout
+        return "batch"  # auto default
+
     if X.ndim == 1:
         if X.shape != (dim,):
             raise ValueError(f"Expected ({dim},), got {X.shape}")
@@ -2124,17 +2525,34 @@ def geo_eclip_to_geo_eme_generic(x, eps=1e-12, layout="auto"):
             X_int = X[:, 0][None, None, :]
             out_style = ("single",)
 
-        elif X.shape[0] == dim:  # (dim,N)
+        elif X.shape == (1, dim):
+            X_int = X[0, :][None, None, :]
+            out_style = ("single",)
+
+        # (dim,N) if rows are dim and columns not equal dim
+        elif X.shape[0] == dim and X.shape[1] != dim:
             X_int = X.T[None, :, :]  # (1,N,dim)
             out_style = ("dimxN",)
 
-        elif X.shape[1] == dim:  # (K,dim) ambiguous
-            if layout == "time":
+        # (K,dim) if last axis equals dim and first axis not equal dim
+        elif X.shape[1] == dim and X.shape[0] != dim:
+            K = X.shape[0]
+            mode = _choose_mode_for_Kdim(K)
+            if mode == "time":
                 X_int = X[None, :, :]  # (1,N,dim)
                 out_style = ("Nxdim_time",)
             else:
                 X_int = X[:, None, :]  # (M,1,dim)
                 out_style = ("Mxdim",)
+
+        # Truly ambiguous squares like (3,3) or (6,6) (or anything with both axes == dim)
+        elif X.shape[0] == dim and X.shape[1] == dim:
+            # hint_mode can decide whether to interpret as time-series (Nxdim_time) or batch (Mxdim),
+            # but the storage form is (dim,N) vs (K,dim) and both "work". We refuse to guess that axis meaning.
+            raise ValueError(
+                f"Ambiguous input shape {X.shape}. This could be (dim,N) or (K,dim) with K=dim. "
+                f"Reshape explicitly to (dim,N) or (K,dim), or pass a 3D array (M,N,dim)."
+            )
         else:
             raise ValueError(f"Unsupported shape {X.shape} for dim={dim}")
 
@@ -2152,11 +2570,14 @@ def geo_eclip_to_geo_eme_generic(x, eps=1e-12, layout="auto"):
     eps_rad = np.deg2rad(eps_deg)
     c, s = np.cos(eps_rad), np.sin(eps_rad)
 
-    R = np.array([
-        [1.0, 0.0, 0.0],
-        [0.0, c, -s],
-        [0.0, s, c]
-    ], dtype=float)
+    R = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, c, -s],
+            [0.0, s, c],
+        ],
+        dtype=float,
+    )
 
     r = X_int[:, :, :3]
     r_eme = np.einsum("ij,mnj->mni", R, r)
@@ -2180,7 +2601,601 @@ def geo_eclip_to_geo_eme_generic(x, eps=1e-12, layout="auto"):
     return out_int
 
 
-def geo_eme_to_geo_eclip_generic(x, eps=1e-12, layout="auto"):
+
+def helio_eclip_to_geo_eme_generic(obj, earth, eps=1e-12, layout="auto",
+                                  obj_hint=None, earth_hint=None):
+    """
+    Convert heliocentric ECLIPJ2000 position(s) or state(s) to geocentric EME/J2000.
+
+    Rules:
+    - obj dim = 3 → earth may be 3 or 6 (earth velocity ignored)
+    - obj dim = 6 → earth MUST be 6 (otherwise ValueError)
+
+    Supported obj shapes:
+      Position: (3,), (M,3), (N,3), (3,N), (M,N,3)
+      State:    (6,), (M,6), (N,6), (6,N), (M,N,6)
+
+    Supported earth shapes:
+      Position: (3,), (3,1), (1,3), (N,3), (3,N)
+      State:    (6,), (6,1), (1,6), (N,6), (6,N)
+
+    layout resolves ambiguity when obj is (K,dim):
+      - "batch": interpret as (M,dim) objects at one time (N=1)
+      - "time" : interpret as (N,dim) time series for one object (M=1)
+      - "auto" : infer from earth shape when possible, else default to "batch"
+
+    NEW: obj_hint / earth_hint (optional) to disambiguate awkward 2D cases like (3,6), (6,3), (3,3), (6,6).
+      Accepts permutations of tokens in a tuple/list/set or string, e.g.:
+        "(batch, 6)", "(time, 3)", "(6, batch)", "(time, batch, 6)"
+      Rules:
+        - Any occurrence of 'batch' or 'time' sets the interpretation for ambiguous (K,dim) inputs.
+        - Any occurrence of 3 or 6 forces the dimensionality if ambiguous.
+        - If a hint contains both 'batch' and 'time' -> ValueError.
+
+    Returns: same layout as obj.
+    """
+
+    if layout not in ("auto", "batch", "time"):
+        raise ValueError("layout must be one of {'auto','batch','time'}")
+
+    O = np.asarray(obj, dtype=float)
+    E = np.asarray(earth, dtype=float)
+
+    # -----------------------
+    # Hint parsing
+    # -----------------------
+    def _parse_hint(h):
+        """
+        Returns (mode, forced_dim) where:
+          mode in {None,'batch','time'}
+          forced_dim in {None,3,6}
+        """
+        if h is None:
+            return None, None
+
+        if isinstance(h, (tuple, list, set)):
+            tokens = list(h)
+        elif isinstance(h, str):
+            s = h.strip()
+            if s.startswith("(") and s.endswith(")"):
+                s = s[1:-1]
+            tokens = [t.strip() for t in s.split(",") if t.strip()]
+        else:
+            raise ValueError("hint must be None, a tuple/list/set, or a string like '(batch,6)'")
+
+        mode = None
+        forced_dim = None
+
+        for t in tokens:
+            if isinstance(t, (int, np.integer)):
+                if int(t) in (3, 6):
+                    forced_dim = int(t)
+                else:
+                    raise ValueError(f"Invalid hint dim {t} (use 3 or 6)")
+                continue
+
+            ts = str(t).strip().lower()
+            if ts in ("batch", "time"):
+                if mode is None:
+                    mode = ts
+                elif mode != ts:
+                    raise ValueError(f"Conflicting hint modes: got both '{mode}' and '{ts}'")
+            elif ts in ("3", "6"):
+                forced_dim = int(ts)
+            elif ts == "":
+                continue
+            else:
+                raise ValueError(f"Unrecognized hint token '{t}'. Use 'batch', 'time', 3, or 6.")
+
+        return mode, forced_dim
+
+    obj_mode_hint, obj_dim_hint = _parse_hint(obj_hint)
+    earth_mode_hint, earth_dim_hint = _parse_hint(earth_hint)
+
+    # -----------------------
+    # Infer dimension (3 or 6) robustly
+    # -----------------------
+    def infer_dim(A, name, forced_dim=None):
+        if A.ndim == 1:
+            if A.shape in [(3,), (6,)]:
+                return A.shape[0]
+            raise ValueError(f"{name} expected (3,) or (6,), got {A.shape}")
+
+        if A.ndim == 2:
+            r, c = A.shape
+
+            if forced_dim is not None:
+                if forced_dim not in (3, 6):
+                    raise ValueError(f"{name} forced_dim must be 3 or 6")
+                if (r != forced_dim) and (c != forced_dim):
+                    raise ValueError(f"{name} hint forces dim={forced_dim} but shape is {A.shape}")
+                return forced_dim
+
+            r_is = r in (3, 6)
+            c_is = c in (3, 6)
+
+            if r_is and not c_is:
+                return r
+            if c_is and not r_is:
+                return c
+
+            # Ambiguous: both axes in {3,6} (e.g. (3,6), (6,3), (3,3), (6,6))
+            # Prefer 6 if present (state beats position)
+            if r_is and c_is:
+                if (r == 6) or (c == 6):
+                    return 6
+                return 3
+
+        if A.ndim == 3 and A.shape[2] in (3, 6):
+            return A.shape[2]
+
+        raise ValueError(f"Could not infer dim for {name} with shape {A.shape}")
+
+    obj_dim = infer_dim(O, "obj", obj_dim_hint)
+    earth_dim = infer_dim(E, "earth", earth_dim_hint)
+
+    # -----------------------
+    # STRICT RULE
+    # -----------------------
+    if obj_dim == 6 and earth_dim == 3:
+        raise ValueError(
+            "Invalid input: obj is 6D state but earth is 3D position. "
+            "Earth velocity is required for 6D transformation."
+        )
+
+    # -----------------------
+    # Normalize obj to (M,N,obj_dim)
+    # -----------------------
+    def _choose_obj_mode_for_Kdim(K):
+        # Priority: obj_hint mode -> layout -> auto heuristic (earth shape) -> batch default
+        if obj_mode_hint in ("batch", "time"):
+            return obj_mode_hint
+        if layout in ("batch", "time"):
+            return layout
+        # layout == auto: infer from earth shape if possible
+        earth_time_like = (
+            E.ndim == 2 and (
+                (E.shape[1] == earth_dim and E.shape[0] == K) or
+                (E.shape[0] == earth_dim and E.shape[1] == K)
+            )
+        )
+        return "time" if earth_time_like else "batch"
+
+    if O.ndim == 1:
+        if O.shape != (obj_dim,):
+            raise ValueError(f"obj expected ({obj_dim},), got {O.shape}")
+        O_int = O[None, None, :]
+        out_style = ("single",)
+
+    elif O.ndim == 2:
+        if O.shape == (obj_dim, 1):
+            O_int = O[:, 0][None, None, :]
+            out_style = ("single",)
+
+        elif O.shape == (1, obj_dim):
+            O_int = O[0, :][None, None, :]
+            out_style = ("single",)
+
+        elif O.shape[0] == obj_dim and O.shape[1] != obj_dim:  # (dim,N)
+            O_int = O.T[None, :, :]
+            out_style = ("dimxN",)
+
+        elif O.shape[1] == obj_dim and O.shape[0] != obj_dim:  # (K,dim)
+            K = O.shape[0]
+            mode = _choose_obj_mode_for_Kdim(K)
+            if mode == "time":
+                O_int = O[None, :, :]
+                out_style = ("Nxdim_time",)
+            else:
+                O_int = O[:, None, :]
+                out_style = ("Mxdim",)
+
+        elif O.shape[0] == obj_dim and O.shape[1] == obj_dim:
+            raise ValueError(
+                f"Ambiguous obj shape {O.shape}. This could be (dim,N) or (K,dim) with K=dim. "
+                f"Reshape explicitly to (dim,N) or (K,dim), or pass a 3D array (M,N,dim)."
+            )
+        else:
+            raise ValueError(f"Unsupported obj shape {O.shape} for dim={obj_dim}")
+
+    elif O.ndim == 3:
+        if O.shape[2] != obj_dim:
+            raise ValueError(f"Expected last dim {obj_dim}, got {O.shape}")
+        O_int = O
+        out_style = ("MNdim",)
+
+    else:
+        raise ValueError(f"Unsupported obj ndim {O.ndim}")
+
+    M, N, _ = O_int.shape
+
+    # -----------------------
+    # Normalize earth to (N,earth_dim)
+    # -----------------------
+    def earth_to_Nd(Earr, N, dim):
+        if Earr.ndim == 1:
+            if Earr.shape != (dim,):
+                raise ValueError(f"earth expected ({dim},), got {Earr.shape}")
+            return np.repeat(Earr[None, :], N, axis=0)
+
+        if Earr.ndim == 2:
+            if Earr.shape == (dim, 1):
+                return np.repeat(Earr[:, 0][None, :], N, axis=0)
+            if Earr.shape == (1, dim):
+                return np.repeat(Earr[0, :][None, :], N, axis=0)
+
+            # (dim,N)
+            if Earr.shape[0] == dim and Earr.shape[1] == N:
+                return Earr.T
+
+            # (N,dim)
+            if Earr.shape[1] == dim and Earr.shape[0] == N:
+                return Earr
+
+            # If N==dim (ambiguous squares), we refuse to guess.
+            if (Earr.shape[0] == dim) and (Earr.shape[1] == dim):
+                raise ValueError(
+                    f"Ambiguous earth shape {Earr.shape} with dim={dim} (could be (dim,N) or (N,dim)). "
+                    f"Reshape explicitly to (N,dim) or (dim,N)."
+                )
+
+        raise ValueError(f"Unsupported earth shape {Earr.shape} for dim={dim} and N={N}")
+
+    E_N = earth_to_Nd(E, N, earth_dim)
+
+    # -----------------------
+    # Build Earth vector compatible with obj_dim
+    # -----------------------
+    if obj_dim == 3:
+        E_use = E_N[:, :3]     # ignore earth velocity even if provided
+    else:
+        E_use = E_N            # earth_dim == 6 guaranteed here
+
+    # -----------------------
+    # Heliocentric → geocentric (still in ecliptic frame)
+    # -----------------------
+    geo_ecl = O_int - E_use[None, :, :]
+
+    # -----------------------
+    # Rotate ecliptic → EME
+    # -----------------------
+    eps_rad = np.deg2rad(23.439281)
+    c, s = np.cos(eps_rad), np.sin(eps_rad)
+
+    R = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, c, -s],
+            [0.0, s, c],
+        ],
+        dtype=float,
+    )
+
+    r = geo_ecl[:, :, :3]
+    r_eme = np.einsum("ij,mnj->mni", R, r)
+
+    if obj_dim == 3:
+        out_int = r_eme
+    else:
+        v = geo_ecl[:, :, 3:]
+        v_eme = np.einsum("ij,mnj->mni", R, v)
+        out_int = np.concatenate([r_eme, v_eme], axis=2)
+
+    # -----------------------
+    # Restore original layout
+    # -----------------------
+    if out_style[0] == "single":
+        return out_int[0, 0]
+    if out_style[0] == "Mxdim":
+        return out_int[:, 0]
+    if out_style[0] == "dimxN":
+        return out_int[0].T
+    if out_style[0] == "Nxdim_time":
+        return out_int[0]
+    return out_int
+
+
+
+def geo_secr_to_geo_eclip_generic(obj, earth, eps=1e-12, layout="auto",
+                                 obj_hint=None, earth_hint=None):
+    """
+    Convert SECR (Earth-centered rotating) position(s) or state(s) to geocentric ECLIPJ2000.
+
+    STRICT RULES:
+    - obj dim = 3 → earth may be 3 or 6 (earth velocity ignored)
+    - obj dim = 6 → earth MUST be 6 (otherwise ValueError)
+
+    Supported obj shapes:
+      Position: (3,), (M,3), (N,3), (3,N), (M,N,3)
+      State:    (6,), (M,6), (N,6), (6,N), (M,N,6)
+
+    Supported earth shapes:
+      Position: (3,), (3,1), (1,3), (N,3), (3,N)
+      State:    (6,), (6,1), (1,6), (N,6), (6,N)
+
+    layout resolves ambiguity when obj is (K,dim):
+      - "batch": interpret as (M,dim) objects at one time (N=1)
+      - "time" : interpret as (N,dim) time series for one object (M=1)
+      - "auto" : infer from earth shape when possible, else default to "batch"
+
+    NEW: obj_hint / earth_hint (optional) to disambiguate awkward 2D cases like (3,6), (6,3), (3,3), (6,6).
+      Accepts permutations of tokens in a tuple/list/set or string, e.g.:
+        "(batch, 6)", "(time, 3)", "(6, batch)", "(time, batch, 6)"
+      Rules:
+        - Any occurrence of 'batch' or 'time' sets the interpretation for ambiguous (K,dim) inputs.
+        - Any occurrence of 3 or 6 forces the dimensionality if ambiguous.
+        - If a hint contains both 'batch' and 'time' -> ValueError.
+
+    Returns: same layout as obj.
+    """
+
+    if layout not in ("auto", "batch", "time"):
+        raise ValueError("layout must be one of {'auto','batch','time'}")
+
+    O = np.asarray(obj, dtype=float)
+    E = np.asarray(earth, dtype=float)
+
+    # -----------------------
+    # Hint parsing
+    # -----------------------
+    def _parse_hint(h):
+        """
+        Returns (mode, forced_dim) where:
+          mode in {None,'batch','time'}
+          forced_dim in {None,3,6}
+        """
+        if h is None:
+            return None, None
+
+        if isinstance(h, (tuple, list, set)):
+            tokens = list(h)
+        elif isinstance(h, str):
+            s = h.strip()
+            if s.startswith("(") and s.endswith(")"):
+                s = s[1:-1]
+            tokens = [t.strip() for t in s.split(",") if t.strip()]
+        else:
+            raise ValueError("hint must be None, a tuple/list/set, or a string like '(batch,6)'")
+
+        mode = None
+        forced_dim = None
+
+        for t in tokens:
+            if isinstance(t, (int, np.integer)):
+                if int(t) in (3, 6):
+                    forced_dim = int(t)
+                else:
+                    raise ValueError(f"Invalid hint dim {t} (use 3 or 6)")
+                continue
+
+            ts = str(t).strip().lower()
+            if ts in ("batch", "time"):
+                if mode is None:
+                    mode = ts
+                elif mode != ts:
+                    raise ValueError(f"Conflicting hint modes: got both '{mode}' and '{ts}'")
+            elif ts in ("3", "6"):
+                forced_dim = int(ts)
+            elif ts == "":
+                continue
+            else:
+                raise ValueError(f"Unrecognized hint token '{t}'. Use 'batch', 'time', 3, or 6.")
+
+        return mode, forced_dim
+
+    obj_mode_hint, obj_dim_hint = _parse_hint(obj_hint)
+    earth_mode_hint, earth_dim_hint = _parse_hint(earth_hint)
+
+    # -----------------------
+    # Infer dim (3 or 6) robustly
+    # -----------------------
+    def infer_dim(A, name, forced_dim=None):
+        if A.ndim == 1:
+            if A.shape in [(3,), (6,)]:
+                return A.shape[0]
+            raise ValueError(f"{name} expected (3,) or (6,), got {A.shape}")
+
+        if A.ndim == 2:
+            r, c = A.shape
+
+            if forced_dim is not None:
+                if forced_dim not in (3, 6):
+                    raise ValueError(f"{name} forced_dim must be 3 or 6")
+                if (r != forced_dim) and (c != forced_dim):
+                    raise ValueError(f"{name} hint forces dim={forced_dim} but shape is {A.shape}")
+                return forced_dim
+
+            r_is = r in (3, 6)
+            c_is = c in (3, 6)
+
+            if r_is and not c_is:
+                return r
+            if c_is and not r_is:
+                return c
+
+            # Ambiguous: both axes are in {3,6}
+            if r_is and c_is:
+                if (r == 6) or (c == 6):
+                    return 6
+                return 3
+
+        if A.ndim == 3 and A.shape[2] in (3, 6):
+            return A.shape[2]
+
+        raise ValueError(f"Could not infer dim for {name} with shape {A.shape}")
+
+    obj_dim = infer_dim(O, "obj", obj_dim_hint)
+    earth_dim = infer_dim(E, "earth", earth_dim_hint)
+
+    # -----------------------
+    # STRICT RULE
+    # -----------------------
+    if obj_dim == 6 and earth_dim == 3:
+        raise ValueError(
+            "Invalid input: obj is 6D state but earth is 3D position. "
+            "Earth velocity is required to compute omega and the inertial velocity correction."
+        )
+
+    # -----------------------
+    # Normalize earth to (N,earth_dim)
+    # -----------------------
+    def earth_to_Nd(Earr, N, dim):
+        if Earr.ndim == 1:
+            if Earr.shape != (dim,):
+                raise ValueError(f"earth expected ({dim},), got {Earr.shape}")
+            return np.repeat(Earr[None, :], N, axis=0)
+
+        if Earr.ndim == 2:
+            if Earr.shape == (dim, 1):
+                return np.repeat(Earr[:, 0][None, :], N, axis=0)
+            if Earr.shape == (1, dim):
+                return np.repeat(Earr[0, :][None, :], N, axis=0)
+
+            # (N,dim)
+            if Earr.shape[1] == dim and Earr.shape[0] == N:
+                return Earr
+
+            # (dim,N)
+            if Earr.shape[0] == dim and Earr.shape[1] == N:
+                return Earr.T
+
+            # If N==dim, (dim,dim) is ambiguous; refuse to guess.
+            if Earr.shape[0] == dim and Earr.shape[1] == dim:
+                raise ValueError(
+                    f"Ambiguous earth shape {Earr.shape} with dim={dim} (could be (N,dim) or (dim,N)). "
+                    f"Reshape explicitly."
+                )
+
+        raise ValueError(f"earth unsupported shape {Earr.shape} for dim={dim} and N={N}")
+
+    # -----------------------
+    # Normalize obj to internal (M,N,obj_dim) and remember return style
+    # -----------------------
+    def _choose_obj_mode_for_Kdim(K):
+        # Priority: obj_hint -> layout -> (auto uses earth shape heuristic) -> batch default
+        if obj_mode_hint in ("batch", "time"):
+            return obj_mode_hint
+        if layout in ("batch", "time"):
+            return layout
+        # layout == auto: infer from earth shape
+        earth_time_like = (
+            E.ndim == 2 and (
+                (E.shape[1] == earth_dim and E.shape[0] == K) or
+                (E.shape[0] == earth_dim and E.shape[1] == K)
+            )
+        )
+        return "time" if earth_time_like else "batch"
+
+    if O.ndim == 1:
+        if O.shape != (obj_dim,):
+            raise ValueError(f"obj expected ({obj_dim},), got {O.shape}")
+        O_int = O[None, None, :]
+        out_style = ("single",)
+
+    elif O.ndim == 2:
+        if O.shape == (obj_dim, 1):
+            O_int = O[:, 0][None, None, :]
+            out_style = ("single",)
+
+        elif O.shape == (1, obj_dim):
+            O_int = O[0, :][None, None, :]
+            out_style = ("single",)
+
+        elif O.shape[0] == obj_dim and O.shape[1] != obj_dim:  # (dim,N)
+            O_int = O.T[None, :, :]
+            out_style = ("dimxN",)
+
+        elif O.shape[1] == obj_dim and O.shape[0] != obj_dim:  # (K,dim)
+            K = O.shape[0]
+            mode = _choose_obj_mode_for_Kdim(K)
+            if mode == "time":
+                O_int = O[None, :, :]
+                out_style = ("Nxdim_time",)
+            else:
+                O_int = O[:, None, :]
+                out_style = ("Mxdim",)
+
+        elif O.shape[0] == obj_dim and O.shape[1] == obj_dim:
+            raise ValueError(
+                f"Ambiguous obj shape {O.shape}. This could be (dim,N) or (K,dim) with K=dim. "
+                f"Reshape explicitly to (dim,N) or (K,dim), or pass a 3D array (M,N,dim)."
+            )
+        else:
+            raise ValueError(f"obj unsupported shape {O.shape}")
+
+    elif O.ndim == 3:
+        if O.shape[2] != obj_dim:
+            raise ValueError(f"obj expected (M,N,{obj_dim}), got {O.shape}")
+        O_int = O
+        out_style = ("MNdim",)
+
+    else:
+        raise ValueError(f"obj unsupported ndim={O.ndim}")
+
+    M, N, _ = O_int.shape
+
+    # Earth normalized to (N, earth_dim)
+    E_N = earth_to_Nd(E, N, earth_dim)
+
+    # For obj_dim==3, allow earth_dim==6 but ignore vel; for obj_dim==6 earth_dim==6 is guaranteed
+    h_r_E = E_N[:, :3]  # (N,3)
+    h_v_E = E_N[:, 3:] if obj_dim == 6 else None
+
+    # ---- unpack SECR obj ----
+    r_p = O_int[:, :, :3]  # (M,N,3) in SECR
+    v_p = O_int[:, :, 3:] if obj_dim == 6 else None
+
+    # angles from Earth-Sun direction (same convention as forward function)
+    angles = np.arctan2(-h_r_E[:, 1], -h_r_E[:, 0])  # (N,)
+
+    c = np.cos(angles)
+    s = np.sin(angles)
+
+    # Rotation SECR -> inertial ecliptic: Rz(+angles)
+    R = np.zeros((N, 3, 3), dtype=float)
+    R[:, 0, 0] = c
+    R[:, 0, 1] = -s
+    R[:, 1, 0] = s
+    R[:, 1, 1] = c
+    R[:, 2, 2] = 1.0
+
+    # inertial geocentric position: r = R * r'
+    geo_r = np.einsum("nij,mnj->mni", R, r_p)  # (M,N,3)
+
+    if obj_dim == 3:
+        out_int = geo_r
+    else:
+        # omega magnitude from Earth motion
+        rE_norm2 = np.sum(h_r_E * h_r_E, axis=1)
+        rE_norm2 = np.maximum(rE_norm2, eps)
+        omega_mag = np.linalg.norm(np.cross(h_r_E, h_v_E), axis=1) / rE_norm2  # (N,)
+
+        omega = np.zeros((N, 3), dtype=float)
+        omega[:, 2] = omega_mag
+
+        # omega in SECR coordinates (rotate inertial omega into SECR using same R)
+        omega_p = np.einsum("nij,nj->ni", R, omega)  # (N,3)
+
+        # inertial relative velocity: v = R * (v' + omega' x r')
+        v_rel_p = v_p + np.cross(omega_p[None, :, :], r_p)  # (M,N,3)
+        geo_v = np.einsum("nij,mnj->mni", R, v_rel_p)  # (M,N,3)
+
+        out_int = np.concatenate([geo_r, geo_v], axis=2)  # (M,N,6)
+
+    # ---- restore original layout ----
+    if out_style[0] == "single":
+        return out_int[0, 0, :]
+    if out_style[0] == "Mxdim":
+        return out_int[:, 0, :]
+    if out_style[0] == "dimxN":
+        return out_int[0, :, :].T
+    if out_style[0] == "Nxdim_time":
+        return out_int[0, :, :]
+    return out_int
+
+
+
+def geo_eme_to_geo_eclip_generic(x, eps=1e-12, layout="auto", hint=None):
     """
     Convert geocentric EME/J2000 position(s) or state(s) to geocentric ECLIPJ2000.
 
@@ -2196,29 +3211,124 @@ def geo_eme_to_geo_eclip_generic(x, eps=1e-12, layout="auto"):
       - "time" : interpret as (N,dim) time series for one object (M=1)
       - "auto" : default to "batch" (safer)
 
+    NEW: hint (optional) to disambiguate awkward 2D cases like (3,6), (6,3), (3,3), (6,6).
+      Accepts permutations of tokens in a tuple/list/set or string, e.g.:
+        "(batch, 6)", "(time, 3)", "(6, batch)", "(time, batch, 6)"
+      Rules:
+        - Any occurrence of 'batch' or 'time' sets the interpretation for ambiguous (K,dim) inputs.
+        - Any occurrence of 3 or 6 forces the dimensionality if ambiguous.
+        - If hint contains both 'batch' and 'time' -> ValueError.
+
     Returns: same layout as x.
     """
+    import numpy as np
+
     if layout not in ("auto", "batch", "time"):
         raise ValueError("layout must be one of {'auto','batch','time'}")
 
     X = np.asarray(x, dtype=float)
 
-    # --- infer dim (3 or 6) ---
-    def infer_dim(A):
+    # -----------------------
+    # Hint parsing
+    # -----------------------
+    def _parse_hint(h):
+        """
+        Returns (mode, forced_dim) where:
+          mode in {None,'batch','time'}
+          forced_dim in {None,3,6}
+        """
+        if h is None:
+            return None, None
+
+        if isinstance(h, (tuple, list, set)):
+            tokens = list(h)
+        elif isinstance(h, str):
+            s = h.strip()
+            if s.startswith("(") and s.endswith(")"):
+                s = s[1:-1]
+            tokens = [t.strip() for t in s.split(",") if t.strip()]
+        else:
+            raise ValueError("hint must be None, a tuple/list/set, or a string like '(batch,6)'")
+
+        mode = None
+        forced_dim = None
+
+        for t in tokens:
+            if isinstance(t, (int, np.integer)):
+                if int(t) in (3, 6):
+                    forced_dim = int(t)
+                else:
+                    raise ValueError(f"Invalid hint dim {t} (use 3 or 6)")
+                continue
+
+            ts = str(t).strip().lower()
+            if ts in ("batch", "time"):
+                if mode is None:
+                    mode = ts
+                elif mode != ts:
+                    raise ValueError(f"Conflicting hint modes: got both '{mode}' and '{ts}'")
+            elif ts in ("3", "6"):
+                forced_dim = int(ts)
+            elif ts == "":
+                continue
+            else:
+                raise ValueError(f"Unrecognized hint token '{t}'. Use 'batch', 'time', 3, or 6.")
+
+        return mode, forced_dim
+
+    hint_mode, hint_dim = _parse_hint(hint)
+
+    # -----------------------
+    # Infer dim (3 or 6) robustly
+    # -----------------------
+    def infer_dim(A, forced_dim=None):
         if A.ndim == 1 and A.shape in [(3,), (6,)]:
             return A.shape[0]
+
         if A.ndim == 2:
-            if A.shape[0] in (3, 6):  # (dim,N)
-                return A.shape[0]
-            if A.shape[1] in (3, 6):  # (K,dim) or (N,dim)
-                return A.shape[1]
+            r, c = A.shape
+
+            if forced_dim is not None:
+                if forced_dim not in (3, 6):
+                    raise ValueError("forced dim must be 3 or 6")
+                if (r != forced_dim) and (c != forced_dim):
+                    raise ValueError(f"hint forces dim={forced_dim} but shape is {A.shape}")
+                return forced_dim
+
+            r_is = r in (3, 6)
+            c_is = c in (3, 6)
+
+            # Unambiguous: only one axis matches {3,6}
+            if r_is and not c_is:
+                return r
+            if c_is and not r_is:
+                return c
+
+            # Ambiguous: both axes match {3,6}
+            if r_is and c_is:
+                # Prefer 6 if present (state beats position)
+                if (r == 6) or (c == 6):
+                    return 6
+                return 3
+
         if A.ndim == 3 and A.shape[2] in (3, 6):
             return A.shape[2]
+
         raise ValueError(f"Input must be position (3) or state (6); got shape {A.shape}")
 
-    dim = infer_dim(X)
+    dim = infer_dim(X, hint_dim)
 
-    # --- normalize to internal (M,N,dim) and remember output layout ---
+    # -----------------------
+    # Normalize to internal (M,N,dim) and remember output layout
+    # -----------------------
+    def _choose_mode_for_Kdim(K):
+        # Priority: hint -> layout -> (auto -> batch)
+        if hint_mode in ("batch", "time"):
+            return hint_mode
+        if layout in ("batch", "time"):
+            return layout
+        return "batch"  # auto default
+
     if X.ndim == 1:
         if X.shape != (dim,):
             raise ValueError(f"Expected ({dim},), got {X.shape}")
@@ -2230,17 +3340,32 @@ def geo_eme_to_geo_eclip_generic(x, eps=1e-12, layout="auto"):
             X_int = X[:, 0][None, None, :]
             out_style = ("single",)
 
-        elif X.shape[0] == dim:  # (dim,N)
+        elif X.shape == (1, dim):
+            X_int = X[0, :][None, None, :]
+            out_style = ("single",)
+
+        # (dim,N) if rows are dim and columns not equal dim
+        elif X.shape[0] == dim and X.shape[1] != dim:
             X_int = X.T[None, :, :]  # (1,N,dim)
             out_style = ("dimxN",)
 
-        elif X.shape[1] == dim:  # (K,dim) ambiguous
-            if layout == "time":
+        # (K,dim) if last axis equals dim and first axis not equal dim
+        elif X.shape[1] == dim and X.shape[0] != dim:
+            K = X.shape[0]
+            mode = _choose_mode_for_Kdim(K)
+            if mode == "time":
                 X_int = X[None, :, :]  # (1,N,dim)
                 out_style = ("Nxdim_time",)
             else:
                 X_int = X[:, None, :]  # (M,1,dim)
                 out_style = ("Mxdim",)
+
+        # Truly ambiguous squares like (3,3) or (6,6)
+        elif X.shape[0] == dim and X.shape[1] == dim:
+            raise ValueError(
+                f"Ambiguous input shape {X.shape}. This could be (dim,N) or (K,dim) with K=dim. "
+                f"Reshape explicitly to (dim,N) or (K,dim), or pass a 3D array (M,N,dim)."
+            )
         else:
             raise ValueError(f"Unsupported shape {X.shape} for dim={dim}")
 
@@ -2258,14 +3383,17 @@ def geo_eme_to_geo_eclip_generic(x, eps=1e-12, layout="auto"):
     eps_rad = np.deg2rad(eps_deg)
     c, s = np.cos(eps_rad), np.sin(eps_rad)
 
-    # If ecliptic->EME used:
-    # R = [[1,0,0],[0,c,-s],[0,s,c]]
-    # then EME->ecliptic is R^T:
-    R_T = np.array([
-        [1.0, 0.0, 0.0],
-        [0.0, c, s],
-        [0.0, -s, c]
-    ], dtype=float)
+    # ecliptic->EME:
+    #   R = [[1,0,0],[0,c,-s],[0,s,c]]
+    # so EME->ecliptic = R^T:
+    R_T = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, c, s],
+            [0.0, -s, c],
+        ],
+        dtype=float,
+    )
 
     r = X_int[:, :, :3]
     r_ecl = np.einsum("ij,mnj->mni", R_T, r)
@@ -2287,527 +3415,6 @@ def geo_eme_to_geo_eclip_generic(x, eps=1e-12, layout="auto"):
     if out_style[0] == "Nxdim_time":
         return out_int[0, :, :]
     return out_int
-
-
-def helio_eclip_to_geo_eme_generic(obj, earth, eps=1e-12, layout="auto"):
-    """
-    Convert heliocentric ECLIPJ2000 position(s) or state(s) to geocentric EME/J2000.
-
-    Rules:
-    - obj dim = 3 → earth may be 3 or 6 (earth velocity ignored)
-    - obj dim = 6 → earth MUST be 6 (otherwise ValueError)
-
-    Supported obj shapes:
-      Position: (3,), (M,3), (N,3), (3,N), (M,N,3)
-      State:    (6,), (M,6), (N,6), (6,N), (M,N,6)
-
-    Supported earth shapes:
-      Position: (3,), (3,1), (1,3), (N,3), (3,N)
-      State:    (6,), (6,1), (1,6), (N,6), (6,N)
-
-    layout resolves ambiguity when obj is (K,dim):
-      - "batch": interpret as (M,dim) objects at one time (N=1)
-      - "time" : interpret as (N,dim) time series for one object (M=1)
-      - "auto" : infer from earth shape when possible, else default to "batch"
-
-    Returns: same layout as obj.
-    """
-
-    if layout not in ("auto", "batch", "time"):
-        raise ValueError("layout must be one of {'auto','batch','time'}")
-
-    O = np.asarray(obj, dtype=float)
-    E = np.asarray(earth, dtype=float)
-
-    # ---------- infer dimension (3 or 6) ----------
-    def infer_dim(A, name):
-        if A.ndim == 1:
-            if A.shape in [(3,), (6,)]:
-                return A.shape[0]
-        elif A.ndim == 2:
-            if A.shape[0] in (3, 6):
-                return A.shape[0]
-            if A.shape[1] in (3, 6):
-                return A.shape[1]
-        elif A.ndim == 3:
-            if A.shape[2] in (3, 6):
-                return A.shape[2]
-        raise ValueError(f"Could not infer dim for {name} with shape {A.shape}")
-
-    obj_dim = infer_dim(O, "obj")
-    earth_dim = infer_dim(E, "earth")
-
-    # ---------- STRICT RULE ----------
-    if obj_dim == 6 and earth_dim == 3:
-        raise ValueError(
-            "Invalid input: obj is 6D state but earth is 3D position. "
-            "Earth velocity is required for 6D transformation."
-        )
-
-    # ---------- normalize obj to (M,N,obj_dim) ----------
-    if O.ndim == 1:
-        O_int = O[None, None, :]
-        out_style = ("single",)
-
-    elif O.ndim == 2:
-        if O.shape[0] == obj_dim:  # (dim,N)
-            O_int = O.T[None, :, :]
-            out_style = ("dimxN",)
-        elif O.shape[1] == obj_dim:  # (K,dim)
-            if layout == "time":
-                O_int = O[None, :, :]
-                out_style = ("Nxdim_time",)
-            else:
-                O_int = O[:, None, :]
-                out_style = ("Mxdim",)
-        else:
-            raise ValueError(f"Unsupported obj shape {O.shape}")
-
-    elif O.ndim == 3:
-        if O.shape[2] != obj_dim:
-            raise ValueError(f"Expected last dim {obj_dim}, got {O.shape}")
-        O_int = O
-        out_style = ("MNdim",)
-
-    else:
-        raise ValueError(f"Unsupported obj ndim {O.ndim}")
-
-    M, N, _ = O_int.shape
-
-    # ---------- normalize earth to (N,earth_dim) ----------
-    def earth_to_Nd(E, N, dim):
-        if E.ndim == 1:
-            return np.repeat(E[None, :], N, axis=0)
-        if E.ndim == 2:
-            if E.shape[0] == dim:
-                return E.T
-            if E.shape[1] == dim:
-                return E
-        raise ValueError(f"Unsupported earth shape {E.shape}")
-
-    E_N = earth_to_Nd(E, N, earth_dim)
-
-    # ---------- build Earth vector compatible with obj_dim ----------
-    if obj_dim == 3:
-        E_use = E_N[:, :3]
-    else:
-        E_use = E_N  # earth_dim == 6 guaranteed here
-
-    # ---------- heliocentric → geocentric ----------
-    geo_ecl = O_int - E_use[None, :, :]
-
-    # ---------- rotate ecliptic → EME ----------
-    eps_rad = np.deg2rad(23.439281)
-    c, s = np.cos(eps_rad), np.sin(eps_rad)
-
-    R = np.array([
-        [1.0, 0.0, 0.0],
-        [0.0, c, -s],
-        [0.0, s, c]
-    ])
-
-    r = geo_ecl[:, :, :3]
-    r_eme = np.einsum("ij,mnj->mni", R, r)
-
-    if obj_dim == 3:
-        out_int = r_eme
-    else:
-        v = geo_ecl[:, :, 3:]
-        v_eme = np.einsum("ij,mnj->mni", R, v)
-        out_int = np.concatenate([r_eme, v_eme], axis=2)
-
-    # ---------- restore original layout ----------
-    if out_style[0] == "single":
-        return out_int[0, 0]
-    if out_style[0] == "Mxdim":
-        return out_int[:, 0]
-    if out_style[0] == "dimxN":
-        return out_int[0].T
-    if out_style[0] == "Nxdim_time":
-        return out_int[0]
-    return out_int
-
-
-def geo_secr_to_geo_eclip_generic(obj, earth, eps=1e-12, layout="auto"):
-    """
-    Convert SECR (Earth-centered rotating) position(s) or state(s) to geocentric ECLIPJ2000.
-
-    STRICT RULES:
-    - obj dim = 3 → earth may be 3 or 6 (earth velocity ignored)
-    - obj dim = 6 → earth MUST be 6 (otherwise ValueError)
-
-    Supported obj shapes:
-      Position: (3,), (M,3), (N,3), (3,N), (M,N,3)
-      State:    (6,), (M,6), (N,6), (6,N), (M,N,6)
-
-    Supported earth shapes:
-      Position: (3,), (3,1), (1,3), (N,3), (3,N)
-      State:    (6,), (6,1), (1,6), (N,6), (6,N)
-
-    layout resolves ambiguity when obj is (K,dim):
-      - "batch": interpret as (M,dim) objects at one time (N=1)
-      - "time" : interpret as (N,dim) time series for one object (M=1)
-      - "auto" : infer from earth shape when possible, else default to "batch"
-
-    Returns: same layout as obj.
-    """
-
-    if layout not in ("auto", "batch", "time"):
-        raise ValueError("layout must be one of {'auto','batch','time'}")
-
-    O = np.asarray(obj, dtype=float)
-    E = np.asarray(earth, dtype=float)
-
-    # --- infer dim (3 vs 6) ---
-    def infer_dim(A, name):
-        if A.ndim == 1:
-            if A.shape in [(3,), (6,)]:
-                return A.shape[0]
-            raise ValueError(f"{name} expected (3,) or (6,), got {A.shape}")
-        if A.ndim == 2:
-            if A.shape[0] in (3, 6):
-                return A.shape[0]  # (dim,N)
-            if A.shape[1] in (3, 6):
-                return A.shape[1]  # (K,dim) or (N,dim)
-        if A.ndim == 3:
-            if A.shape[2] in (3, 6):
-                return A.shape[2]
-        raise ValueError(f"Could not infer dim for {name} with shape {A.shape}")
-
-    obj_dim = infer_dim(O, "obj")
-    earth_dim = infer_dim(E, "earth")
-
-    # --- STRICT RULE ---
-    if obj_dim == 6 and earth_dim == 3:
-        raise ValueError(
-            "Invalid input: obj is 6D state but earth is 3D position. "
-            "Earth velocity is required to compute omega and the inertial velocity correction."
-        )
-
-    # --- normalize earth to (N,earth_dim) ---
-    def earth_to_Nd(E, N, dim):
-        if E.ndim == 1:
-            if E.shape != (dim,):
-                raise ValueError(f"earth expected ({dim},), got {E.shape}")
-            return np.repeat(E[None, :], N, axis=0)
-
-        if E.ndim == 2:
-            if E.shape == (dim, 1):
-                return np.repeat(E[:, 0][None, :], N, axis=0)
-            if E.shape == (1, dim):
-                return np.repeat(E[0, :][None, :], N, axis=0)
-            if E.shape[1] == dim:  # (N,dim)
-                if E.shape[0] != N:
-                    raise ValueError(f"earth has N={E.shape[0]} but obj has N={N}")
-                return E
-            if E.shape[0] == dim:  # (dim,N)
-                if E.shape[1] != N:
-                    raise ValueError(f"earth has N={E.shape[1]} but obj has N={N}")
-                return E.T
-
-        raise ValueError(f"earth unsupported shape {E.shape} for dim={dim}")
-
-    # --- normalize obj to internal (M,N,obj_dim) and remember return style ---
-    if O.ndim == 1:
-        if O.shape != (obj_dim,):
-            raise ValueError(f"obj expected ({obj_dim},), got {O.shape}")
-        O_int = O[None, None, :]
-        out_style = ("single",)
-
-    elif O.ndim == 2:
-        if O.shape == (obj_dim, 1):
-            O_int = O[:, 0][None, None, :]
-            out_style = ("single",)
-
-        elif O.shape[0] == obj_dim:  # (dim,N)
-            O_int = O.T[None, :, :]  # (1,N,dim)
-            out_style = ("dimxN",)
-
-        elif O.shape[1] == obj_dim:  # (K,dim) ambiguous
-            K = O.shape[0]
-
-            if layout == "batch":
-                O_int = O[:, None, :]  # (M,1,dim)
-                out_style = ("Mxdim",)
-
-            elif layout == "time":
-                O_int = O[None, :, :]  # (1,N,dim)
-                out_style = ("Nxdim_time",)
-
-            else:  # auto
-                earth_time_like = (
-                        E.ndim == 2 and (
-                        (E.shape[1] == earth_dim and E.shape[0] == K) or
-                        (E.shape[0] == earth_dim and E.shape[1] == K)
-                )
-                )
-                if earth_time_like:
-                    O_int = O[None, :, :]  # (1,K,dim)
-                    out_style = ("Nxdim_time",)
-                else:
-                    O_int = O[:, None, :]  # (K,1,dim)
-                    out_style = ("Mxdim",)
-        else:
-            raise ValueError(f"obj unsupported shape {O.shape}")
-
-    elif O.ndim == 3:
-        if O.shape[2] != obj_dim:
-            raise ValueError(f"obj expected (M,N,{obj_dim}), got {O.shape}")
-        O_int = O
-        out_style = ("MNdim",)
-
-    else:
-        raise ValueError(f"obj unsupported ndim={O.ndim}")
-
-    M, N, _ = O_int.shape
-
-    # Earth normalized to (N, earth_dim)
-    E_N = earth_to_Nd(E, N, earth_dim)
-
-    # For obj_dim==3, allow earth_dim==6 but ignore vel; for obj_dim==6 earth_dim==6 is guaranteed
-    if obj_dim == 3:
-        h_r_E = E_N[:, :3]  # (N,3)
-        h_v_E = None
-    else:
-        h_r_E = E_N[:, :3]  # (N,3)
-        h_v_E = E_N[:, 3:]  # (N,3)
-
-    # ---- unpack SECR obj ----
-    r_p = O_int[:, :, :3]  # (M,N,3) in SECR
-
-    if obj_dim == 6:
-        v_p = O_int[:, :, 3:]  # (M,N,3) in SECR
-
-    # angles from Earth-Sun direction (same convention as forward function)
-    angles = np.arctan2(-h_r_E[:, 1], -h_r_E[:, 0])  # (N,)
-
-    c = np.cos(angles)
-    s = np.sin(angles)
-
-    # Rotation SECR -> inertial ecliptic: Rz(+angles)
-    R = np.zeros((N, 3, 3), dtype=float)
-    R[:, 0, 0] = c;
-    R[:, 0, 1] = -s
-    R[:, 1, 0] = s;
-    R[:, 1, 1] = c
-    R[:, 2, 2] = 1.0
-
-    # inertial geocentric position: r = R * r'
-    geo_r = np.einsum('nij,mnj->mni', R, r_p)  # (M,N,3)
-
-    if obj_dim == 3:
-        out_int = geo_r
-    else:
-        # omega magnitude from Earth motion
-        rE_norm2 = np.sum(h_r_E * h_r_E, axis=1)
-        rE_norm2 = np.maximum(rE_norm2, eps)
-        omega_mag = np.linalg.norm(np.cross(h_r_E, h_v_E), axis=1) / rE_norm2  # (N,)
-
-        omega = np.zeros((N, 3), dtype=float)
-        omega[:, 2] = omega_mag
-
-        # omega in SECR coordinates (rotate inertial omega into SECR using same R)
-        omega_p = np.einsum('nij,nj->ni', R, omega)  # (N,3)
-
-        # inertial relative velocity: v = R * (v' + omega' x r')
-        v_rel_p = v_p + np.cross(omega_p[None, :, :], r_p)  # (M,N,3)
-        geo_v = np.einsum('nij,mnj->mni', R, v_rel_p)  # (M,N,3)
-
-        out_int = np.concatenate([geo_r, geo_v], axis=2)  # (M,N,6)
-
-    # ---- restore original layout ----
-    if out_style[0] == "single":
-        return out_int[0, 0, :]
-    if out_style[0] == "Mxdim":
-        return out_int[:, 0, :]
-    if out_style[0] == "dimxN":
-        return out_int[0, :, :].T
-    if out_style[0] == "Nxdim_time":
-        return out_int[0, :, :]
-    return out_int
-
-
-def helio_eclip_to_sun_earth_corotating_batch_full(states, earth_states):
-    """
-    Converts a batch of position and velocity state vectors from heliocentric ECLIPJ2000
-    to the Earth-centered Sun-Earth co-rotating frame with fixed ecliptic north.
-
-    Parameters:
-    - states: (M, 6, N) array of states in heliocentric ECLIPJ2000, for M objects and N timesteps
-    - earth_states: (6, N) array of Earth state vectors in the same frame at each timestep
-
-    Returns:
-    - states_corotating: (M, 6, N) array of transformed states in the SECR frame
-    """
-
-    _, N = states.shape
-
-    h_r_E = earth_states[:3, :].T  # (N, 3)
-    h_v_E = earth_states[3:, :].T  # (N, 3)
-
-    # Compute Earth's orbital angle (angle in the ecliptic plane)
-    angles = np.arctan2(-h_r_E[:, 1], -h_r_E[:, 0])  # Shape: (N,)
-
-    # Compute cosines and sines of rotation angles
-    cos_angles = np.cos(-angles)
-    sin_angles = np.sin(-angles)
-
-    # Construct rotation matrices (shape: Nx3x3), Z axis is fixed along ecliptic north
-    rotation_matrices = np.zeros((N, 3, 3))
-    rotation_matrices[:, 0, 0] = cos_angles
-    rotation_matrices[:, 0, 1] = -sin_angles
-    rotation_matrices[:, 1, 0] = sin_angles
-    rotation_matrices[:, 1, 1] = cos_angles
-    rotation_matrices[:, 2, 2] = 1  # Z remains unchanged (ecliptic north)
-
-    # Angular velocity vector assuming uniform circular motion in ecliptic plane
-    h_omega_mag = np.linalg.norm(np.cross(h_r_E, h_v_E), axis=1) / (np.linalg.norm(h_r_E, axis=1) ** 2)  # (N,)
-    h_omega = np.zeros((N, 3))
-    h_omega[:, 2] = h_omega_mag  # Only z-component for ecliptic plane rotation
-
-    states_corotating = np.zeros_like(states)
-
-    h_r_O = states[:3, :].T  # (N, 3)
-    h_v_O = states[3:, :].T  # (N, 3)
-
-    h_rel_r = h_r_O - h_r_E  # position relative to Earth (in inertial)
-    h_rel_v = h_v_O - h_v_E  # velocity relative to Earth (in inertial)
-
-    E_r_o_prime = np.einsum('nij,nj->ni', rotation_matrices, h_rel_r)  # now co-rotating frame
-    v_rel_rot = np.einsum('nij,nj->ni', rotation_matrices, h_rel_v)
-    E_omega = np.einsum('nij,nj->ni', rotation_matrices, h_omega)
-    v_rot = np.cross(E_omega, E_r_o_prime)  # correct: using rotated position
-    E_v_o_prime = v_rel_rot - v_rot  # total velocity in rotating frame
-
-    states_corotating[:3, :] = E_r_o_prime.T
-    states_corotating[3:, :] = E_v_o_prime.T
-
-    return states_corotating
-
-
-def sun_earth_corotating_to_geo_eclip_batch_full(states_corotating, earth_states):
-    """
-    Converts a batch of state vectors from the Sun-Earth co-rotating (SECR) frame
-    to geocentric ECLIPJ2000 coordinates.
-
-    Parameters:
-    - states_corotating: (6, N) array in SECR frame; first 3 rows = position, last 3 = velocity
-    - earth_states: (6, N) array in heliocentric ECLIPJ2000; used only for rotation angle
-
-    Returns:
-    - states_geocentric: (6, N) array in geocentric ECLIPJ2000
-    """
-
-    _, N = states_corotating.shape
-
-    # Earth's heliocentric position (used only for rotation)
-    h_r_E = earth_states[:3, :].T  # (N, 3)
-    h_v_E = earth_states[3:, :].T  # (N, 3)
-
-    # Co-rotating frame state
-    E_r_o_prime = states_corotating[:3, :].T  # (N, 3)
-    E_v_o_prime = states_corotating[3:, :].T  # (N, 3)
-
-    # Compute rotation angles from Earth-Sun vector (negate for SECR to inertial)
-    angles = np.arctan2(-h_r_E[:, 1], -h_r_E[:, 0])  # Shape: (N,)
-
-    # Rotation matrices: from SECR to ECLIPJ2000
-    cos_angles = np.cos(angles)
-    sin_angles = np.sin(angles)
-
-    rotation_matrices = np.zeros((N, 3, 3))
-    rotation_matrices[:, 0, 0] = cos_angles
-    rotation_matrices[:, 0, 1] = -sin_angles
-    rotation_matrices[:, 1, 0] = sin_angles
-    rotation_matrices[:, 1, 1] = cos_angles
-    rotation_matrices[:, 2, 2] = 1  # z-axis (ecliptic north) unchanged
-
-    # Rotate position to ECLIPJ2000 (geocentric)
-    geo_r_o = np.einsum('nij,nj->ni', rotation_matrices, E_r_o_prime)  # (N, 3)
-
-    # Angular velocity vector (magnitude from Earth's motion)
-    h_omega_mag = np.linalg.norm(np.cross(h_r_E, h_v_E), axis=1) / (np.linalg.norm(h_r_E, axis=1) ** 2)  # (N,)
-    h_omega = np.zeros((N, 3))
-    h_omega[:, 2] = h_omega_mag  # z-axis angular velocity
-
-    # Rotate angular velocity to SECR frame
-    E_omega = np.einsum('nij,nj->ni', rotation_matrices, h_omega)
-
-    # Add Coriolis term to get inertial velocity
-    v_rot = np.cross(E_omega, E_r_o_prime)  # (N, 3)
-    v_rel_rot = E_v_o_prime + v_rot  # (N, 3)
-    geo_v_o = np.einsum('nij,nj->ni', rotation_matrices, v_rel_rot)  # (N, 3)
-
-    # Assemble full state vector
-    states_geocentric = np.zeros_like(states_corotating)
-    states_geocentric[:3, :] = geo_r_o.T
-    states_geocentric[3:, :] = geo_v_o.T
-
-    return states_geocentric
-
-
-def sun_earth_corotating_to_geo_eclip_single(pos_corot, earth_state_helio):
-    """
-    Convert a single position from Sun-Earth co-rotating frame to geocentric ECLIPJ2000.
-
-    Parameters:
-    - pos_corot: np.array shape (3,), position in Sun-Earth co-rotating frame
-    - earth_state_helio: np.array shape (6,), Earth's heliocentric state vector [x,y,z,vx,vy,vz] in ECLIPJ2000
-
-    Returns:
-    - pos_geo_eclip: np.array shape (3,), position in geocentric ECLIPJ2000 frame
-    """
-
-    # Earth's heliocentric position
-    h_r_E = earth_state_helio[:3]
-
-    # Compute rotation angle: angle of Earth relative to Sun in XY plane (negated for SECR to inertial)
-    angle = np.arctan2(-h_r_E[1], -h_r_E[0])
-
-    # Rotation matrix about Z-axis by "angle"
-    c = np.cos(angle)
-    s = np.sin(angle)
-    R = np.array([[c, -s, 0],
-                  [s, c, 0],
-                  [0, 0, 1]])
-
-    # Rotate position vector from co-rotating to inertial ECLIPJ2000 frame
-    pos_inertial = R @ pos_corot
-
-    return pos_inertial
-
-
-def ecliptic_to_eme_single(state_vectors_ecliptic):
-    """
-    Transforms a batch of full state vectors from Ecliptic J2000 to EME J2000.
-
-    Parameters:
-    - state_vectors_ecliptic (numpy array): 6xN array representing N state vectors
-      in Ecliptic J2000 (rows: [x, y, z, vx, vy, vz]).
-
-    Returns:
-    - numpy array: 6xN array representing N state vectors in EME J2000.
-    """
-
-    # Obliquity of the ecliptic at J2000 (in degrees)
-    epsilon = 23.439281
-    epsilon_rad = np.radians(epsilon)
-
-    # Rotation matrix about the x-axis (−epsilon for Ecliptic to EME)
-    R = np.array([
-        [1, 0, 0],
-        [0, np.cos(-epsilon_rad), np.sin(-epsilon_rad)],
-        [0, -np.sin(-epsilon_rad), np.cos(-epsilon_rad)]
-    ])
-
-    # Separate position and velocity (each 3xN)
-    pos = state_vectors_ecliptic[0:3]
-    vel = state_vectors_ecliptic[3:6]
-
-    # Apply rotation
-    pos_eme = R @ pos
-
-    return pos_eme
 
 
 def get_sc_state_from_sc1_position(detected_pop, config):
@@ -2856,7 +3463,7 @@ def get_sc_state_from_sc1_position(detected_pop, config):
         sc_time = formation.orbit.loc[formation.orbit.index[closest_position_index], "Time"]
 
         # get the detecting spacecraft state in geo eclip frame
-        geo_eclip_state = eme_to_ecliptic_batch(geo_eme_state)
+        geo_eclip_state = geo_eme_to_geo_eclip_generic(geo_eme_state)
         scs_helio.append(geo_eclip_state)
         closest_indices.append(closest_position_index)
         sc_epochs.append(sc_time.strftime("%Y-%m-%d %H:%M:%S"))
@@ -2923,7 +3530,7 @@ def get_scs_initial_states(detected_pop, config):
         sc_time = detecting_spacecraft.matched_trajectory_full.loc[idx0, 'Time']
 
         # Your code put GEO_ECLIP in the DF; keep doing that for compatibility
-        geo_eclip_state_detect = eme_to_ecliptic_batch(geo_eme_state_detect)
+        geo_eclip_state_detect = geo_eme_to_geo_eclip_generic(geo_eme_state_detect)
         det_geo_eclip_states.append(geo_eclip_state_detect)
 
         sc_epochs.append(sc_time.strftime("%Y-%m-%d %H:%M:%S"))
@@ -2946,7 +3553,7 @@ def get_scs_initial_states(detected_pop, config):
             geo_eme_state_detect_j[3:] *= (config['AU_TO_M'] / 1000.0 / config['SECONDS_PER_DAY'])
 
             # Your code put GEO_ECLIP in the DF; keep doing that for compatibility
-            geo_eclip_state_detect_j = eme_to_ecliptic_batch(geo_eme_state_detect_j)
+            geo_eclip_state_detect_j = geo_eme_to_geo_eclip_generic(geo_eme_state_detect_j)
 
             sc_states_geo_eclip.append(geo_eclip_state_detect_j)
             sc_boresights.append(sc.boresight)
@@ -2986,39 +3593,24 @@ def get_scs_initial_states_new(detected_pop, config):
     """
     For each detection row in `detected_pop`:
 
-      1) Rebuild the formation from the saved SC1 initial position.
-      2) Match the formation trajectories to the detection's `total_length`.
-      3) At the first detection instant `idx0 = min_nonnegative`, extract GEO_EME state
-         for EVERY spacecraft (ordered by spacecraft ID 1..num_sc), convert to GEO_ECLIP,
-         and store:
-           - `all_sc_geo_eclip_list`: per-row array (num_sc, 6) in km / km/s
-           - `all_sc_boresights_list`: per-row array (num_sc, 3)
-      4) For backward compatibility, also write the detecting spacecraft's GEO_ECLIP
-         state (km / km/s) and its epoch string into `out_df`.
+      - Rebuild formation from saved SC1 initial position
+      - Match trajectories to `total_length`
+      - At the first detection instant idx0 = min_nonnegative:
+          * For EVERY spacecraft j (ordered by ID 1..num_sc):
+              - store epoch (Time) in column:  SC{j}_epoch
+              - store GEO_ECLIP state (km, km/s) in column: SC{j}_GEO_ECLIP_state  (np.ndarray shape (6,))
+              - store boresight in column:     SC{j}_boresight      (np.ndarray shape (3,))
+          * Also store detecting spacecraft:
+              - detecting_id
+              - sc_epoch (same as SC{detecting_id}_epoch)
+              - GEO_ECLIP_* columns (same as SC{detecting_id}_GEO_ECLIP_state split)
 
     Returns:
-      (out_df, all_sc_geo_eclip_list, detecting_ids, all_sc_boresights_list)
-        - out_df: input DataFrame augmented with:
-            * sc_epoch (string)
-            * GEO_ECLIP_X_(km), GEO_ECLIP_Y_(km), GEO_ECLIP_Z_(km),
-              GEO_ECLIP_Vx_(km/s), GEO_ECLIP_Vy_(km/s), GEO_ECLIP_Vz_(km/s)
-          (these GEO_ECLIP columns are for the DETECTING spacecraft only)
-        - all_sc_geo_eclip_list: list of arrays, each (num_sc, 6), ordered by sc ID (1..num_sc)
-        - detecting_ids: list of detecting spacecraft IDs (1-based)
-        - all_sc_boresights_list: list of arrays, each (num_sc, 3), ordered by sc ID (1..num_sc)
+      out_df (augmented), with one row per detection instance (same as input indexing).
     """
-    import numpy as np
 
     out_df = detected_pop.copy(deep=True)
 
-    # Outputs
-    sc_epochs = []
-    det_geo_eclip_states = []
-    all_sc_geo_eclip_list = []
-    detecting_ids = []
-    all_sc_boresights_list = []
-
-    # Columns to read from matched_trajectory_full (GEO_EME state)
     eme_cols = [
         "GEO_EME_X_(km)", "GEO_EME_Y_(km)", "GEO_EME_Z_(km)",
         "GEO_EME_Vx_(km/s)", "GEO_EME_Vy_(km/s)", "GEO_EME_Vz_(km/s)"
@@ -3035,8 +3627,19 @@ def get_scs_initial_states_new(detected_pop, config):
         x[..., 3:] *= (AU_km / SEC_PER_DAY)
         return x
 
+    # Per-row outputs we always write
+    detecting_ids = []
+    det_epochs = []
+    det_geo_eclip_states = []
+
+    # Per-spacecraft columns (initialized after we know num_sc)
+    sc_epoch_cols = {}      # SC{j}_epoch -> list[str]
+    sc_state_cols = {}      # SC{j}_GEO_ECLIP_state -> list[np.ndarray(6,)]
+    sc_boresight_cols = {}  # SC{j}_boresight -> list[np.ndarray(3,)]
+    num_sc = None
+
     for _, detection in out_df.iterrows():
-        # 1) Recreate formation from saved SC1 initial pos
+        # --- recreate formation from saved SC1 initial pos ---
         formation = Formation(config)
         sc1_ini_index = formation.get_index_from_pos(detection["spacecraft_1_ini_pos"])
         formation.recall_formation(sc1_ini_index, config)
@@ -3045,59 +3648,59 @@ def get_scs_initial_states_new(detected_pop, config):
         formation.match_spacecraft_trajectory(total_length, config)
         formation.match_spacecraft_trajectory_full(total_length, config)
 
-        # 2) Detecting spacecraft ID (1-based, from MultiIndex third level)
+        # infer num_sc once (assumed constant across rows)
+        if num_sc is None:
+            num_sc = len(formation.spacecraft)
+            for j in range(1, num_sc + 1):
+                sc_epoch_cols[f"SC{j}_epoch"] = []
+                sc_state_cols[f"SC{j}_GEO_ECLIP_state"] = []
+                sc_boresight_cols[f"SC{j}_boresight"] = []
+
+        # detecting spacecraft id (1-based, from MultiIndex third level)
         sc_id_detect = int(detection.name[2])
         detecting_ids.append(sc_id_detect)
 
-        # 3) Sample index of first detection for this row
+        # first detection sample index
         idx0 = int(detection["min_nonnegative"])
 
-        # 4) Build ALL spacecraft GEO_ECLIP states at idx0 (ordered by spacecraft ID 1..N)
-        sc_states_geo_eclip = []
-        sc_boresights = []
-
-        for sc in formation.spacecraft:
+        # --- compute per-spacecraft epochs + states + boresights at idx0 ---
+        for j, sc in enumerate(formation.spacecraft, start=1):
             traj_full = sc.matched_trajectory_full
 
-            # Use iloc (idx0 is an integer sample index)
-            geo_eme_state_au_auday = traj_full.iloc[idx0][eme_cols].to_numpy(dtype=float)  # (6,)
-            geo_eme_state_km_kms = au_auday_state_to_km_kms(geo_eme_state_au_auday)
+            # epoch at idx0 (store as formatted string for df friendliness)
+            t = traj_full.iloc[idx0]["Time"]
+            sc_epoch_cols[f"SC{j}_epoch"].append(t.strftime("%Y-%m-%d %H:%M:%S"))
 
-            geo_eclip_state_km_kms = eme_to_ecliptic_batch(geo_eme_state_km_kms)
-            sc_states_geo_eclip.append(geo_eclip_state_km_kms)
+            # boresight (store as length-3 ndarray)
+            sc_boresight_cols[f"SC{j}_boresight"].append(np.asarray(sc.boresight, dtype=float).reshape(3,))
 
-            sc_boresights.append(sc.boresight)
+            # GEO_EME state at idx0 (AU, AU/day) -> convert -> GEO_ECLIP (km, km/s)
+            geo_eme_au_auday = traj_full.iloc[idx0][eme_cols].to_numpy(dtype=float)  # (6,)
+            geo_eme_km_kms = au_auday_state_to_km_kms(geo_eme_au_auday)
+            geo_eclip_km_kms = geo_eme_to_geo_eclip_generic(geo_eme_km_kms)                 # (6,)
 
-        all_sc_geo_eclip = np.vstack(sc_states_geo_eclip)  # (num_sc, 6)
-        all_sc_boresights = np.vstack(sc_boresights)  # (num_sc, 3)
+            sc_state_cols[f"SC{j}_GEO_ECLIP_state"].append(geo_eclip_km_kms)
 
-        all_sc_geo_eclip_list.append(all_sc_geo_eclip)
-        all_sc_boresights_list.append(all_sc_boresights)
+        # detecting spacecraft epoch/state for compatibility columns
+        det_epochs.append(sc_epoch_cols[f"SC{sc_id_detect}_epoch"][-1])
+        det_state = sc_state_cols[f"SC{sc_id_detect}_GEO_ECLIP_state"][-1]
+        det_geo_eclip_states.append(det_state)
 
-        # 5) Detecting spacecraft state + epoch (from the same all_sc array for consistency)
-        det_geo_eclip = all_sc_geo_eclip[sc_id_detect - 1, :]  # (6,)
-        det_geo_eclip_states.append(det_geo_eclip)
+    # --- write per-sc columns into out_df ---
+    out_df.loc[:, "detecting_id"] = detecting_ids
 
-        det_sc = formation.spacecraft[sc_id_detect - 1]
-        sc_time = det_sc.matched_trajectory_full.iloc[idx0]["Time"]
-        sc_epochs.append(sc_time.strftime("%Y-%m-%d %H:%M:%S"))
+    for col, values in sc_epoch_cols.items():
+        out_df.loc[:, col] = values
 
-    # Write back detecting spacecraft info into the DF (no chained assignment)
-    out_df.loc[:, "sc_epoch"] = sc_epochs
+    for col, values in sc_state_cols.items():
+        out_df.loc[:, col] = values
 
-    det_geo_eclip = np.vstack(det_geo_eclip_states)
-    out_df.loc[:, [
-                      "GEO_ECLIP_X_(km)", "GEO_ECLIP_Y_(km)", "GEO_ECLIP_Z_(km)",
-                      "GEO_ECLIP_Vx_(km/s)", "GEO_ECLIP_Vy_(km/s)", "GEO_ECLIP_Vz_(km/s)"
-                  ]] = det_geo_eclip
+    for col, values in sc_boresight_cols.items():
+        out_df.loc[:, col] = values
 
-    # chatGTP prompt i need to do - problem is, the formation is not properly rebuilt because each s/c is using the detecting s/c epoch
-    # but in reality, they each have their own
-    # can yo do A and output the new function, but i want the output to have each row be each detection instance
-    # (which i believe is the same), but now for each row i want to add a column for each s/c epoch and a column
-    # for each s/c state
 
-    return out_df, all_sc_geo_eclip_list, detecting_ids, all_sc_boresights_list
+    return out_df
+
 
 
 def ms_to_aud(states):
@@ -3363,462 +3966,6 @@ def get_files_per_folder(parent_folder, filetype):
 
     return all_files
 
-
-def eme_to_ecliptic_batch(state_vectors_eme):
-    """
-    Transforms a batch of full state vectors from EME J2000 to Ecliptic J2000.
-
-    Parameters:
-    - state_vectors_eme (numpy array): 6 x N array representing N state vectors
-      in EME J2000 (each row: [x, y, z, vx, vy, vz]).
-
-    Returns:
-    - numpy array: Nx6 array representing N state vectors in Ecliptic J2000.
-    """
-    # Obliquity of the ecliptic at J2000 (in degrees)
-    epsilon = 23.439281  # Mean obliquity of the ecliptic at J2000 epoch
-    epsilon_rad = np.radians(epsilon)
-
-    # Rotation matrix about the x-axis
-    rotation_matrix = np.array([
-        [1, 0, 0],
-        [0, np.cos(epsilon_rad), np.sin(epsilon_rad)],
-        [0, -np.sin(epsilon_rad), np.cos(epsilon_rad)]
-    ])
-
-    # Split into position and velocity
-    positions = state_vectors_eme[0:3]
-    velocities = state_vectors_eme[3:6]
-
-    # Rotate both
-    pos_ecliptic = rotation_matrix @ positions
-    vel_ecliptic = velocities @ rotation_matrix.T
-
-    # Concatenate position and velocity back
-    state_vectors_ecliptic = np.hstack((pos_ecliptic, vel_ecliptic))
-
-    return state_vectors_ecliptic
-
-
-def eclip_to_sun_earth_corotating_batch_n_body_integrator_output(states, earth_states):
-    """
-    Converts a batch of position and velocity state vectors from heliocentric ECLIPJ2000
-    to the Earth-centered Sun-Earth co-rotating frame (X toward Sun, Z along orbital angular momentum).
-
-    Parameters:
-    - states: (M, 6, N) array of states in heliocentric ECLIPJ2000, for M objects and N timesteps
-    - earth_states: (6, N) array of Earth state vectors in the same frame at each timestep
-
-    Returns:
-    - states_corotating: (M, 6, N) array of transformed states in the SECR frame
-    """
-
-    earth_positions = earth_states[:3, :].T
-
-    # Compute Earth's orbital angle (angle in the ecliptic plane)
-    angles = np.arctan2(earth_positions[:, 1], earth_positions[:, 0])  # Shape: (N,)
-
-    # Compute cosines and sines of rotation angles
-    cos_angles = np.cos(-angles)
-    sin_angles = np.sin(-angles)
-
-    # Construct rotation matrices (shape: Nx3x3)
-    rotation_matrices = np.zeros((len(angles), 3, 3))
-    rotation_matrices[:, 0, 0] = cos_angles
-    rotation_matrices[:, 0, 1] = -sin_angles
-    rotation_matrices[:, 1, 0] = sin_angles
-    rotation_matrices[:, 1, 1] = cos_angles
-    rotation_matrices[:, 2, 2] = 1  # No rotation in the Z direction
-
-    object_i_pos = states[:3, :].T + earth_positions
-
-    rotation_matrices = np.asarray(rotation_matrices, dtype=np.float64)
-    relative_positions = np.asarray(object_i_pos, dtype=np.float64)
-
-    # Apply the rotation to transform positions
-    position_corotating = np.einsum("nij,nj->ni", rotation_matrices, relative_positions)
-
-    return position_corotating
-
-
-def eclip_to_sun_earth_corotating_batch(minimoon_df):
-    """
-    Converts a batch of positions and velocities from the heliocentric ECLIPJ2000 frame
-    to the Sun-Earth co-rotating frame.
-
-    Parameters:
-    - positions_eclip (numpy array): Nx3 array of positions in ECLIPJ2000 (AU).
-    - et_times (numpy array): N-element array of ephemeris times.
-
-    Returns:
-    - positions_corotating (numpy array): Nx3 array of positions in Sun-Earth co-rotating frame (AU).
-    """
-
-    moon_pos = minimoon_df.loc[:, ["Moon x (Helio)", "Moon y (Helio)", "Moon z (Helio)"]].to_numpy()
-    earth_positions = minimoon_df.loc[:, ["Earth x (Helio)", "Earth y (Helio)", "Earth z (Helio)"]].to_numpy()
-
-    # Compute Earth's orbital angle (angle in the ecliptic plane)
-    angles = np.arctan2(earth_positions[:, 1], earth_positions[:, 0])  # Shape: (N,)
-
-    # Compute cosines and sines of rotation angles
-    cos_angles = np.cos(-angles)
-    sin_angles = np.sin(-angles)
-
-    # Construct rotation matrices (shape: Nx3x3)
-    rotation_matrices = np.zeros((len(angles), 3, 3))
-    rotation_matrices[:, 0, 0] = cos_angles
-    rotation_matrices[:, 0, 1] = -sin_angles
-    rotation_matrices[:, 1, 0] = sin_angles
-    rotation_matrices[:, 1, 1] = cos_angles
-    rotation_matrices[:, 2, 2] = 1  # No rotation in the Z direction
-
-    # Apply the rotation to transform positions
-    positions_corotating = np.einsum("nij,nj->ni", rotation_matrices, moon_pos - earth_positions)
-
-    old_file_convention = positions_corotating.copy()
-    old_file_convention[:, :2] *= -1
-
-    minimoon_df[['Moon Synodic x', 'Moon Synodic y', 'Moon Synodic z']] = old_file_convention
-    file_path = '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb/' + str(
-        minimoon_df['Object id'].iloc[0]) + '.csv'
-    minimoon_df.to_csv(file_path, sep=' ', header=True, index=False)
-
-    return positions_corotating
-
-
-def eclip_to_sun_earth_corotating_batch_full_original_asteroid(states, earth_states):
-    """
-    Converts a batch of positions and velocities from the heliocentric ECLIPJ2000 frame
-    to the Sun-Earth co-rotating frame.
-
-    Parameters:
-    - positions_eclip (numpy array): Nx3 array of positions in ECLIPJ2000 (AU).
-    - et_times (numpy array): N-element array of ephemeris times.
-
-    Returns:
-    - positions_corotating (numpy array): Nx3 array of positions in Sun-Earth co-rotating frame (AU).
-    """
-
-    h_r_E = earth_states[:3, :].T  # (N, 3)
-    h_v_E = earth_states[3:, :].T  # (N, 3)
-    h_r_o = states[:3, :].T
-    h_v_o = states[3:, :].T
-
-    # Compute Earth's orbital angle (angle in the ecliptic plane)
-    angles = np.arctan2(h_r_E[:, 1], h_r_E[:, 0])  # Shape: (N,)
-
-    # Compute cosines and sines of rotation angles
-    cos_angles = np.cos(-angles)
-    sin_angles = np.sin(-angles)
-
-    # Construct rotation matrices (shape: Nx3x3)
-    rotation_matrices = np.zeros((len(angles), 3, 3))
-    rotation_matrices[:, 0, 0] = cos_angles
-    rotation_matrices[:, 0, 1] = -sin_angles
-    rotation_matrices[:, 1, 0] = sin_angles
-    rotation_matrices[:, 1, 1] = cos_angles
-    rotation_matrices[:, 2, 2] = 1  # No rotation in the Z direction
-
-    # Apply the rotation to transform positions
-    positions_corotating = np.einsum("nij,nj->ni", rotation_matrices, h_r_o - h_r_E)
-
-    return positions_corotating.T
-
-
-def sun_earth_corotating_to_helio_eclip_batch_full(states_corotating, earth_states):
-    """
-    Converts a batch of position and velocity state vectors from the Earth-centered
-    Sun-Earth co-rotating frame (SECR) to heliocentric ECLIPJ2000, accounting for the Coriolis term.
-
-    Parameters:
-    - states_corotating: (6, N) array of states in the SECR frame, where M is the number of objects
-      and N is the number of timesteps. The first 3 rows represent positions, and the last 3 rows represent velocities.
-    - earth_states: (6, N) array of Earth state vectors in the heliocentric ECLIPJ2000 frame at each timestep.
-      The first 3 rows represent Earth's position, and the last 3 rows represent Earth's velocity.
-
-    Returns:
-    - states_heliocentric: (6, N) array of transformed states in heliocentric ECLIPJ2000 frame.
-      The first 3 rows represent positions, and the last 3 rows represent velocities.
-    """
-
-    _, N = states_corotating.shape
-
-    # Extract Earth's position and velocity from heliocentric ECLIPJ2000
-    h_r_E = earth_states[:3, :].T  # (N, 3)
-    h_v_E = earth_states[3:, :].T  # (N, 3)
-    E_r_o_prime = states_corotating[:3, :].T
-    E_v_o_prime = states_corotating[3:, :].T
-
-    # Compute Earth's orbital angle (angle in the ecliptic plane)
-    angles = np.arctan2(-h_r_E[:, 1], -h_r_E[:, 0])  # Shape: (N,)
-
-    # Compute cosines and sines of rotation angles
-    cos_angles = np.cos(angles)
-    sin_angles = np.sin(angles)
-
-    # Construct rotation matrices (shape: Nx3x3), Z axis is fixed along ecliptic north
-    rotation_matrices = np.zeros((N, 3, 3))
-    rotation_matrices[:, 0, 0] = cos_angles
-    rotation_matrices[:, 0, 1] = -sin_angles
-    rotation_matrices[:, 1, 0] = sin_angles
-    rotation_matrices[:, 1, 1] = cos_angles
-    rotation_matrices[:, 2, 2] = 1  # Z remains unchanged (ecliptic north)
-
-    states_heliocentric = np.zeros_like(states_corotating)
-
-    h_rel_o = np.einsum('nij,nj->ni', rotation_matrices, E_r_o_prime)  # now co-rotating frame
-    h_r_o = h_rel_o + h_r_E
-
-    # Angular velocity vector assuming uniform circular motion in ecliptic plane
-    h_omega_mag = np.linalg.norm(np.cross(h_r_E, h_v_E), axis=1) / (np.linalg.norm(h_r_E, axis=1) ** 2)  # (N,)
-    h_omega = np.zeros((N, 3))
-    h_omega[:, 2] = h_omega_mag  # Only z-component for ecliptic plane rotation
-
-    E_omega = np.einsum('nij,nj->ni', rotation_matrices.transpose(0, 2, 1), h_omega)
-    v_rot = np.cross(E_omega, E_r_o_prime)  # correct: using rotated position
-    v_rel_rot = E_v_o_prime + v_rot
-    h_rel_v = np.einsum('nij,nj->ni', rotation_matrices, v_rel_rot)
-    h_v_o = h_rel_v + h_v_E
-
-    states_heliocentric[:3, :] = h_r_o.T
-    states_heliocentric[3:, :] = h_v_o.T
-
-    return states_heliocentric
-
-
-def sun_earth_corotating_to_helio_eclip_single(state_corotating, earth_state):
-    """
-    Converts a batch of position and velocity state vectors from the Earth-centered
-    Sun-Earth co-rotating frame (SECR) to heliocentric ECLIPJ2000, accounting for the Coriolis term.
-
-    Parameters:
-    - states_corotating: (1, N) array of states in the SECR frame, where M is the number of objects
-      and N is the number of timesteps. The first 3 rows represent positions, and the last 3 rows represent velocities.
-    - earth_states: (1, N) array of Earth state vectors in the heliocentric ECLIPJ2000 frame at each timestep.
-      The first 3 rows represent Earth's position, and the last 3 rows represent Earth's velocity.
-
-    Returns:
-    - states_heliocentric: (1, N) array of transformed states in heliocentric ECLIPJ2000 frame.
-      The first 3 rows represent positions, and the last 3 rows represent velocities.
-    """
-
-    # Extract Earth's position and velocity from heliocentric ECLIPJ2000
-    h_r_E = earth_state[:3]  # ( 3)
-    h_v_E = earth_state[3:]  # (3)
-    E_r_o_prime = state_corotating[:3]
-    E_v_o_prime = state_corotating[3:]
-
-    # Compute Earth's orbital angle (angle in the ecliptic plane)
-    angle = np.arctan2(-h_r_E[1], -h_r_E[0])  # Shape: (N,)
-
-    # Compute cosines and sines of rotation angles
-    cos_angle = np.cos(angle)
-    sin_angle = np.sin(angle)
-
-    # Construct rotation matrices (shape: Nx3x3), Z axis is fixed along ecliptic north
-    rotation_matrix = np.zeros((3, 3))
-    rotation_matrix[0, 0] = cos_angle
-    rotation_matrix[0, 1] = -sin_angle
-    rotation_matrix[1, 0] = sin_angle
-    rotation_matrix[1, 1] = cos_angle
-    rotation_matrix[2, 2] = 1  # Z remains unchanged (ecliptic north)
-
-    state_heliocentric = np.zeros_like(state_corotating)
-
-    h_rel_o = rotation_matrix @ E_r_o_prime  # now co-rotating frame
-    h_r_o = h_rel_o + h_r_E
-
-    # Angular velocity vector assuming uniform circular motion in ecliptic plane
-    h_omega_mag = np.linalg.norm(np.cross(h_r_E, h_v_E)) / (np.linalg.norm(h_r_E) ** 2)  # (N,)
-    h_omega = np.zeros(3, )
-    h_omega[2] = h_omega_mag  # Only z-component for ecliptic plane rotation
-
-    E_omega = rotation_matrix.T @ h_omega
-    v_rot = np.cross(E_omega, E_r_o_prime)  # correct: using rotated position
-    v_rel_rot = E_v_o_prime + v_rot
-    h_rel_v = rotation_matrix @ v_rel_rot
-    h_v_o = h_rel_v + h_v_E
-
-    state_heliocentric[:3] = h_r_o
-    state_heliocentric[3:] = h_v_o
-
-    return state_heliocentric
-
-
-def ecliptic_to_eme_batch(state_vectors_ecliptic):
-    """
-    Transform state vector(s) from Ecliptic J2000 to EME (Equatorial) J2000.
-
-    Accepts:
-      - shape (6,)      -> returns (6,)
-      - shape (6, N)    -> returns (6, N)
-      - shape (N, 6)    -> returns (N, 6)
-
-    State ordering: [x, y, z, vx, vy, vz]
-    """
-
-    X = np.asarray(state_vectors_ecliptic, dtype=float)
-
-    # Remember input shape style
-    if X.ndim == 1:
-        if X.shape != (6,):
-            raise ValueError(f"Expected shape (6,), got {X.shape}")
-        X2 = X.reshape(6, 1)  # (6,1)
-        out_style = "vec"
-    elif X.ndim == 2:
-        if X.shape[0] == 6:
-            X2 = X  # (6,N)
-            out_style = "6xN"
-        elif X.shape[1] == 6:
-            X2 = X.T  # (6,N)
-            out_style = "Nx6"
-        else:
-            raise ValueError(f"Expected (6,N) or (N,6), got {X.shape}")
-    else:
-        raise ValueError(f"Expected 1D or 2D array, got ndim={X.ndim}")
-
-    # J2000 mean obliquity (deg)
-    epsilon_deg = 23.439281
-    eps = np.deg2rad(epsilon_deg)
-
-    # Rotation about +x by +eps (Ecliptic -> Equatorial/EME)
-    c, s = np.cos(eps), np.sin(eps)
-    R = np.array([
-        [1.0, 0.0, 0.0],
-        [0.0, c, -s],
-        [0.0, s, c]
-    ])
-
-    pos = X2[0:3, :]
-    vel = X2[3:6, :]
-
-    pos_eme = R @ pos
-    vel_eme = R @ vel
-
-    Y2 = np.vstack((pos_eme, vel_eme))  # (6,N)
-
-    # Return in the same shape style as input
-    if out_style == "vec":
-        return Y2[:, 0]
-    elif out_style == "6xN":
-        return Y2
-    else:  # "Nx6"
-        return Y2.T
-
-
-def helio_eclip_to_geo_eme_batch(states_helio_eclip, earth_helio_eclip):
-    """
-    Convert heliocentric-ecliptic state(s) to geocentric-EME state(s).
-
-    Accepts:
-      states_helio_eclip: (6,), (6,N), or (N,6)
-      earth_helio_eclip : (6,) or same batch shape as states
-
-    Returns in same shape style as states_helio_eclip.
-    """
-    S = np.asarray(states_helio_eclip, dtype=float)
-    E = np.asarray(earth_helio_eclip, dtype=float)
-
-    # Normalize shapes into (6,N) for subtraction
-    def to_6xN(A, name):
-        if A.ndim == 1:
-            if A.shape != (6,):
-                raise ValueError(f"{name}: expected (6,), got {A.shape}")
-            return A.reshape(6, 1), "vec"
-        if A.ndim == 2:
-            if A.shape[0] == 6:
-                return A, "6xN"
-            if A.shape[1] == 6:
-                return A.T, "Nx6"
-        raise ValueError(f"{name}: expected (6,), (6,N) or (N,6), got {A.shape}")
-
-    S2, style = to_6xN(S, "states_helio_eclip")
-
-    # Earth can be (6,) or batch
-    if E.ndim == 1 and E.shape == (6,):
-        E2 = E.reshape(6, 1)  # will broadcast across N
-    else:
-        E2, _ = to_6xN(E, "earth_helio_eclip")
-        if E2.shape[1] not in (1, S2.shape[1]):
-            raise ValueError(f"earth batch length {E2.shape[1]} doesn't match states {S2.shape[1]}")
-
-    states_geo_eclip = S2 - E2  # broadcasting ok
-    states_geo_eme = ecliptic_to_eme_batch(states_geo_eclip)  # returns (6,N)
-
-    # Return in original style of states input
-    if style == "vec":
-        return states_geo_eme[:, 0]
-    elif style == "6xN":
-        return states_geo_eme
-    else:  # "Nx6"
-        return states_geo_eme.T
-
-
-def helio_eclip_from_geo_eme(eme_vectors, earth_helio_state):
-    ###########################
-    # convert geo eme to geo elcip
-    ###########################
-
-    # Obliquity of the ecliptic at J2000 (in degrees)
-    epsilon = 23.439281  # Mean obliquity of the ecliptic at J2000 epoch
-
-    # Convert epsilon to radians
-    epsilon_rad = np.radians(epsilon)
-
-    # Rotation matrix for transformation about the x-axis
-    rotation_matrix = np.array([
-        [1, 0, 0],
-        [0, np.cos(epsilon_rad), np.sin(epsilon_rad)],
-        [0, -np.sin(epsilon_rad), np.cos(epsilon_rad)]
-    ])
-
-    # Apply the rotation to each vector using matrix multiplication
-    ecliptic_positions = np.dot(eme_vectors[:3], rotation_matrix.T)
-    ecliptic_velocities = np.dot(eme_vectors[3:], rotation_matrix.T)
-
-    ##############################
-    # convert geo eclip to helio
-    ##########################
-    helio_eclip_position = ecliptic_positions + earth_helio_state[:3]
-    helio_eclip_velocities = ecliptic_velocities + earth_helio_state[3:]
-
-    return np.hstack((helio_eclip_position, helio_eclip_velocities))
-
-
-def ecliptic_to_eme_single_posvel(state_vectors_ecliptic):
-    """
-    Transforms a batch of full state vectors from Ecliptic J2000 to EME J2000.
-
-    Parameters:
-    - state_vectors_ecliptic (numpy array): 6xN array representing N state vectors
-      in Ecliptic J2000 (rows: [x, y, z, vx, vy, vz]).
-
-    Returns:
-    - numpy array: 6xN array representing N state vectors in EME J2000.
-    """
-
-    # Obliquity of the ecliptic at J2000 (in degrees)
-    epsilon = 23.439281
-    epsilon_rad = np.radians(epsilon)
-
-    # Rotation matrix about the x-axis (−epsilon for Ecliptic to EME)
-    R = np.array([
-        [1, 0, 0],
-        [0, np.cos(-epsilon_rad), np.sin(-epsilon_rad)],
-        [0, -np.sin(-epsilon_rad), np.cos(-epsilon_rad)]
-    ])
-
-    # Separate position and velocity (each 3xN)
-    pos = state_vectors_ecliptic[0:3]
-    vel = state_vectors_ecliptic[3:6]
-
-    # Apply rotation
-    pos_eme = R @ pos
-    vel_eme = R @ vel
-
-    # Stack back into 6×N
-    state_vectors_eme = np.stack((pos_eme, vel_eme)).reshape(-1)
-    return state_vectors_eme
 
 
 def _visible_dir(config):
