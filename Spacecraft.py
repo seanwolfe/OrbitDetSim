@@ -22,6 +22,7 @@ class Spacecraft:
         self.sigma_dec = configs['sigma_dec']
         self.sigma_pointing = configs['sigma_pointing']
         self.matched_trajectory = None  # this contains an array of the trajectory of the sc that has same length as the asteroid traj in question
+        self.matched_trajectory_full = None
         return
 
 

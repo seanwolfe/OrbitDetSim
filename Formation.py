@@ -79,7 +79,6 @@ class Formation:
                     (spacecraft_resampled['Time'] - original_timestamp).abs().argmin()]
                 new_index = spacecraft_resampled[spacecraft_resampled['Time'] == nearest_timestamp].index[0]
 
-
             # Keep only relevant position columns
             spacecraft_pos = spacecraft_resampled.loc[:, ['SUN_EARTH_CO_X_(km)',
                                                           'SUN_EARTH_CO_Y_(km)',
@@ -108,6 +107,120 @@ class Formation:
 
         return
 
+    def match_spacecraft_trajectory_full(self, asteroid_length, configs):
+        """
+        Resamples and aligns each spacecraft trajectory to match the asteroid trajectory's
+        one-hour intervals and start time.
+
+        TIME BEHAVIOR (as requested):
+          - We resample onto an hourly grid using nearest-neighbor selection.
+          - Instead of keeping the hourly grid times, we keep the ORIGINAL epoch of the
+            row that was selected as nearest (by carrying a ROW_ID through resampling).
+
+        Keeps ALL orbit columns.
+
+        Unit conversion:
+          - columns containing '(km)'   (but not '(km/s)') -> AU
+          - columns containing '(km/s)'                    -> AU/day
+          - Time stays datetime (original epochs)
+        """
+
+        AU_km = configs["AU_TO_M"] / 1000.0
+        SEC_PER_DAY = 86400.0
+
+        if "Time" not in self.orbit.columns:
+            raise ValueError("self.orbit must contain a 'Time' column")
+
+        # ---- Clean orbit once ----
+        orbit = self.orbit.copy()
+        orbit["Time"] = pd.to_datetime(orbit["Time"])
+        orbit = orbit.drop_duplicates(subset=["Time"]).sort_values("Time").reset_index(drop=True)
+
+        # Add a stable row id so we can recover the exact original epoch after resampling
+        orbit["ROW_ID"] = np.arange(len(orbit), dtype=np.int64)
+
+        # Cache a ROW_ID -> original Time mapping
+        rowid_to_time = orbit.set_index("ROW_ID")["Time"]
+
+        # All data columns except Time (we will handle Time explicitly)
+        data_cols = [c for c in orbit.columns if c not in ("Time",)]
+        # (data_cols includes ROW_ID; we will drop it at the end)
+
+        # ---- Hourly resample using nearest original row ----
+        # This returns a row whose values come from the nearest original timestamp;
+        # crucially, ROW_ID comes along for the ride.
+        spacecraft_resampled = (
+            orbit.set_index("Time")
+            .resample("h")
+            .nearest()
+            .reset_index()
+        )
+
+        # Replace resampled Time (hourly grid) with the ORIGINAL epoch of the selected row
+        if "ROW_ID" not in spacecraft_resampled.columns:
+            raise RuntimeError("ROW_ID missing after resample; cannot recover original epochs.")
+
+        spacecraft_resampled["Time"] = spacecraft_resampled["ROW_ID"].map(rowid_to_time)
+
+        # Optional: if nearest selection causes duplicates in Time, keep them (your choice).
+        # If you want to drop duplicates after mapping, uncomment:
+        # spacecraft_resampled = spacecraft_resampled.drop_duplicates(subset=["Time"]).reset_index(drop=True)
+
+        # Columns we will carry into matched trajectory (everything except ROW_ID)
+        out_cols = [c for c in spacecraft_resampled.columns if c != "ROW_ID"]
+        numeric_cols = [c for c in out_cols if c != "Time"]  # convert these as needed
+
+        for i, spacecraft in enumerate(self.spacecraft):
+            start_index = spacecraft.ini_pos_index
+            original_timestamp = orbit.iloc[start_index]["Time"]
+
+            # Find the index in the resampled table whose ORIGINAL epoch matches the spacecraft start,
+            # otherwise snap to nearest by time.
+            idx_matches = spacecraft_resampled.index[spacecraft_resampled["Time"] == original_timestamp]
+            if len(idx_matches) > 0:
+                new_index = int(idx_matches[0])
+            else:
+                new_index = int((spacecraft_resampled["Time"] - original_timestamp).abs().argmin())
+
+            sc_length = len(spacecraft_resampled)
+
+            # Rotate the entire table (Time + all columns) together
+            ordered_df = pd.concat(
+                [spacecraft_resampled.iloc[new_index:], spacecraft_resampled.iloc[:new_index]],
+                ignore_index=True,
+            )
+
+            # Keep only desired output columns (drops ROW_ID)
+            ordered_df = ordered_df.loc[:, out_cols]
+
+            # Trim or repeat to match asteroid_length
+            if sc_length >= asteroid_length:
+                adjusted_df = ordered_df.iloc[:asteroid_length].copy()
+            else:
+                repeats = asteroid_length // sc_length
+                remainder = asteroid_length % sc_length
+                adjusted_df = pd.concat(
+                    [ordered_df] * repeats + [ordered_df.iloc[:remainder]],
+                    ignore_index=True,
+                )
+
+            # --- Unit conversion ---
+            # Velocities: km/s -> AU/day
+            vel_cols = [c for c in numeric_cols if "(km/s)" in c]
+            if vel_cols:
+                adjusted_df[vel_cols] = adjusted_df[vel_cols] * (SEC_PER_DAY / AU_km)
+
+            # Positions: km -> AU  (exclude km/s)
+            pos_cols = [c for c in numeric_cols if "(km)" in c and "(km/s)" not in c]
+            if pos_cols:
+                adjusted_df[pos_cols] = adjusted_df[pos_cols] / AU_km
+
+            self.spacecraft[i].matched_trajectory_full = adjusted_df
+
+        # Write back cleaned orbit if you want side effects to persist
+        self.orbit = orbit.drop(columns=["ROW_ID"])
+
+        return
 
     def get_index_from_pos(self, position):
         possible_positions = self.orbit.loc[:, ['SUN_EARTH_CO_X_(km)', 'SUN_EARTH_CO_Y_(km)', 'SUN_EARTH_CO_Z_(km)']]

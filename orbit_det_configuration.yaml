@@ -56,7 +56,7 @@ minimoon_column_names: [ "Object id", "Julian Date", "Distance", "Helio q", "Hel
 # minimoon_master_file_path: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb/minimoon_master_new.csv'
 # minimoon_master_file_path: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb_testset/minimoon_master_new_testset.csv'
 minimoon_master_file_path: 'minimoon_files_oorb_testset/minimoon_master_new_testset.csv'
-num_spacecraft: 1
+num_spacecraft: 3
 number_of_runs: 1  # number of runs per minimoon (the formation is reinitiallized each time)
 # number_of_process: 1  # number of processes to use when usen multiprocess for parallel implementation
 output_df_file_name: 'results/initial_tests'
