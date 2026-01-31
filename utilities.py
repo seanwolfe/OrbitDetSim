@@ -3699,6 +3699,8 @@ def get_scs_initial_states_new(detected_pop, config):
         out_df.loc[:, col] = values
 
 
+    out_df.to_csv('test.csv')
+
     return out_df
 
 
