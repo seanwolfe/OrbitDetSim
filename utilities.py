@@ -1757,32 +1757,43 @@ def helio_eclip_to_geo_secr_generic(obj, earth, eps=1e-12, layout="auto",
     - obj dim = 3 → earth may be 3 or 6 (earth velocity ignored)
     - obj dim = 6 → earth MUST be 6 (otherwise ValueError)
 
-    Supported obj shapes:
-      Position: (3,), (M,3), (N,3), (3,N), (M,N,3)
-      State:    (6,), (M,6), (N,6), (6,N), (M,N,6)
+    Supported shapes (fallback, when no explicit hint):
+      obj Position: (3,), (M,3), (N,3), (3,N), (M,N,3)
+      obj State:    (6,), (M,6), (N,6), (6,N), (M,N,6)
 
-    Supported earth shapes:
-      Position: (3,), (3,1), (1,3), (N,3), (3,N)
-      State:    (6,), (6,1), (1,6), (N,6), (6,N)
+      earth Position: (3,), (3,1), (1,3), (N,3), (3,N)
+      earth State:    (6,), (6,1), (1,6), (N,6), (6,N)
 
-    layout resolves ambiguity when obj is (K,dim):
+    layout resolves ambiguity when obj is (K,dim) (fallback mode):
       - "batch": interpret as (M,dim) objects at one time (N=1)
       - "time" : interpret as (N,dim) time series for one object (M=1)
       - "auto" : infer from earth shape when possible, else default to "batch"
 
-    NEW: obj_hint / earth_hint (optional) to resolve 2D edge cases cleanly.
-      Accepts things like:
-        "(batch, 6)", "(time, 3)", "(6, batch)", "(time, batch, 6)" (order doesn't matter)
-      Rules:
-        - Any occurrence of 'batch' or 'time' sets the interpretation for ambiguous (K,dim) inputs.
-        - Any occurrence of 3 or 6 forces the dimensionality (position vs state) if ambiguous.
-        - For truly square ambiguous cases like (3,3) or (6,6), hints without an axis-spec still
-          can't disambiguate; we raise a ValueError rather than guessing.
+    NEW (explicit structure hints):
+      You can explicitly define the axis order using tokens (any permutation):
+        - 'batch'   : M axis (multiple objects / spacecraft)
+        - 'time'    : N axis (time series)
+        - 'position': dim=3
+        - 'state'   : dim=6
+        - 3 or 6    : dim override (optional)
 
-    Returns: same layout as obj.
+      Examples (obj):
+        obj_hint=('batch','position')     -> expects obj shape (M,3)
+        obj_hint=('position','batch')     -> expects obj shape (3,M)
+        obj_hint=('batch','state')        -> expects obj shape (M,6)
+        obj_hint=('time','state')         -> expects obj shape (N,6)
+        obj_hint=('state','time')         -> expects obj shape (6,N)
+        obj_hint=('time','state','batch') -> expects obj shape (N,6,M)
+        obj_hint=('batch','time','state') -> expects obj shape (M,N,6)
+        obj_hint=('state','batch','time') -> expects obj shape (6,M,N)
+        etc.
+
+      Examples (earth) — IMPORTANT:
+        In this function Earth is TIME-indexed only (no 'batch' axis supported).
+        So earth_hint may include 'time' and 'position'/'state' (or 3/6) in any permutation.
+
+    Returns: same layout as obj; if obj_hint was used, returns in that hinted axis order.
     """
-    import numpy as np
-
     if layout not in ("auto", "batch", "time"):
         raise ValueError("layout must be one of {'auto','batch','time'}")
 
@@ -1790,66 +1801,88 @@ def helio_eclip_to_geo_secr_generic(obj, earth, eps=1e-12, layout="auto",
     E = np.asarray(earth, dtype=float)
 
     # -----------------------
-    # Hint parsing
+    # Hint parsing: explicit axis order
     # -----------------------
-    def _parse_hint(h):
+    def _parse_struct_hint(h, name, allow_batch=True):
         """
-        Returns (mode, forced_dim) where:
-          mode in {None,'batch','time'}
-          forced_dim in {None,3,6}
-        Accepts tuple/list/set or string like "(time, batch, 6)".
+        Returns (order, dim) where:
+          order: list like ['batch','dim'] or ['time','dim','batch'] (axis order)
+          dim: 3 or 6
         """
         if h is None:
             return None, None
 
-        tokens = None
         if isinstance(h, (tuple, list, set)):
             tokens = list(h)
         elif isinstance(h, str):
             s = h.strip()
-            # remove outer parentheses if present
             if s.startswith("(") and s.endswith(")"):
                 s = s[1:-1]
-            # split on commas
             tokens = [t.strip() for t in s.split(",") if t.strip()]
         else:
-            raise ValueError("hint must be None, a tuple/list/set, or a string like '(batch,6)'")
+            raise ValueError(f"{name}_hint must be None, a tuple/list/set, or a string like '(time,state,batch)'")
 
-        mode = None
-        forced_dim = None
+        order = []
+        dim = None
+
+        def _add_axis(ax):
+            if ax in order:
+                raise ValueError(f"{name}_hint repeats axis '{ax}'. Got {h}.")
+            order.append(ax)
 
         for t in tokens:
-            # allow ints
             if isinstance(t, (int, np.integer)):
-                if int(t) in (3, 6):
-                    forced_dim = int(t)
+                iv = int(t)
+                if iv in (3, 6):
+                    dim = iv
+                    if "dim" not in order:
+                        _add_axis("dim")
                 else:
-                    raise ValueError(f"Invalid hint dim {t} (use 3 or 6)")
+                    raise ValueError(f"{name}_hint invalid dim {t} (use 3 or 6)")
                 continue
 
-            # strings
             ts = str(t).strip().lower()
-            if ts in ("batch", "time"):
-                if mode is None:
-                    mode = ts
-                elif mode != ts:
-                    raise ValueError(f"Conflicting hint modes: got both '{mode}' and '{ts}'")
+            if ts == "batch":
+                if not allow_batch:
+                    raise ValueError(f"{name}_hint may not include 'batch' (earth cannot be batch-indexed here).")
+                _add_axis("batch")
+            elif ts == "time":
+                _add_axis("time")
+            elif ts in ("position", "pos"):
+                if dim is not None and dim != 3:
+                    raise ValueError(f"{name}_hint conflicts: both state(6) and position(3) implied.")
+                dim = 3
+                _add_axis("dim")
+            elif ts in ("state", "st"):
+                if dim is not None and dim != 6:
+                    raise ValueError(f"{name}_hint conflicts: both position(3) and state(6) implied.")
+                dim = 6
+                _add_axis("dim")
             elif ts in ("3", "6"):
-                forced_dim = int(ts)
+                dim = int(ts)
+                if "dim" not in order:
+                    _add_axis("dim")
             elif ts == "":
                 continue
             else:
-                raise ValueError(f"Unrecognized hint token '{t}'. Use 'batch', 'time', 3, or 6.")
+                raise ValueError(
+                    f"{name}_hint token '{t}' unrecognized. Use 'batch','time','position','state',3,6."
+                )
 
-        return mode, forced_dim
+        if "dim" not in order:
+            raise ValueError(f"{name}_hint must include 'position'/'state' (or 3/6). Got {h}.")
+        if dim not in (3, 6):
+            raise ValueError(f"{name}_hint must resolve dim to 3 or 6. Got {h}.")
 
-    obj_mode_hint, obj_dim_hint = _parse_hint(obj_hint)
-    earth_mode_hint, earth_dim_hint = _parse_hint(earth_hint)
+        return order, dim
+
+    obj_order_hint, obj_dim_hint = _parse_struct_hint(obj_hint, "obj", allow_batch=True)
+    earth_order_hint, earth_dim_hint = _parse_struct_hint(earth_hint, "earth", allow_batch=False) if earth_hint is not None else (None, None)
 
     # -----------------------
-    # Infer dim (3 or 6) robustly
+    # Dim inference (fallback when no explicit hint)
     # -----------------------
-    def infer_dim(A, name, forced_dim=None):
+    def infer_dim_fallback(A, name):
         if A.ndim == 1:
             if A.shape in [(3,), (6,)]:
                 return A.shape[0]
@@ -1857,42 +1890,23 @@ def helio_eclip_to_geo_secr_generic(obj, earth, eps=1e-12, layout="auto",
 
         if A.ndim == 2:
             r, c = A.shape
-
-            # If user forces dim, enforce it strictly.
-            if forced_dim is not None:
-                if forced_dim not in (3, 6):
-                    raise ValueError(f"{name} forced_dim must be 3 or 6")
-                if (r != forced_dim) and (c != forced_dim):
-                    raise ValueError(
-                        f"{name} hint forces dim={forced_dim} but shape is {A.shape}"
-                    )
-                return forced_dim
-
             r_is = r in (3, 6)
             c_is = c in (3, 6)
 
-            # Unambiguous: only one axis matches {3,6}
             if r_is and not c_is:
                 return r
             if c_is and not r_is:
                 return c
-
-            # Ambiguous: both axes match {3,6}
             if r_is and c_is:
-                # Prefer 6 if present (state beats position) for cases like (3,6) or (6,3)
-                if (r == 6) or (c == 6):
-                    return 6
-                # (3,3) is truly ambiguous without more info
-                return 3  # still ambiguous structurally, but dim itself is 3
+                return 6 if (r == 6 or c == 6) else 3
 
-        if A.ndim == 3:
-            if A.shape[2] in (3, 6):
-                return A.shape[2]
+        if A.ndim == 3 and A.shape[-1] in (3, 6):
+            return A.shape[-1]
 
         raise ValueError(f"Could not infer dim for {name} with shape {A.shape}")
 
-    obj_dim = infer_dim(O, "obj", obj_dim_hint)
-    earth_dim = infer_dim(E, "earth", earth_dim_hint)
+    obj_dim = obj_dim_hint if obj_dim_hint is not None else infer_dim_fallback(O, "obj")
+    earth_dim = earth_dim_hint if earth_dim_hint is not None else infer_dim_fallback(E, "earth")
 
     # --- STRICT RULE ---
     if obj_dim == 6 and earth_dim == 3:
@@ -1902,9 +1916,157 @@ def helio_eclip_to_geo_secr_generic(obj, earth, eps=1e-12, layout="auto",
         )
 
     # -----------------------
-    # Normalize earth to (N,earth_dim)
+    # Normalize obj to internal (M,N,obj_dim) and remember how to restore
     # -----------------------
-    def earth_to_Nd(Earr, N, dim):
+    def _normalize_obj_with_hint(A, order, dim):
+        """
+        Strictly interpret obj using explicit axis order -> return (M,N,dim).
+        Missing 'batch' or 'time' axes are treated as singleton.
+        Also returns restore_info to put output back into the same hinted axis order.
+        """
+        if A.ndim == 1:
+            if A.shape != (dim,):
+                raise ValueError(f"obj expected ({dim},), got {A.shape}")
+            A_int = A[None, None, :]
+            restore = {"used_hint": True, "order": ["dim"], "orig_ndim": 1}
+            return A_int, restore
+
+        if A.ndim != len(order):
+            raise ValueError(f"obj_hint implies {len(order)}D but obj has ndim={A.ndim}, shape={A.shape}")
+
+        ax_dim = order.index("dim")
+        ax_batch = order.index("batch") if "batch" in order else None
+        ax_time  = order.index("time")  if "time"  in order else None
+
+        if A.shape[ax_dim] != dim:
+            raise ValueError(f"obj dim axis length {A.shape[ax_dim]} does not match hinted dim={dim}.")
+
+        axes = []
+        if ax_batch is not None:
+            axes.append(ax_batch)
+        if ax_time is not None:
+            axes.append(ax_time)
+        axes.append(ax_dim)
+
+        A_perm = np.transpose(A, axes=axes)
+
+        if ax_batch is not None and ax_time is not None:
+            A_int = A_perm                  # (M,N,dim)
+        elif ax_batch is not None and ax_time is None:
+            A_int = A_perm[:, None, :]      # (M,1,dim)
+        elif ax_batch is None and ax_time is not None:
+            A_int = A_perm[None, :, :]      # (1,N,dim)
+        else:
+            A_int = A_perm[None, None, :]   # (1,1,dim)
+
+        restore = {"used_hint": True, "order": order, "orig_ndim": A.ndim}
+        return A_int, restore
+
+    def _choose_mode_for_Kdim(K):
+        # fallback for (K,dim) inputs without hints
+        if layout in ("batch", "time"):
+            return layout
+
+        # layout == auto: infer from earth shape if possible
+        earth_time_like = (
+            E.ndim == 2 and (
+                (E.shape[1] == earth_dim and E.shape[0] == K) or
+                (E.shape[0] == earth_dim and E.shape[1] == K)
+            )
+        )
+        return "time" if earth_time_like else "batch"
+
+    if obj_order_hint is not None:
+        O_int, obj_restore = _normalize_obj_with_hint(O, obj_order_hint, obj_dim)
+        out_style = ("hinted", obj_restore)
+    else:
+        # ---- fallback normalization (your original behavior) ----
+        if O.ndim == 1:
+            if O.shape != (obj_dim,):
+                raise ValueError(f"obj expected ({obj_dim},), got {O.shape}")
+            O_int = O[None, None, :]
+            out_style = ("single",)
+
+        elif O.ndim == 2:
+            if O.shape == (obj_dim, 1):
+                O_int = O[:, 0][None, None, :]
+                out_style = ("single",)
+
+            elif O.shape == (1, obj_dim):
+                O_int = O[0, :][None, None, :]
+                out_style = ("single",)
+
+            elif O.shape[0] == obj_dim and O.shape[1] != obj_dim:  # (dim,N)
+                O_int = O.T[None, :, :]
+                out_style = ("dimxN",)
+
+            elif O.shape[1] == obj_dim and O.shape[0] != obj_dim:  # (K,dim)
+                K = O.shape[0]
+                mode = _choose_mode_for_Kdim(K)
+                if mode == "batch":
+                    O_int = O[:, None, :]
+                    out_style = ("Mxdim",)
+                else:
+                    O_int = O[None, :, :]
+                    out_style = ("Nxdim_time",)
+
+            elif O.shape[0] == obj_dim and O.shape[1] == obj_dim:
+                raise ValueError(
+                    f"Ambiguous obj shape {O.shape}. Reshape explicitly or pass obj_hint."
+                )
+            else:
+                raise ValueError(f"obj unsupported shape {O.shape}")
+
+        elif O.ndim == 3:
+            if O.shape[2] != obj_dim:
+                raise ValueError(f"obj expected (M,N,{obj_dim}), got {O.shape}")
+            O_int = O
+            out_style = ("MNdim",)
+
+        else:
+            raise ValueError(f"obj unsupported ndim={O.ndim}")
+
+    M, N, _ = O_int.shape
+
+    # -----------------------
+    # Normalize earth to (N,earth_dim) (time-indexed only)
+    # -----------------------
+    def _normalize_earth_to_Nd(Earr, N, dim, order_hint=None):
+        """
+        Earth is time-indexed only: output is (N,dim).
+        If order_hint is provided, interpret strictly by that axis order (no 'batch').
+        """
+        if order_hint is not None:
+            if "batch" in order_hint:
+                raise ValueError("earth_hint may not include 'batch' in this function.")
+
+            if Earr.ndim == 1:
+                if Earr.shape != (dim,):
+                    raise ValueError(f"earth expected ({dim},), got {Earr.shape}")
+                return np.repeat(Earr[None, :], N, axis=0)
+
+            if Earr.ndim != len(order_hint):
+                raise ValueError(f"earth_hint implies {len(order_hint)}D but earth has ndim={Earr.ndim}, shape={Earr.shape}")
+
+            ax_dim = order_hint.index("dim")
+            ax_time = order_hint.index("time") if "time" in order_hint else None
+
+            if Earr.shape[ax_dim] != dim:
+                raise ValueError(f"earth dim axis length {Earr.shape[ax_dim]} does not match hinted dim={dim}.")
+
+            if ax_time is None:
+                squeezed = np.squeeze(Earr)
+                if squeezed.shape != (dim,):
+                    raise ValueError(f"earth constant form must squeeze to ({dim},), got {squeezed.shape}")
+                return np.repeat(squeezed[None, :], N, axis=0)
+
+            # transpose to (time,dim)
+            E_td = np.transpose(Earr, axes=[ax_time, ax_dim])
+            if E_td.shape[0] != N:
+                raise ValueError(f"earth has N={E_td.shape[0]} but obj has N={N}")
+            return E_td
+
+        # ---- fallback (your original earth_to_Nd) ----
         if Earr.ndim == 1:
             if Earr.shape != (dim,):
                 raise ValueError(f"earth expected ({dim},), got {Earr.shape}")
@@ -1915,117 +2077,34 @@ def helio_eclip_to_geo_secr_generic(obj, earth, eps=1e-12, layout="auto",
                 return np.repeat(Earr[:, 0][None, :], N, axis=0)
             if Earr.shape == (1, dim):
                 return np.repeat(Earr[0, :][None, :], N, axis=0)
-            if Earr.shape[1] == dim:  # (N,dim)
+            if Earr.shape[1] == dim:
                 if Earr.shape[0] != N:
                     raise ValueError(f"earth has N={Earr.shape[0]} but obj has N={N}")
                 return Earr
-            if Earr.shape[0] == dim:  # (dim,N)
+            if Earr.shape[0] == dim:
                 if Earr.shape[1] != N:
                     raise ValueError(f"earth has N={Earr.shape[1]} but obj has N={N}")
                 return Earr.T
 
         raise ValueError(f"earth unsupported shape {Earr.shape} for dim={dim}")
 
-    # -----------------------
-    # Normalize obj to internal (M,N,obj_dim)
-    # -----------------------
-    def _choose_mode_for_Kdim(K):
-        """
-        Decide whether (K,dim) means batch (M=K,N=1) or time (M=1,N=K).
-        Priority:
-          1) obj_hint mode if provided
-          2) layout if not auto
-          3) auto heuristic using earth shape if possible
-          4) default batch
-        """
-        if obj_mode_hint in ("batch", "time"):
-            return obj_mode_hint
-        if layout in ("batch", "time"):
-            return layout
+    E_N = _normalize_earth_to_Nd(E, N, earth_dim, earth_order_hint)
 
-        # layout == auto: try to infer from earth shape if it looks time-like with length K
-        earth_time_like = (
-                E.ndim == 2 and (
-                (E.shape[1] == earth_dim and E.shape[0] == K) or  # (K,dim)
-                (E.shape[0] == earth_dim and E.shape[1] == K)  # (dim,K)
-        )
-        )
-        return "time" if earth_time_like else "batch"
-
-    if O.ndim == 1:
-        if O.shape != (obj_dim,):
-            raise ValueError(f"obj expected ({obj_dim},), got {O.shape}")
-        O_int = O[None, None, :]
-        out_style = ("single",)
-
-    elif O.ndim == 2:
-        # singleton columns/rows -> single state/pos
-        if O.shape == (obj_dim, 1):
-            O_int = O[:, 0][None, None, :]
-            out_style = ("single",)
-
-        elif O.shape == (1, obj_dim):
-            O_int = O[0, :][None, None, :]
-            out_style = ("single",)
-
-        # (dim,N) canonical
-        elif O.shape[0] == obj_dim and O.shape[1] != obj_dim:
-            O_int = O.T[None, :, :]  # (1,N,dim)
-            out_style = ("dimxN",)
-
-        # (K,dim) canonical/ambiguous
-        elif O.shape[1] == obj_dim and O.shape[0] != obj_dim:
-            K = O.shape[0]
-            mode = _choose_mode_for_Kdim(K)
-            if mode == "batch":
-                O_int = O[:, None, :]  # (M,1,dim)
-                out_style = ("Mxdim",)
-            else:
-                O_int = O[None, :, :]  # (1,N,dim)
-                out_style = ("Nxdim_time",)
-
-        # Hard ambiguous squares like (3,3) or (6,6) or cases where both axes == obj_dim
-        elif O.shape[0] == obj_dim and O.shape[1] == obj_dim:
-            raise ValueError(
-                f"Ambiguous obj shape {O.shape}. This could be (dim,N) or (K,dim) with K=dim. "
-                f"Reshape to (dim,N) or (K,dim) explicitly (e.g., add a singleton axis), "
-                f"or pass obj as 3D (M,N,dim)."
-            )
-        else:
-            raise ValueError(f"obj unsupported shape {O.shape}")
-
-    elif O.ndim == 3:
-        if O.shape[2] != obj_dim:
-            raise ValueError(f"obj expected (M,N,{obj_dim}), got {O.shape}")
-        O_int = O
-        out_style = ("MNdim",)
-
-    else:
-        raise ValueError(f"obj unsupported ndim={O.ndim}")
-
-    M, N, _ = O_int.shape
-
-    # Earth normalized to (N, earth_dim)
-    E_N = earth_to_Nd(E, N, earth_dim)
-
-    # Build Earth vector compatible with obj_dim
+    # For obj_dim==3, allow earth_dim==6 but ignore vel; for obj_dim==6 earth_dim==6 guaranteed
     if obj_dim == 3:
-        # use only Earth position; ignore Earth velocity even if present
-        E_use = E_N[:, :3]  # (N,3)
+        E_use = E_N[:, :3]
     else:
-        # obj_dim==6 implies earth_dim==6 (strict)
-        E_use = E_N  # (N,6)
+        E_use = E_N
 
-    # --- core math ---
-    rE = E_use[:, :3]  # (N,3)
+    rE = E_use[:, :3]                    # (N,3)
     vE = E_use[:, 3:] if obj_dim == 6 else None
 
-    rO = O_int[:, :, :3]  # (M,N,3)
-    rel_r = rO - rE[None, :, :]  # (M,N,3)
+    rO = O_int[:, :, :3]                 # (M,N,3)
+    rel_r = rO - rE[None, :, :]          # (M,N,3)
 
     if obj_dim == 6:
-        vO = O_int[:, :, 3:]  # (M,N,3)
-        rel_v = vO - vE[None, :, :]  # (M,N,3)
+        vO = O_int[:, :, 3:]
+        rel_v = vO - vE[None, :, :]
 
     # rotation angle from Earth->Sun direction (same convention as your original)
     angles = np.arctan2(-rE[:, 1], -rE[:, 0])  # (N,)
@@ -2033,19 +2112,17 @@ def helio_eclip_to_geo_secr_generic(obj, earth, eps=1e-12, layout="auto",
     s = np.sin(-angles)
 
     R = np.zeros((N, 3, 3), dtype=float)
-    R[:, 0, 0] = c;
+    R[:, 0, 0] = c
     R[:, 0, 1] = -s
-    R[:, 1, 0] = s;
+    R[:, 1, 0] = s
     R[:, 1, 1] = c
     R[:, 2, 2] = 1.0
 
-    # position in rotating frame
-    r_prime = np.einsum('nij,mnj->mni', R, rel_r)  # (M,N,3)
+    r_prime = np.einsum("nij,mnj->mni", R, rel_r)  # (M,N,3)
 
     if obj_dim == 3:
         out_int = r_prime
     else:
-        # omega magnitude from Earth motion
         rE_norm2 = np.sum(rE * rE, axis=1)
         rE_norm2 = np.maximum(rE_norm2, eps)
         omega_mag = np.linalg.norm(np.cross(rE, vE), axis=1) / rE_norm2  # (N,)
@@ -2053,15 +2130,57 @@ def helio_eclip_to_geo_secr_generic(obj, earth, eps=1e-12, layout="auto",
         omega = np.zeros((N, 3), dtype=float)
         omega[:, 2] = omega_mag
 
-        v_rel_rot = np.einsum('nij,mnj->mni', R, rel_v)  # (M,N,3)
-        omega_prime = np.einsum('nij,nj->ni', R, omega)  # (N,3)
+        v_rel_rot = np.einsum("nij,mnj->mni", R, rel_v)         # (M,N,3)
+        omega_prime = np.einsum("nij,nj->ni", R, omega)         # (N,3)
 
-        v_rot = np.cross(omega_prime[None, :, :], r_prime)  # (M,N,3)
-        v_prime = v_rel_rot - v_rot  # (M,N,3)
+        v_rot = np.cross(omega_prime[None, :, :], r_prime)      # (M,N,3)
+        v_prime = v_rel_rot - v_rot                              # (M,N,3)
 
-        out_int = np.concatenate([r_prime, v_prime], axis=2)  # (M,N,6)
+        out_int = np.concatenate([r_prime, v_prime], axis=2)     # (M,N,6)
 
-    # --- restore original layout ---
+    # -----------------------
+    # Restore original obj layout
+    # -----------------------
+    def _restore_obj_from_hint(out_int_MNdim, restore):
+        order = restore["order"]
+        orig_ndim = restore["orig_ndim"]
+
+        if orig_ndim == 1:
+            return out_int_MNdim[0, 0, :]
+
+        have_batch = "batch" in order
+        have_time  = "time"  in order
+
+        A = out_int_MNdim  # (M,N,dim)
+
+        if not have_batch:
+            A = A[0, :, :]           # (N,dim)
+        if not have_time:
+            if have_batch:
+                A = A[:, 0, :]       # (M,dim)
+            else:
+                A = A[0, :]          # (dim,)
+
+        present = []
+        if have_batch:
+            present.append("batch")
+        if have_time:
+            present.append("time")
+        present.append("dim")
+
+        if A.ndim == 1:
+            return A
+
+        if set(present) != set(order):
+            raise RuntimeError(f"Internal restore mismatch: present={present}, order={order}")
+
+        perm = [present.index(ax) for ax in order]
+        return np.transpose(A, axes=perm)
+
+    if out_style[0] == "hinted":
+        return _restore_obj_from_hint(out_int, out_style[1])
+
+    # fallback restore (your original)
     if out_style[0] == "single":
         return out_int[0, 0, :]
     if out_style[0] == "Mxdim":
@@ -2092,32 +2211,43 @@ def geo_secr_to_helio_eclip_generic(obj, earth, eps=1e-12, layout="auto",
     - obj dim = 3 → earth may be 3 or 6 (earth velocity ignored)
     - obj dim = 6 → earth MUST be 6 (otherwise ValueError)
 
-    Supported obj shapes:
-      Position: (3,), (M,3), (N,3), (3,N), (M,N,3)
-      State:    (6,), (M,6), (N,6), (6,N), (M,N,6)
+    Supported shapes (fallback, when no explicit hint):
+      obj Position: (3,), (M,3), (N,3), (3,N), (M,N,3)
+      obj State:    (6,), (M,6), (N,6), (6,N), (M,N,6)
 
-    Supported earth shapes:
-      Position: (3,), (3,1), (1,3), (N,3), (3,N)
-      State:    (6,), (6,1), (1,6), (N,6), (6,N)
+      earth Position: (3,), (3,1), (1,3), (N,3), (3,N)
+      earth State:    (6,), (6,1), (1,6), (N,6), (6,N)
 
-    layout resolves ambiguity when obj is (K,dim):
+    layout resolves ambiguity when obj is (K,dim) (fallback mode):
       - "batch": interpret as (M,dim) objects at one time (N=1)
       - "time" : interpret as (N,dim) time series for one object (M=1)
       - "auto" : infer from earth shape when possible, else default to "batch"
 
-    NEW: obj_hint / earth_hint (optional) to resolve 2D edge cases cleanly.
-      Accepts things like:
-        "(batch, 6)", "(time, 3)", "(6, batch)", "(time, batch, 6)" (order doesn't matter)
-      Rules:
-        - Any occurrence of 'batch' or 'time' sets the interpretation for ambiguous (K,dim) inputs.
-        - Any occurrence of 3 or 6 forces the dimensionality (position vs state) if ambiguous.
-        - For truly square ambiguous cases like (3,3) or (6,6), hints without an axis-spec still
-          can't disambiguate; we raise a ValueError rather than guessing.
+    NEW (explicit structure hints):
+      You can explicitly define the axis order using tokens (any permutation):
+        - 'batch'   : M axis (multiple objects / spacecraft)
+        - 'time'    : N axis (time series)
+        - 'position': dim=3
+        - 'state'   : dim=6
+        - 3 or 6    : dim override (optional)
 
-    Returns: same layout as obj.
+      Examples (obj):
+        obj_hint=('batch','position')     -> expects obj shape (M,3)
+        obj_hint=('position','batch')     -> expects obj shape (3,M)
+        obj_hint=('batch','state')        -> expects obj shape (M,6)
+        obj_hint=('time','state')         -> expects obj shape (N,6)
+        obj_hint=('state','time')         -> expects obj shape (6,N)
+        obj_hint=('time','state','batch') -> expects obj shape (N,6,M)
+        obj_hint=('batch','time','state') -> expects obj shape (M,N,6)
+        obj_hint=('state','batch','time') -> expects obj shape (6,M,N)
+        etc.
+
+      Examples (earth) — IMPORTANT:
+        Earth is treated as TIME-indexed only in this function (no 'batch' axis supported here).
+        So earth_hint may include 'time' and 'position'/'state' (or 3/6) in any permutation.
+
+    Returns: same layout as obj; if obj_hint was used, returns in that hinted axis order.
     """
-    import numpy as np
-
     if layout not in ("auto", "batch", "time"):
         raise ValueError("layout must be one of {'auto','batch','time'}")
 
@@ -2125,9 +2255,14 @@ def geo_secr_to_helio_eclip_generic(obj, earth, eps=1e-12, layout="auto",
     E = np.asarray(earth, dtype=float)
 
     # -----------------------
-    # Hint parsing
+    # Hint parsing: explicit axis order
     # -----------------------
-    def _parse_hint(h):
+    def _parse_struct_hint(h, name, allow_batch=True):
+        """
+        Returns (order, dim) where:
+          order: list like ['batch','dim'] or ['time','dim','batch'] (axis order)
+          dim: 3 or 6
+        """
         if h is None:
             return None, None
 
@@ -2139,40 +2274,69 @@ def geo_secr_to_helio_eclip_generic(obj, earth, eps=1e-12, layout="auto",
                 s = s[1:-1]
             tokens = [t.strip() for t in s.split(",") if t.strip()]
         else:
-            raise ValueError("hint must be None, a tuple/list/set, or a string like '(batch,6)'")
+            raise ValueError(f"{name}_hint must be None, a tuple/list/set, or a string like '(time,state,batch)'")
 
-        mode = None
-        forced_dim = None
+        order = []
+        dim = None
+
+        def _add_axis(ax):
+            if ax in order:
+                raise ValueError(f"{name}_hint repeats axis '{ax}'. Got {h}.")
+            order.append(ax)
+
         for t in tokens:
             if isinstance(t, (int, np.integer)):
-                if int(t) in (3, 6):
-                    forced_dim = int(t)
+                iv = int(t)
+                if iv in (3, 6):
+                    dim = iv
+                    if "dim" not in order:
+                        _add_axis("dim")
                 else:
-                    raise ValueError(f"Invalid hint dim {t} (use 3 or 6)")
+                    raise ValueError(f"{name}_hint invalid dim {t} (use 3 or 6)")
                 continue
 
             ts = str(t).strip().lower()
-            if ts in ("batch", "time"):
-                if mode is None:
-                    mode = ts
-                elif mode != ts:
-                    raise ValueError(f"Conflicting hint modes: got both '{mode}' and '{ts}'")
+            if ts == "batch":
+                if not allow_batch:
+                    raise ValueError(f"{name}_hint may not include 'batch' (earth cannot be batch-indexed here).")
+                _add_axis("batch")
+            elif ts == "time":
+                _add_axis("time")
+            elif ts in ("position", "pos"):
+                if dim is not None and dim != 3:
+                    raise ValueError(f"{name}_hint conflicts: both state(6) and position(3) implied.")
+                dim = 3
+                _add_axis("dim")
+            elif ts in ("state", "st"):
+                if dim is not None and dim != 6:
+                    raise ValueError(f"{name}_hint conflicts: both position(3) and state(6) implied.")
+                dim = 6
+                _add_axis("dim")
             elif ts in ("3", "6"):
-                forced_dim = int(ts)
+                dim = int(ts)
+                if "dim" not in order:
+                    _add_axis("dim")
             elif ts == "":
                 continue
             else:
-                raise ValueError(f"Unrecognized hint token '{t}'. Use 'batch', 'time', 3, or 6.")
+                raise ValueError(
+                    f"{name}_hint token '{t}' unrecognized. Use 'batch','time','position','state',3,6."
+                )
 
-        return mode, forced_dim
+        if "dim" not in order:
+            raise ValueError(f"{name}_hint must include 'position'/'state' (or 3/6). Got {h}.")
+        if dim not in (3, 6):
+            raise ValueError(f"{name}_hint must resolve dim to 3 or 6. Got {h}.")
 
-    obj_mode_hint, obj_dim_hint = _parse_hint(obj_hint)
-    earth_mode_hint, earth_dim_hint = _parse_hint(earth_hint)
+        return order, dim
+
+    obj_order_hint, obj_dim_hint = _parse_struct_hint(obj_hint, "obj", allow_batch=True)
+    earth_order_hint, earth_dim_hint = _parse_struct_hint(earth_hint, "earth", allow_batch=False) if earth_hint is not None else (None, None)
 
     # -----------------------
-    # Infer dim (3 or 6) robustly
+    # Dim inference (fallback when no explicit hint)
     # -----------------------
-    def infer_dim(A, name, forced_dim=None):
+    def infer_dim_fallback(A, name):
         if A.ndim == 1:
             if A.shape in [(3,), (6,)]:
                 return A.shape[0]
@@ -2180,14 +2344,6 @@ def geo_secr_to_helio_eclip_generic(obj, earth, eps=1e-12, layout="auto",
 
         if A.ndim == 2:
             r, c = A.shape
-
-            if forced_dim is not None:
-                if forced_dim not in (3, 6):
-                    raise ValueError(f"{name} forced_dim must be 3 or 6")
-                if (r != forced_dim) and (c != forced_dim):
-                    raise ValueError(f"{name} hint forces dim={forced_dim} but shape is {A.shape}")
-                return forced_dim
-
             r_is = r in (3, 6)
             c_is = c in (3, 6)
 
@@ -2195,19 +2351,16 @@ def geo_secr_to_helio_eclip_generic(obj, earth, eps=1e-12, layout="auto",
                 return r
             if c_is and not r_is:
                 return c
-
             if r_is and c_is:
-                if (r == 6) or (c == 6):
-                    return 6
-                return 3
+                return 6 if (r == 6 or c == 6) else 3
 
-        if A.ndim == 3 and A.shape[2] in (3, 6):
-            return A.shape[2]
+        if A.ndim == 3 and A.shape[-1] in (3, 6):
+            return A.shape[-1]
 
         raise ValueError(f"Could not infer dim for {name} with shape {A.shape}")
 
-    obj_dim = infer_dim(O, "obj", obj_dim_hint)
-    earth_dim = infer_dim(E, "earth", earth_dim_hint)
+    obj_dim = obj_dim_hint if obj_dim_hint is not None else infer_dim_fallback(O, "obj")
+    earth_dim = earth_dim_hint if earth_dim_hint is not None else infer_dim_fallback(E, "earth")
 
     # --- STRICT RULE ---
     if obj_dim == 6 and earth_dim == 3:
@@ -2217,9 +2370,157 @@ def geo_secr_to_helio_eclip_generic(obj, earth, eps=1e-12, layout="auto",
         )
 
     # -----------------------
-    # Normalize earth to (N,earth_dim)
+    # Normalize obj (SECR) to internal (M,N,obj_dim) and remember how to restore
     # -----------------------
-    def earth_to_Nd(Earr, N, dim):
+    def _normalize_obj_with_hint(A, order, dim):
+        """
+        Strictly interpret obj using explicit axis order -> return (M,N,dim).
+        Missing 'batch' or 'time' axes are treated as singleton.
+        Also returns restore_info to put output back into the same hinted axis order.
+        """
+        if A.ndim == 1:
+            if A.shape != (dim,):
+                raise ValueError(f"obj expected ({dim},), got {A.shape}")
+            A_int = A[None, None, :]
+            restore = {"used_hint": True, "order": ["dim"], "orig_ndim": 1}
+            return A_int, restore
+
+        if A.ndim != len(order):
+            raise ValueError(f"obj_hint implies {len(order)}D but obj has ndim={A.ndim}, shape={A.shape}")
+
+        ax_dim = order.index("dim")
+        ax_batch = order.index("batch") if "batch" in order else None
+        ax_time  = order.index("time")  if "time"  in order else None
+
+        if A.shape[ax_dim] != dim:
+            raise ValueError(f"obj dim axis length {A.shape[ax_dim]} does not match hinted dim={dim}.")
+
+        axes = []
+        if ax_batch is not None:
+            axes.append(ax_batch)
+        if ax_time is not None:
+            axes.append(ax_time)
+        axes.append(ax_dim)
+
+        A_perm = np.transpose(A, axes=axes)
+
+        if ax_batch is not None and ax_time is not None:
+            A_int = A_perm                  # (M,N,dim)
+        elif ax_batch is not None and ax_time is None:
+            A_int = A_perm[:, None, :]      # (M,1,dim)
+        elif ax_batch is None and ax_time is not None:
+            A_int = A_perm[None, :, :]      # (1,N,dim)
+        else:
+            A_int = A_perm[None, None, :]   # (1,1,dim)
+
+        restore = {"used_hint": True, "order": order, "orig_ndim": A.ndim}
+        return A_int, restore
+
+    def _choose_mode_for_Kdim(K):
+        # fallback for (K,dim) inputs without hints
+        if layout in ("batch", "time"):
+            return layout
+
+        # layout == auto: infer from earth shape if possible
+        earth_time_like = (
+            E.ndim == 2 and (
+                (E.shape[1] == earth_dim and E.shape[0] == K) or
+                (E.shape[0] == earth_dim and E.shape[1] == K)
+            )
+        )
+        return "time" if earth_time_like else "batch"
+
+    if obj_order_hint is not None:
+        O_int, obj_restore = _normalize_obj_with_hint(O, obj_order_hint, obj_dim)
+        out_style = ("hinted", obj_restore)
+    else:
+        # ---- fallback normalization (your original behavior) ----
+        if O.ndim == 1:
+            if O.shape != (obj_dim,):
+                raise ValueError(f"obj expected ({obj_dim},), got {O.shape}")
+            O_int = O[None, None, :]
+            out_style = ("single",)
+
+        elif O.ndim == 2:
+            if O.shape == (obj_dim, 1):
+                O_int = O[:, 0][None, None, :]
+                out_style = ("single",)
+
+            elif O.shape == (1, obj_dim):
+                O_int = O[0, :][None, None, :]
+                out_style = ("single",)
+
+            elif O.shape[0] == obj_dim and O.shape[1] != obj_dim:  # (dim,N)
+                O_int = O.T[None, :, :]
+                out_style = ("dimxN",)
+
+            elif O.shape[1] == obj_dim and O.shape[0] != obj_dim:  # (K,dim)
+                K = O.shape[0]
+                mode = _choose_mode_for_Kdim(K)
+                if mode == "batch":
+                    O_int = O[:, None, :]
+                    out_style = ("Mxdim",)
+                else:
+                    O_int = O[None, :, :]
+                    out_style = ("Nxdim_time",)
+
+            elif O.shape[0] == obj_dim and O.shape[1] == obj_dim:
+                raise ValueError(
+                    f"Ambiguous obj shape {O.shape}. Reshape explicitly or pass obj_hint."
+                )
+            else:
+                raise ValueError(f"obj unsupported shape {O.shape}")
+
+        elif O.ndim == 3:
+            if O.shape[2] != obj_dim:
+                raise ValueError(f"obj expected (M,N,{obj_dim}), got {O.shape}")
+            O_int = O
+            out_style = ("MNdim",)
+
+        else:
+            raise ValueError(f"obj unsupported ndim={O.ndim}")
+
+    M, N, _ = O_int.shape
+
+    # -----------------------
+    # Normalize earth to (N,earth_dim) (time-indexed only)
+    # -----------------------
+    def _normalize_earth_to_Nd(Earr, N, dim, order_hint=None):
+        """
+        Earth is time-indexed only: output is (N,dim).
+        If order_hint is provided, interpret strictly by that axis order (no 'batch').
+        """
+        if order_hint is not None:
+            if "batch" in order_hint:
+                raise ValueError("earth_hint may not include 'batch' in this function.")
+
+            if Earr.ndim == 1:
+                if Earr.shape != (dim,):
+                    raise ValueError(f"earth expected ({dim},), got {Earr.shape}")
+                return np.repeat(Earr[None, :], N, axis=0)
+
+            if Earr.ndim != len(order_hint):
+                raise ValueError(f"earth_hint implies {len(order_hint)}D but earth has ndim={Earr.ndim}, shape={Earr.shape}")
+
+            ax_dim = order_hint.index("dim")
+            ax_time = order_hint.index("time") if "time" in order_hint else None
+
+            if Earr.shape[ax_dim] != dim:
+                raise ValueError(f"earth dim axis length {Earr.shape[ax_dim]} does not match hinted dim={dim}.")
+
+            if ax_time is None:
+                squeezed = np.squeeze(Earr)
+                if squeezed.shape != (dim,):
+                    raise ValueError(f"earth constant form must squeeze to ({dim},), got {squeezed.shape}")
+                return np.repeat(squeezed[None, :], N, axis=0)
+
+            # transpose to (time,dim)
+            E_td = np.transpose(Earr, axes=[ax_time, ax_dim])
+            if E_td.shape[0] != N:
+                raise ValueError(f"earth has N={E_td.shape[0]} but obj has N={N}")
+            return E_td
+
+        # ---- fallback (your original earth_to_Nd) ----
         if Earr.ndim == 1:
             if Earr.shape != (dim,):
                 raise ValueError(f"earth expected ({dim},), got {Earr.shape}")
@@ -2230,84 +2531,18 @@ def geo_secr_to_helio_eclip_generic(obj, earth, eps=1e-12, layout="auto",
                 return np.repeat(Earr[:, 0][None, :], N, axis=0)
             if Earr.shape == (1, dim):
                 return np.repeat(Earr[0, :][None, :], N, axis=0)
-            if Earr.shape[1] == dim:  # (N,dim)
+            if Earr.shape[1] == dim:
                 if Earr.shape[0] != N:
                     raise ValueError(f"earth has N={Earr.shape[0]} but obj has N={N}")
                 return Earr
-            if Earr.shape[0] == dim:  # (dim,N)
+            if Earr.shape[0] == dim:
                 if Earr.shape[1] != N:
                     raise ValueError(f"earth has N={Earr.shape[1]} but obj has N={N}")
                 return Earr.T
 
         raise ValueError(f"earth unsupported shape {Earr.shape} for dim={dim}")
 
-    # -----------------------
-    # Normalize obj (SECR) to internal (M,N,obj_dim)
-    # -----------------------
-    def _choose_mode_for_Kdim(K):
-        if obj_mode_hint in ("batch", "time"):
-            return obj_mode_hint
-        if layout in ("batch", "time"):
-            return layout
-
-        earth_time_like = (
-            E.ndim == 2 and (
-                (E.shape[1] == earth_dim and E.shape[0] == K) or
-                (E.shape[0] == earth_dim and E.shape[1] == K)
-            )
-        )
-        return "time" if earth_time_like else "batch"
-
-    if O.ndim == 1:
-        if O.shape != (obj_dim,):
-            raise ValueError(f"obj expected ({obj_dim},), got {O.shape}")
-        O_int = O[None, None, :]
-        out_style = ("single",)
-
-    elif O.ndim == 2:
-        if O.shape == (obj_dim, 1):
-            O_int = O[:, 0][None, None, :]
-            out_style = ("single",)
-
-        elif O.shape == (1, obj_dim):
-            O_int = O[0, :][None, None, :]
-            out_style = ("single",)
-
-        elif O.shape[0] == obj_dim and O.shape[1] != obj_dim:  # (dim,N)
-            O_int = O.T[None, :, :]
-            out_style = ("dimxN",)
-
-        elif O.shape[1] == obj_dim and O.shape[0] != obj_dim:  # (K,dim)
-            K = O.shape[0]
-            mode = _choose_mode_for_Kdim(K)
-            if mode == "batch":
-                O_int = O[:, None, :]
-                out_style = ("Mxdim",)
-            else:
-                O_int = O[None, :, :]
-                out_style = ("Nxdim_time",)
-
-        elif O.shape[0] == obj_dim and O.shape[1] == obj_dim:
-            raise ValueError(
-                f"Ambiguous obj shape {O.shape}. This could be (dim,N) or (K,dim) with K=dim. "
-                f"Reshape explicitly to (dim,N) or (K,dim), or pass obj as 3D (M,N,dim)."
-            )
-        else:
-            raise ValueError(f"obj unsupported shape {O.shape}")
-
-    elif O.ndim == 3:
-        if O.shape[2] != obj_dim:
-            raise ValueError(f"obj expected (M,N,{obj_dim}), got {O.shape}")
-        O_int = O
-        out_style = ("MNdim",)
-
-    else:
-        raise ValueError(f"obj unsupported ndim={O.ndim}")
-
-    M, N, _ = O_int.shape
-
-    # Earth normalized to (N, earth_dim)
-    E_N = earth_to_Nd(E, N, earth_dim)
+    E_N = _normalize_earth_to_Nd(E, N, earth_dim, earth_order_hint)
 
     # Build Earth vector compatible with obj_dim
     if obj_dim == 3:
@@ -2315,18 +2550,17 @@ def geo_secr_to_helio_eclip_generic(obj, earth, eps=1e-12, layout="auto",
     else:
         E_use = E_N         # earth_dim == 6 guaranteed
 
-    rE = E_use[:, :3]                    # (N,3)
+    rE = E_use[:, :3]                      # (N,3)
     vE = E_use[:, 3:] if obj_dim == 6 else None
 
     # ---- unpack SECR obj ----
-    r_p = O_int[:, :, :3]                # (M,N,3) SECR
+    r_p = O_int[:, :, :3]                  # (M,N,3) SECR
     v_p = O_int[:, :, 3:] if obj_dim == 6 else None
 
     # SECR convention (same as forward): angles = atan2(-yE, -xE)
-    angles = np.arctan2(-rE[:, 1], -rE[:, 0])       # (N,)
+    angles = np.arctan2(-rE[:, 1], -rE[:, 0])  # (N,)
 
-    # In forward: r' = R(-θ) rel_r, with R built using cos(-θ), sin(-θ).
-    # So inverse here: rel_r = R(+θ) r'
+    # Inverse uses rel_r = R(+θ) r'
     c = np.cos(angles)
     s = np.sin(angles)
 
@@ -2337,38 +2571,72 @@ def geo_secr_to_helio_eclip_generic(obj, earth, eps=1e-12, layout="auto",
     R[:, 1, 1] = c
     R[:, 2, 2] = 1.0
 
-    # rel position in inertial ecliptic: rel_r = R(+θ) r'
-    rel_r = np.einsum("nij,mnj->mni", R, r_p)       # (M,N,3)
+    rel_r = np.einsum("nij,mnj->mni", R, r_p)  # (M,N,3)
 
     if obj_dim == 3:
-        # heliocentric position
-        helio_r = rel_r + rE[None, :, :]            # (M,N,3)
-        out_int = helio_r
+        out_int = rel_r + rE[None, :, :]       # heliocentric position
     else:
-        # omega magnitude from Earth motion
         rE_norm2 = np.sum(rE * rE, axis=1)
         rE_norm2 = np.maximum(rE_norm2, eps)
-        omega_mag = np.linalg.norm(np.cross(rE, vE), axis=1) / rE_norm2   # (N,)
+        omega_mag = np.linalg.norm(np.cross(rE, vE), axis=1) / rE_norm2  # (N,)
 
         omega = np.zeros((N, 3), dtype=float)
         omega[:, 2] = omega_mag
 
-        # omega' in SECR coordinates = R(+θ) * omega  (since R maps SECR -> inertial for vectors here)
+        # omega' in SECR coordinates
         omega_p = np.einsum("nij,nj->ni", R, omega)  # (N,3)
 
-        # In forward: v' = R(-θ) rel_v - (omega' x r')
-        # => R(-θ) rel_v = v' + (omega' x r')
-        # => rel_v = R(+θ) [ v' + (omega' x r') ]
-        v_rel_rot = v_p + np.cross(omega_p[None, :, :], r_p)   # (M,N,3)
-        rel_v = np.einsum("nij,mnj->mni", R, v_rel_rot)        # (M,N,3)
+        v_rel_rot = v_p + np.cross(omega_p[None, :, :], r_p)     # (M,N,3)
+        rel_v = np.einsum("nij,mnj->mni", R, v_rel_rot)          # (M,N,3)
 
-        # heliocentric velocity
         helio_r = rel_r + rE[None, :, :]
         helio_v = rel_v + vE[None, :, :]
 
-        out_int = np.concatenate([helio_r, helio_v], axis=2)   # (M,N,6)
+        out_int = np.concatenate([helio_r, helio_v], axis=2)     # (M,N,6)
 
-    # --- restore original layout ---
+    # -----------------------
+    # Restore original obj layout
+    # -----------------------
+    def _restore_obj_from_hint(out_int_MNdim, restore):
+        order = restore["order"]
+        orig_ndim = restore["orig_ndim"]
+
+        if orig_ndim == 1:
+            return out_int_MNdim[0, 0, :]
+
+        have_batch = "batch" in order
+        have_time  = "time"  in order
+
+        A = out_int_MNdim  # (M,N,dim)
+
+        if not have_batch:
+            A = A[0, :, :]           # (N,dim)
+        if not have_time:
+            if have_batch:
+                A = A[:, 0, :]       # (M,dim)
+            else:
+                A = A[0, :]          # (dim,)
+
+        present = []
+        if have_batch:
+            present.append("batch")
+        if have_time:
+            present.append("time")
+        present.append("dim")
+
+        if A.ndim == 1:
+            return A
+
+        if set(present) != set(order):
+            raise RuntimeError(f"Internal restore mismatch: present={present}, order={order}")
+
+        perm = [present.index(ax) for ax in order]
+        return np.transpose(A, axes=perm)
+
+    if out_style[0] == "hinted":
+        return _restore_obj_from_hint(out_int, out_style[1])
+
+    # fallback restore (your original)
     if out_style[0] == "single":
         return out_int[0, 0, :]
     if out_style[0] == "Mxdim":
@@ -2388,39 +2656,57 @@ def geo_eclip_to_geo_eme_generic(x, eps=1e-12, layout="auto", hint=None):
     If x has 3 components -> treat as position, return position.
     If x has 6 components -> treat as full state, return full state.
 
-    Supported x shapes:
+    Supported x shapes (fallback, when no explicit hint):
       Position: (3,), (M,3), (N,3), (3,N), (M,N,3)
       State:    (6,), (M,6), (N,6), (6,N), (M,N,6)
 
-    layout resolves ambiguity when x is (K,3) or (K,6):
+    layout resolves ambiguity when x is (K,3) or (K,6) (fallback mode):
       - "batch": interpret as (M,dim) objects at one time (N=1)
       - "time" : interpret as (N,dim) time series for one object (M=1)
       - "auto" : default to "batch" (safer)
 
-    NEW: hint (optional) to disambiguate awkward 2D cases like (3,6), (6,3), (3,3), (6,6).
-      Accepts permutations of tokens in a tuple/list/set or string, e.g.:
-        "(batch, 6)", "(time, 3)", "(6, batch)", "(time, batch, 6)"
-      Rules:
-        - Any occurrence of 'batch' or 'time' sets the interpretation for ambiguous (K,dim) inputs.
-        - Any occurrence of 3 or 6 forces the dimensionality if ambiguous.
-        - If hint contains both 'batch' and 'time' -> ValueError.
+    NEW (explicit structure hint):
+      You can explicitly define the axis order using tokens:
+        - 'batch'   : M axis (multiple objects)
+        - 'time'    : N axis (time series)
+        - 'position': dim=3
+        - 'state'   : dim=6
+        - 3 or 6    : dim override (optional)
 
-    Returns: same layout as x.
+      Any permutation is accepted, and missing axes are treated as singleton.
+
+      Examples:
+        hint=('batch','position')   -> expects x shape (M,3)
+        hint=('position','batch')   -> expects x shape (3,M)
+
+        hint=('time','state')       -> expects x shape (N,6)
+        hint=('state','time')       -> expects x shape (6,N)
+
+        hint=('time','state','batch')  -> expects x shape (N,6,M)
+        hint=('batch','time','state')  -> expects x shape (M,N,6)
+        hint=('state','batch','time')  -> expects x shape (6,M,N)
+        etc.
+
+      Notes:
+        - If you provide a hint, it is used strictly (shape must match its rank and dim axis size).
+        - If you do NOT provide a hint, behavior matches your previous function:
+            infer dim, then use layout/auto heuristics for (K,dim) 2D inputs.
+
+    Returns: same layout as input x; if a hint was used, it returns in that hinted axis order.
     """
-
     if layout not in ("auto", "batch", "time"):
         raise ValueError("layout must be one of {'auto','batch','time'}")
 
     X = np.asarray(x, dtype=float)
 
     # -----------------------
-    # Hint parsing
+    # Hint parsing: explicit axis order
     # -----------------------
-    def _parse_hint(h):
+    def _parse_struct_hint(h, name="hint"):
         """
-        Returns (mode, forced_dim) where:
-          mode in {None,'batch','time'}
-          forced_dim in {None,3,6}
+        Returns (order, dim) where:
+          order: list like ['batch','dim'] or ['time','dim','batch'] (axis order)
+          dim: 3 or 6
         """
         if h is None:
             return None, None
@@ -2433,137 +2719,190 @@ def geo_eclip_to_geo_eme_generic(x, eps=1e-12, layout="auto", hint=None):
                 s = s[1:-1]
             tokens = [t.strip() for t in s.split(",") if t.strip()]
         else:
-            raise ValueError("hint must be None, a tuple/list/set, or a string like '(batch,6)'")
+            raise ValueError(f"{name} must be None, a tuple/list/set, or a string like '(time,state,batch)'")
 
-        mode = None
-        forced_dim = None
+        order = []
+        dim = None
+
+        def _add_axis(ax):
+            if ax in order:
+                raise ValueError(f"{name} repeats axis '{ax}'. Got {h}.")
+            order.append(ax)
 
         for t in tokens:
             if isinstance(t, (int, np.integer)):
-                if int(t) in (3, 6):
-                    forced_dim = int(t)
+                iv = int(t)
+                if iv in (3, 6):
+                    dim = iv
+                    if "dim" not in order:
+                        _add_axis("dim")
                 else:
-                    raise ValueError(f"Invalid hint dim {t} (use 3 or 6)")
+                    raise ValueError(f"{name} invalid dim {t} (use 3 or 6)")
                 continue
 
             ts = str(t).strip().lower()
-            if ts in ("batch", "time"):
-                if mode is None:
-                    mode = ts
-                elif mode != ts:
-                    raise ValueError(f"Conflicting hint modes: got both '{mode}' and '{ts}'")
+
+            if ts == "batch":
+                _add_axis("batch")
+            elif ts == "time":
+                _add_axis("time")
+            elif ts in ("position", "pos"):
+                if dim is not None and dim != 3:
+                    raise ValueError(f"{name} conflicts: both state(6) and position(3) implied.")
+                dim = 3
+                _add_axis("dim")
+            elif ts in ("state", "st"):
+                if dim is not None and dim != 6:
+                    raise ValueError(f"{name} conflicts: both position(3) and state(6) implied.")
+                dim = 6
+                _add_axis("dim")
             elif ts in ("3", "6"):
-                forced_dim = int(ts)
+                dim = int(ts)
+                if "dim" not in order:
+                    _add_axis("dim")
             elif ts == "":
                 continue
             else:
-                raise ValueError(f"Unrecognized hint token '{t}'. Use 'batch', 'time', 3, or 6.")
+                raise ValueError(
+                    f"{name} token '{t}' unrecognized. Use 'batch','time','position','state',3,6."
+                )
 
-        return mode, forced_dim
+        if "dim" not in order:
+            raise ValueError(f"{name} must include 'position'/'state' (or 3/6). Got {h}.")
+        if dim not in (3, 6):
+            raise ValueError(f"{name} must resolve dim to 3 or 6. Got {h}.")
 
-    hint_mode, hint_dim = _parse_hint(hint)
+        return order, dim
+
+    hint_order, hint_dim = _parse_struct_hint(hint, "hint")
 
     # -----------------------
-    # Infer dim (3 or 6) robustly
+    # Dim inference (fallback when no explicit hint)
     # -----------------------
-    def infer_dim(A, forced_dim=None):
+    def infer_dim_fallback(A):
         if A.ndim == 1 and A.shape in [(3,), (6,)]:
             return A.shape[0]
 
         if A.ndim == 2:
             r, c = A.shape
-
-            if forced_dim is not None:
-                if forced_dim not in (3, 6):
-                    raise ValueError("forced dim must be 3 or 6")
-                if (r != forced_dim) and (c != forced_dim):
-                    raise ValueError(f"hint forces dim={forced_dim} but shape is {A.shape}")
-                return forced_dim
-
             r_is = r in (3, 6)
             c_is = c in (3, 6)
-
-            # Unambiguous: only one axis matches {3,6}
             if r_is and not c_is:
                 return r
             if c_is and not r_is:
                 return c
-
-            # Ambiguous: both axes match {3,6}
             if r_is and c_is:
-                # Prefer 6 if present (state beats position)
-                if (r == 6) or (c == 6):
-                    return 6
-                return 3  # still structurally ambiguous, but dim itself is 3
+                return 6 if (r == 6 or c == 6) else 3
 
-        if A.ndim == 3 and A.shape[2] in (3, 6):
-            return A.shape[2]
+        if A.ndim == 3 and A.shape[-1] in (3, 6):
+            return A.shape[-1]
 
         raise ValueError(f"Input must be position (3) or state (6); got shape {A.shape}")
 
-    dim = infer_dim(X, hint_dim)
+    dim = hint_dim if hint_dim is not None else infer_dim_fallback(X)
 
     # -----------------------
-    # Normalize to internal (M,N,dim) and remember output layout
+    # Normalize X to internal (M,N,dim) and remember how to restore
     # -----------------------
+    def _normalize_with_hint(A, order, dim):
+        """
+        Strictly interpret x using explicit axis order -> return (M,N,dim).
+        Missing 'batch' or 'time' axes are treated as singleton.
+        Also returns restore_info to put output back into the same hinted order.
+        """
+        if A.ndim == 1:
+            if A.shape != (dim,):
+                raise ValueError(f"x expected ({dim},), got {A.shape}")
+            A_int = A[None, None, :]
+            restore = {"used_hint": True, "order": ["dim"], "orig_ndim": 1}
+            return A_int, restore
+
+        if A.ndim != len(order):
+            raise ValueError(f"hint implies {len(order)}D but x has ndim={A.ndim}, shape={A.shape}")
+
+        ax_dim = order.index("dim")
+        ax_batch = order.index("batch") if "batch" in order else None
+        ax_time  = order.index("time")  if "time"  in order else None
+
+        if A.shape[ax_dim] != dim:
+            raise ValueError(f"x dim axis length {A.shape[ax_dim]} does not match hinted dim={dim}.")
+
+        axes = []
+        if ax_batch is not None:
+            axes.append(ax_batch)
+        if ax_time is not None:
+            axes.append(ax_time)
+        axes.append(ax_dim)
+
+        A_perm = np.transpose(A, axes=axes)
+
+        if ax_batch is not None and ax_time is not None:
+            A_int = A_perm                  # (M,N,dim)
+        elif ax_batch is not None and ax_time is None:
+            A_int = A_perm[:, None, :]      # (M,1,dim)
+        elif ax_batch is None and ax_time is not None:
+            A_int = A_perm[None, :, :]      # (1,N,dim)
+        else:
+            A_int = A_perm[None, None, :]   # (1,1,dim)
+
+        restore = {"used_hint": True, "order": order, "orig_ndim": A.ndim}
+        return A_int, restore
+
     def _choose_mode_for_Kdim(K):
-        # Priority: hint -> layout -> (auto -> batch)
-        if hint_mode in ("batch", "time"):
-            return hint_mode
+        # fallback for (K,dim) inputs without hints
         if layout in ("batch", "time"):
             return layout
         return "batch"  # auto default
 
-    if X.ndim == 1:
-        if X.shape != (dim,):
-            raise ValueError(f"Expected ({dim},), got {X.shape}")
-        X_int = X[None, None, :]
-        out_style = ("single",)
-
-    elif X.ndim == 2:
-        if X.shape == (dim, 1):
-            X_int = X[:, 0][None, None, :]
-            out_style = ("single",)
-
-        elif X.shape == (1, dim):
-            X_int = X[0, :][None, None, :]
-            out_style = ("single",)
-
-        # (dim,N) if rows are dim and columns not equal dim
-        elif X.shape[0] == dim and X.shape[1] != dim:
-            X_int = X.T[None, :, :]  # (1,N,dim)
-            out_style = ("dimxN",)
-
-        # (K,dim) if last axis equals dim and first axis not equal dim
-        elif X.shape[1] == dim and X.shape[0] != dim:
-            K = X.shape[0]
-            mode = _choose_mode_for_Kdim(K)
-            if mode == "time":
-                X_int = X[None, :, :]  # (1,N,dim)
-                out_style = ("Nxdim_time",)
-            else:
-                X_int = X[:, None, :]  # (M,1,dim)
-                out_style = ("Mxdim",)
-
-        # Truly ambiguous squares like (3,3) or (6,6) (or anything with both axes == dim)
-        elif X.shape[0] == dim and X.shape[1] == dim:
-            # hint_mode can decide whether to interpret as time-series (Nxdim_time) or batch (Mxdim),
-            # but the storage form is (dim,N) vs (K,dim) and both "work". We refuse to guess that axis meaning.
-            raise ValueError(
-                f"Ambiguous input shape {X.shape}. This could be (dim,N) or (K,dim) with K=dim. "
-                f"Reshape explicitly to (dim,N) or (K,dim), or pass a 3D array (M,N,dim)."
-            )
-        else:
-            raise ValueError(f"Unsupported shape {X.shape} for dim={dim}")
-
-    elif X.ndim == 3:
-        if X.shape[2] != dim:
-            raise ValueError(f"Expected (M,N,{dim}), got {X.shape}")
-        X_int = X
-        out_style = ("MNdim",)
-
+    if hint_order is not None:
+        X_int, restore_info = _normalize_with_hint(X, hint_order, dim)
+        out_style = ("hinted", restore_info)
     else:
-        raise ValueError(f"Unsupported ndim={X.ndim}")
+        # ---- fallback normalization (your original behavior) ----
+        if X.ndim == 1:
+            if X.shape != (dim,):
+                raise ValueError(f"Expected ({dim},), got {X.shape}")
+            X_int = X[None, None, :]
+            out_style = ("single",)
+
+        elif X.ndim == 2:
+            if X.shape == (dim, 1):
+                X_int = X[:, 0][None, None, :]
+                out_style = ("single",)
+
+            elif X.shape == (1, dim):
+                X_int = X[0, :][None, None, :]
+                out_style = ("single",)
+
+            elif X.shape[0] == dim and X.shape[1] != dim:      # (dim,N)
+                X_int = X.T[None, :, :]                         # (1,N,dim)
+                out_style = ("dimxN",)
+
+            elif X.shape[1] == dim and X.shape[0] != dim:      # (K,dim)
+                K = X.shape[0]
+                mode = _choose_mode_for_Kdim(K)
+                if mode == "time":
+                    X_int = X[None, :, :]                       # (1,N,dim)
+                    out_style = ("Nxdim_time",)
+                else:
+                    X_int = X[:, None, :]                       # (M,1,dim)
+                    out_style = ("Mxdim",)
+
+            elif X.shape[0] == dim and X.shape[1] == dim:
+                raise ValueError(
+                    f"Ambiguous input shape {X.shape}. Reshape explicitly or pass hint."
+                )
+            else:
+                raise ValueError(f"Unsupported shape {X.shape} for dim={dim}")
+
+        elif X.ndim == 3:
+            if X.shape[2] != dim:
+                raise ValueError(f"Expected (M,N,{dim}), got {X.shape}")
+            X_int = X
+            out_style = ("MNdim",)
+
+        else:
+            raise ValueError(f"Unsupported ndim={X.ndim}")
 
     # ---- rotation ecliptic -> EME about +x by +eps ----
     eps_deg = 23.439281
@@ -2589,7 +2928,49 @@ def geo_eclip_to_geo_eme_generic(x, eps=1e-12, layout="auto", hint=None):
         v_eme = np.einsum("ij,mnj->mni", R, v)
         out_int = np.concatenate([r_eme, v_eme], axis=2)  # (M,N,6)
 
-    # ---- restore original layout ----
+    # -----------------------
+    # Restore output layout
+    # -----------------------
+    def _restore_from_hint(out_int_MNdim, restore):
+        order = restore["order"]
+        orig_ndim = restore["orig_ndim"]
+
+        if orig_ndim == 1:
+            return out_int_MNdim[0, 0, :]
+
+        have_batch = "batch" in order
+        have_time  = "time"  in order
+
+        A = out_int_MNdim  # (M,N,dim)
+
+        if not have_batch:
+            A = A[0, :, :]           # (N,dim)
+        if not have_time:
+            if have_batch:
+                A = A[:, 0, :]       # (M,dim)
+            else:
+                A = A[0, :]          # (dim,)
+
+        present = []
+        if have_batch:
+            present.append("batch")
+        if have_time:
+            present.append("time")
+        present.append("dim")
+
+        if A.ndim == 1:
+            return A
+
+        if set(present) != set(order):
+            raise RuntimeError(f"Internal restore mismatch: present={present}, order={order}")
+
+        perm = [present.index(ax) for ax in order]
+        return np.transpose(A, axes=perm)
+
+    if out_style[0] == "hinted":
+        return _restore_from_hint(out_int, out_style[1])
+
+    # fallback restore (your original)
     if out_style[0] == "single":
         return out_int[0, 0, :]
     if out_style[0] == "Mxdim":
@@ -2601,7 +2982,6 @@ def geo_eclip_to_geo_eme_generic(x, eps=1e-12, layout="auto", hint=None):
     return out_int
 
 
-
 def helio_eclip_to_geo_eme_generic(obj, earth, eps=1e-12, layout="auto",
                                   obj_hint=None, earth_hint=None):
     """
@@ -2611,28 +2991,50 @@ def helio_eclip_to_geo_eme_generic(obj, earth, eps=1e-12, layout="auto",
     - obj dim = 3 → earth may be 3 or 6 (earth velocity ignored)
     - obj dim = 6 → earth MUST be 6 (otherwise ValueError)
 
-    Supported obj shapes:
-      Position: (3,), (M,3), (N,3), (3,N), (M,N,3)
-      State:    (6,), (M,6), (N,6), (6,N), (M,N,6)
+    Supported shapes (fallback, when no explicit hint):
+      obj Position: (3,), (M,3), (N,3), (3,N), (M,N,3)
+      obj State:    (6,), (M,6), (N,6), (6,N), (M,N,6)
 
-    Supported earth shapes:
-      Position: (3,), (3,1), (1,3), (N,3), (3,N)
-      State:    (6,), (6,1), (1,6), (N,6), (6,N)
+      earth Position: (3,), (3,1), (1,3), (N,3), (3,N)
+      earth State:    (6,), (6,1), (1,6), (N,6), (6,N)
 
-    layout resolves ambiguity when obj is (K,dim):
+    layout resolves ambiguity when obj is (K,dim) (fallback mode):
       - "batch": interpret as (M,dim) objects at one time (N=1)
       - "time" : interpret as (N,dim) time series for one object (M=1)
       - "auto" : infer from earth shape when possible, else default to "batch"
 
-    NEW: obj_hint / earth_hint (optional) to disambiguate awkward 2D cases like (3,6), (6,3), (3,3), (6,6).
-      Accepts permutations of tokens in a tuple/list/set or string, e.g.:
-        "(batch, 6)", "(time, 3)", "(6, batch)", "(time, batch, 6)"
-      Rules:
-        - Any occurrence of 'batch' or 'time' sets the interpretation for ambiguous (K,dim) inputs.
-        - Any occurrence of 3 or 6 forces the dimensionality if ambiguous.
-        - If a hint contains both 'batch' and 'time' -> ValueError.
+    NEW (explicit structure hints):
+      You can explicitly define the axis order using tokens (any permutation):
+        - 'batch'   : M axis (multiple objects / spacecraft)
+        - 'time'    : N axis (time series)
+        - 'position': dim=3
+        - 'state'   : dim=6
+        - 3 or 6    : dim override (optional)
 
-    Returns: same layout as obj.
+      Examples (obj):
+        obj_hint=('batch','position')     -> expects obj shape (M,3)
+        obj_hint=('position','batch')     -> expects obj shape (3,M)
+        obj_hint=('batch','state')        -> expects obj shape (M,6)
+        obj_hint=('time','state')         -> expects obj shape (N,6)
+        obj_hint=('state','time')         -> expects obj shape (6,N)
+        obj_hint=('time','state','batch') -> expects obj shape (N,6,M)
+        obj_hint=('batch','time','state') -> expects obj shape (M,N,6)
+        obj_hint=('state','batch','time') -> expects obj shape (6,M,N)
+        etc.
+
+      Examples (earth) — IMPORTANT:
+        Earth is treated as TIME-indexed only in this function (no 'batch' axis here),
+        because the transform uses a single Earth state per time index.
+        So earth_hint may include:
+          - 'time' and 'position'/'state' (or 3/6)
+          - in any permutation for 2D/3D (but no 'batch')
+
+        e.g. earth_hint=('time','state') -> (N,6)
+             earth_hint=('state','time') -> (6,N)
+
+      Missing 'batch' or 'time' axes in a hint are treated as singleton.
+
+    Returns: same layout as obj; if obj_hint was used, returns in that hinted axis order.
     """
 
     if layout not in ("auto", "batch", "time"):
@@ -2642,13 +3044,13 @@ def helio_eclip_to_geo_eme_generic(obj, earth, eps=1e-12, layout="auto",
     E = np.asarray(earth, dtype=float)
 
     # -----------------------
-    # Hint parsing
+    # Hint parsing: explicit axis order
     # -----------------------
-    def _parse_hint(h):
+    def _parse_struct_hint(h, name, allow_batch=True):
         """
-        Returns (mode, forced_dim) where:
-          mode in {None,'batch','time'}
-          forced_dim in {None,3,6}
+        Returns (order, dim) where:
+          order: list like ['batch','dim'] or ['time','dim','batch'] (axis order)
+          dim: 3 or 6
         """
         if h is None:
             return None, None
@@ -2661,41 +3063,69 @@ def helio_eclip_to_geo_eme_generic(obj, earth, eps=1e-12, layout="auto",
                 s = s[1:-1]
             tokens = [t.strip() for t in s.split(",") if t.strip()]
         else:
-            raise ValueError("hint must be None, a tuple/list/set, or a string like '(batch,6)'")
+            raise ValueError(f"{name}_hint must be None, a tuple/list/set, or a string like '(time,state,batch)'")
 
-        mode = None
-        forced_dim = None
+        order = []
+        dim = None
+
+        def _add_axis(ax):
+            if ax in order:
+                raise ValueError(f"{name}_hint repeats axis '{ax}'. Got {h}.")
+            order.append(ax)
 
         for t in tokens:
             if isinstance(t, (int, np.integer)):
-                if int(t) in (3, 6):
-                    forced_dim = int(t)
+                iv = int(t)
+                if iv in (3, 6):
+                    dim = iv
+                    if "dim" not in order:
+                        _add_axis("dim")
                 else:
-                    raise ValueError(f"Invalid hint dim {t} (use 3 or 6)")
+                    raise ValueError(f"{name}_hint invalid dim {t} (use 3 or 6)")
                 continue
 
             ts = str(t).strip().lower()
-            if ts in ("batch", "time"):
-                if mode is None:
-                    mode = ts
-                elif mode != ts:
-                    raise ValueError(f"Conflicting hint modes: got both '{mode}' and '{ts}'")
+            if ts == "batch":
+                if not allow_batch:
+                    raise ValueError(f"{name}_hint may not include 'batch' (earth cannot be batch-indexed here).")
+                _add_axis("batch")
+            elif ts == "time":
+                _add_axis("time")
+            elif ts in ("position", "pos"):
+                if dim is not None and dim != 3:
+                    raise ValueError(f"{name}_hint conflicts: both state(6) and position(3) implied.")
+                dim = 3
+                _add_axis("dim")
+            elif ts in ("state", "st"):
+                if dim is not None and dim != 6:
+                    raise ValueError(f"{name}_hint conflicts: both position(3) and state(6) implied.")
+                dim = 6
+                _add_axis("dim")
             elif ts in ("3", "6"):
-                forced_dim = int(ts)
+                dim = int(ts)
+                if "dim" not in order:
+                    _add_axis("dim")
             elif ts == "":
                 continue
             else:
-                raise ValueError(f"Unrecognized hint token '{t}'. Use 'batch', 'time', 3, or 6.")
+                raise ValueError(
+                    f"{name}_hint token '{t}' unrecognized. Use 'batch','time','position','state',3,6."
+                )
 
-        return mode, forced_dim
+        if "dim" not in order:
+            raise ValueError(f"{name}_hint must include 'position'/'state' (or 3/6). Got {h}.")
+        if dim not in (3, 6):
+            raise ValueError(f"{name}_hint must resolve dim to 3 or 6. Got {h}.")
 
-    obj_mode_hint, obj_dim_hint = _parse_hint(obj_hint)
-    earth_mode_hint, earth_dim_hint = _parse_hint(earth_hint)
+        return order, dim
+
+    obj_order_hint, obj_dim_hint = _parse_struct_hint(obj_hint, "obj", allow_batch=True)
+    earth_order_hint, earth_dim_hint = _parse_struct_hint(earth_hint, "earth", allow_batch=False) if earth_hint is not None else (None, None)
 
     # -----------------------
-    # Infer dimension (3 or 6) robustly
+    # Dim inference (fallback when no explicit hint)
     # -----------------------
-    def infer_dim(A, name, forced_dim=None):
+    def infer_dim_fallback(A, name):
         if A.ndim == 1:
             if A.shape in [(3,), (6,)]:
                 return A.shape[0]
@@ -2703,14 +3133,6 @@ def helio_eclip_to_geo_eme_generic(obj, earth, eps=1e-12, layout="auto",
 
         if A.ndim == 2:
             r, c = A.shape
-
-            if forced_dim is not None:
-                if forced_dim not in (3, 6):
-                    raise ValueError(f"{name} forced_dim must be 3 or 6")
-                if (r != forced_dim) and (c != forced_dim):
-                    raise ValueError(f"{name} hint forces dim={forced_dim} but shape is {A.shape}")
-                return forced_dim
-
             r_is = r in (3, 6)
             c_is = c in (3, 6)
 
@@ -2718,21 +3140,16 @@ def helio_eclip_to_geo_eme_generic(obj, earth, eps=1e-12, layout="auto",
                 return r
             if c_is and not r_is:
                 return c
-
-            # Ambiguous: both axes in {3,6} (e.g. (3,6), (6,3), (3,3), (6,6))
-            # Prefer 6 if present (state beats position)
             if r_is and c_is:
-                if (r == 6) or (c == 6):
-                    return 6
-                return 3
+                return 6 if (r == 6 or c == 6) else 3
 
-        if A.ndim == 3 and A.shape[2] in (3, 6):
-            return A.shape[2]
+        if A.ndim == 3 and A.shape[-1] in (3, 6):
+            return A.shape[-1]
 
         raise ValueError(f"Could not infer dim for {name} with shape {A.shape}")
 
-    obj_dim = infer_dim(O, "obj", obj_dim_hint)
-    earth_dim = infer_dim(E, "earth", earth_dim_hint)
+    obj_dim = obj_dim_hint if obj_dim_hint is not None else infer_dim_fallback(O, "obj")
+    earth_dim = earth_dim_hint if earth_dim_hint is not None else infer_dim_fallback(E, "earth")
 
     # -----------------------
     # STRICT RULE
@@ -2744,75 +3161,158 @@ def helio_eclip_to_geo_eme_generic(obj, earth, eps=1e-12, layout="auto",
         )
 
     # -----------------------
-    # Normalize obj to (M,N,obj_dim)
+    # Normalize obj to internal (M,N,obj_dim) and remember how to restore
     # -----------------------
+    def _normalize_obj_with_hint(A, order, dim):
+        """
+        Strictly interpret obj using explicit axis order -> return (M,N,dim).
+        Missing 'batch' or 'time' axes in the hint are treated as singleton.
+        Also returns restore_info to put output back into the same hinted order.
+        """
+        if A.ndim == 1:
+            if A.shape != (dim,):
+                raise ValueError(f"obj expected ({dim},), got {A.shape}")
+            A_int = A[None, None, :]
+            restore = {"used_hint": True, "order": ["dim"], "orig_ndim": 1}
+            return A_int, restore
+
+        if A.ndim != len(order):
+            raise ValueError(f"obj_hint implies {len(order)}D but obj has ndim={A.ndim}, shape={A.shape}")
+
+        ax_dim = order.index("dim")
+        ax_batch = order.index("batch") if "batch" in order else None
+        ax_time  = order.index("time")  if "time"  in order else None
+
+        if A.shape[ax_dim] != dim:
+            raise ValueError(f"obj dim axis length {A.shape[ax_dim]} does not match hinted dim={dim}.")
+
+        axes = []
+        if ax_batch is not None:
+            axes.append(ax_batch)
+        if ax_time is not None:
+            axes.append(ax_time)
+        axes.append(ax_dim)
+
+        A_perm = np.transpose(A, axes=axes)
+
+        if ax_batch is not None and ax_time is not None:
+            A_int = A_perm                  # (M,N,dim)
+        elif ax_batch is not None and ax_time is None:
+            A_int = A_perm[:, None, :]      # (M,1,dim)
+        elif ax_batch is None and ax_time is not None:
+            A_int = A_perm[None, :, :]      # (1,N,dim)
+        else:
+            A_int = A_perm[None, None, :]   # (1,1,dim)
+
+        restore = {"used_hint": True, "order": order, "orig_ndim": A.ndim}
+        return A_int, restore
+
     def _choose_obj_mode_for_Kdim(K):
-        # Priority: obj_hint mode -> layout -> auto heuristic (earth shape) -> batch default
-        if obj_mode_hint in ("batch", "time"):
-            return obj_mode_hint
+        # Priority (fallback): layout if not auto; else auto heuristic using earth; else batch default
         if layout in ("batch", "time"):
             return layout
-        # layout == auto: infer from earth shape if possible
-        earth_time_like = (
-            E.ndim == 2 and (
-                (E.shape[1] == earth_dim and E.shape[0] == K) or
-                (E.shape[0] == earth_dim and E.shape[1] == K)
+        if layout == "auto":
+            earth_time_like = (
+                E.ndim == 2 and (
+                    (E.shape[1] == earth_dim and E.shape[0] == K) or
+                    (E.shape[0] == earth_dim and E.shape[1] == K)
+                )
             )
-        )
-        return "time" if earth_time_like else "batch"
+            return "time" if earth_time_like else "batch"
+        return "batch"
 
-    if O.ndim == 1:
-        if O.shape != (obj_dim,):
-            raise ValueError(f"obj expected ({obj_dim},), got {O.shape}")
-        O_int = O[None, None, :]
-        out_style = ("single",)
-
-    elif O.ndim == 2:
-        if O.shape == (obj_dim, 1):
-            O_int = O[:, 0][None, None, :]
-            out_style = ("single",)
-
-        elif O.shape == (1, obj_dim):
-            O_int = O[0, :][None, None, :]
-            out_style = ("single",)
-
-        elif O.shape[0] == obj_dim and O.shape[1] != obj_dim:  # (dim,N)
-            O_int = O.T[None, :, :]
-            out_style = ("dimxN",)
-
-        elif O.shape[1] == obj_dim and O.shape[0] != obj_dim:  # (K,dim)
-            K = O.shape[0]
-            mode = _choose_obj_mode_for_Kdim(K)
-            if mode == "time":
-                O_int = O[None, :, :]
-                out_style = ("Nxdim_time",)
-            else:
-                O_int = O[:, None, :]
-                out_style = ("Mxdim",)
-
-        elif O.shape[0] == obj_dim and O.shape[1] == obj_dim:
-            raise ValueError(
-                f"Ambiguous obj shape {O.shape}. This could be (dim,N) or (K,dim) with K=dim. "
-                f"Reshape explicitly to (dim,N) or (K,dim), or pass a 3D array (M,N,dim)."
-            )
-        else:
-            raise ValueError(f"Unsupported obj shape {O.shape} for dim={obj_dim}")
-
-    elif O.ndim == 3:
-        if O.shape[2] != obj_dim:
-            raise ValueError(f"Expected last dim {obj_dim}, got {O.shape}")
-        O_int = O
-        out_style = ("MNdim",)
-
+    if obj_order_hint is not None:
+        O_int, obj_restore = _normalize_obj_with_hint(O, obj_order_hint, obj_dim)
+        out_style = ("hinted", obj_restore)
     else:
-        raise ValueError(f"Unsupported obj ndim {O.ndim}")
+        # ---- fallback normalization (your original behavior) ----
+        if O.ndim == 1:
+            if O.shape != (obj_dim,):
+                raise ValueError(f"obj expected ({obj_dim},), got {O.shape}")
+            O_int = O[None, None, :]
+            out_style = ("single",)
+
+        elif O.ndim == 2:
+            if O.shape == (obj_dim, 1):
+                O_int = O[:, 0][None, None, :]
+                out_style = ("single",)
+
+            elif O.shape == (1, obj_dim):
+                O_int = O[0, :][None, None, :]
+                out_style = ("single",)
+
+            elif O.shape[0] == obj_dim and O.shape[1] != obj_dim:  # (dim,N)
+                O_int = O.T[None, :, :]
+                out_style = ("dimxN",)
+
+            elif O.shape[1] == obj_dim and O.shape[0] != obj_dim:  # (K,dim)
+                K = O.shape[0]
+                mode = _choose_obj_mode_for_Kdim(K)
+                if mode == "time":
+                    O_int = O[None, :, :]
+                    out_style = ("Nxdim_time",)
+                else:
+                    O_int = O[:, None, :]
+                    out_style = ("Mxdim",)
+
+            elif O.shape[0] == obj_dim and O.shape[1] == obj_dim:
+                raise ValueError(
+                    f"Ambiguous obj shape {O.shape}. Reshape explicitly or pass obj_hint."
+                )
+            else:
+                raise ValueError(f"Unsupported obj shape {O.shape} for dim={obj_dim}")
+
+        elif O.ndim == 3:
+            if O.shape[2] != obj_dim:
+                raise ValueError(f"Expected last dim {obj_dim}, got {O.shape}")
+            O_int = O
+            out_style = ("MNdim",)
+
+        else:
+            raise ValueError(f"Unsupported obj ndim {O.ndim}")
 
     M, N, _ = O_int.shape
 
     # -----------------------
-    # Normalize earth to (N,earth_dim)
+    # Normalize earth to (N,earth_dim) (time-indexed only)
     # -----------------------
-    def earth_to_Nd(Earr, N, dim):
+    def _normalize_earth_to_Nd(Earr, N, dim, order_hint=None):
+        """
+        Earth is time-indexed only: output is (N,dim).
+        If order_hint is provided, interpret strictly by that axis order (no 'batch').
+        """
+        if order_hint is not None:
+            if "batch" in order_hint:
+                raise ValueError("earth_hint may not include 'batch' in this function.")
+
+            if Earr.ndim == 1:
+                if Earr.shape != (dim,):
+                    raise ValueError(f"earth expected ({dim},), got {Earr.shape}")
+                return np.repeat(Earr[None, :], N, axis=0)
+
+            if Earr.ndim != len(order_hint):
+                raise ValueError(f"earth_hint implies {len(order_hint)}D but earth has ndim={Earr.ndim}, shape={Earr.shape}")
+
+            ax_dim = order_hint.index("dim")
+            ax_time = order_hint.index("time") if "time" in order_hint else None
+
+            if Earr.shape[ax_dim] != dim:
+                raise ValueError(f"earth dim axis length {Earr.shape[ax_dim]} does not match hinted dim={dim}.")
+
+            if ax_time is None:
+                # no time axis -> constant
+                squeezed = np.squeeze(Earr)
+                if squeezed.shape != (dim,):
+                    raise ValueError(f"earth constant form must squeeze to ({dim},), got {squeezed.shape}")
+                return np.repeat(squeezed[None, :], N, axis=0)
+
+            # transpose to (time,dim)
+            E_td = np.transpose(Earr, axes=[ax_time, ax_dim])
+            if E_td.shape[0] != N:
+                raise ValueError(f"earth has N={E_td.shape[0]} but obj has N={N}")
+            return E_td
+
+        # ---- fallback (your original earth_to_Nd) ----
         if Earr.ndim == 1:
             if Earr.shape != (dim,):
                 raise ValueError(f"earth expected ({dim},), got {Earr.shape}")
@@ -2824,24 +3324,20 @@ def helio_eclip_to_geo_eme_generic(obj, earth, eps=1e-12, layout="auto",
             if Earr.shape == (1, dim):
                 return np.repeat(Earr[0, :][None, :], N, axis=0)
 
-            # (dim,N)
-            if Earr.shape[0] == dim and Earr.shape[1] == N:
+            if Earr.shape[0] == dim and Earr.shape[1] == N:  # (dim,N)
                 return Earr.T
-
-            # (N,dim)
-            if Earr.shape[1] == dim and Earr.shape[0] == N:
+            if Earr.shape[1] == dim and Earr.shape[0] == N:  # (N,dim)
                 return Earr
 
-            # If N==dim (ambiguous squares), we refuse to guess.
             if (Earr.shape[0] == dim) and (Earr.shape[1] == dim):
                 raise ValueError(
                     f"Ambiguous earth shape {Earr.shape} with dim={dim} (could be (dim,N) or (N,dim)). "
-                    f"Reshape explicitly to (N,dim) or (dim,N)."
+                    f"Reshape explicitly or pass earth_hint."
                 )
 
         raise ValueError(f"Unsupported earth shape {Earr.shape} for dim={dim} and N={N}")
 
-    E_N = earth_to_Nd(E, N, earth_dim)
+    E_N = _normalize_earth_to_Nd(E, N, earth_dim, earth_order_hint)
 
     # -----------------------
     # Build Earth vector compatible with obj_dim
@@ -2859,6 +3355,7 @@ def helio_eclip_to_geo_eme_generic(obj, earth, eps=1e-12, layout="auto",
     # -----------------------
     # Rotate ecliptic → EME
     # -----------------------
+    # NOTE: eps argument in signature is unused here previously; keep your hard-coded mean obliquity.
     eps_rad = np.deg2rad(23.439281)
     c, s = np.cos(eps_rad), np.sin(eps_rad)
 
@@ -2879,21 +3376,60 @@ def helio_eclip_to_geo_eme_generic(obj, earth, eps=1e-12, layout="auto",
     else:
         v = geo_ecl[:, :, 3:]
         v_eme = np.einsum("ij,mnj->mni", R, v)
-        out_int = np.concatenate([r_eme, v_eme], axis=2)
+        out_int = np.concatenate([r_eme, v_eme], axis=2)  # (M,N,6)
 
     # -----------------------
-    # Restore original layout
+    # Restore original obj layout
     # -----------------------
+    def _restore_obj_from_hint(out_int_MNdim, restore):
+        order = restore["order"]
+        orig_ndim = restore["orig_ndim"]
+
+        if orig_ndim == 1:
+            return out_int_MNdim[0, 0, :]
+
+        have_batch = "batch" in order
+        have_time  = "time"  in order
+
+        A = out_int_MNdim  # (M,N,dim)
+
+        if not have_batch:
+            A = A[0, :, :]           # (N,dim)
+        if not have_time:
+            if have_batch:
+                A = A[:, 0, :]       # (M,dim)
+            else:
+                A = A[0, :]          # (dim,)
+
+        present = []
+        if have_batch:
+            present.append("batch")
+        if have_time:
+            present.append("time")
+        present.append("dim")
+
+        if A.ndim == 1:
+            return A
+
+        if set(present) != set(order):
+            raise RuntimeError(f"Internal restore mismatch: present={present}, order={order}")
+
+        perm = [present.index(ax) for ax in order]
+        return np.transpose(A, axes=perm)
+
+    if out_style[0] == "hinted":
+        return _restore_obj_from_hint(out_int, out_style[1])
+
+    # fallback restore (your original)
     if out_style[0] == "single":
-        return out_int[0, 0]
+        return out_int[0, 0, :]
     if out_style[0] == "Mxdim":
-        return out_int[:, 0]
+        return out_int[:, 0, :]
     if out_style[0] == "dimxN":
-        return out_int[0].T
+        return out_int[0, :, :].T
     if out_style[0] == "Nxdim_time":
-        return out_int[0]
+        return out_int[0, :, :]
     return out_int
-
 
 
 def geo_secr_to_geo_eclip_generic(obj, earth, eps=1e-12, layout="auto",
@@ -2905,28 +3441,35 @@ def geo_secr_to_geo_eclip_generic(obj, earth, eps=1e-12, layout="auto",
     - obj dim = 3 → earth may be 3 or 6 (earth velocity ignored)
     - obj dim = 6 → earth MUST be 6 (otherwise ValueError)
 
-    Supported obj shapes:
-      Position: (3,), (M,3), (N,3), (3,N), (M,N,3)
-      State:    (6,), (M,6), (N,6), (6,N), (M,N,6)
+    HINT SYSTEM (new, explicit structure):
+      You can now explicitly define the axis order using tokens:
+        - 'batch'   : M axis (multiple objects / spacecraft)
+        - 'time'    : N axis (time series)
+        - 'position': dim=3
+        - 'state'   : dim=6
+        - 3 or 6    : dim override (optional)
 
-    Supported earth shapes:
-      Position: (3,), (3,1), (1,3), (N,3), (3,N)
-      State:    (6,), (6,1), (1,6), (N,6), (6,N)
+      Examples (all permutations supported):
+        obj_hint=('batch','position')  -> (M,3)
+        obj_hint=('position','batch')  -> (3,M)
+        obj_hint=('batch','state')     -> (M,6)
 
-    layout resolves ambiguity when obj is (K,dim):
-      - "batch": interpret as (M,dim) objects at one time (N=1)
-      - "time" : interpret as (N,dim) time series for one object (M=1)
-      - "auto" : infer from earth shape when possible, else default to "batch"
+        obj_hint=('time','state')      -> (N,6)
+        obj_hint=('state','time')      -> (6,N)
 
-    NEW: obj_hint / earth_hint (optional) to disambiguate awkward 2D cases like (3,6), (6,3), (3,3), (6,6).
-      Accepts permutations of tokens in a tuple/list/set or string, e.g.:
-        "(batch, 6)", "(time, 3)", "(6, batch)", "(time, batch, 6)"
-      Rules:
-        - Any occurrence of 'batch' or 'time' sets the interpretation for ambiguous (K,dim) inputs.
-        - Any occurrence of 3 or 6 forces the dimensionality if ambiguous.
-        - If a hint contains both 'batch' and 'time' -> ValueError.
+        obj_hint=('time','state','batch') -> (N,6,M)
+        obj_hint=('batch','time','state') -> (M,N,6)
+        etc.
 
-    Returns: same layout as obj.
+      Earth hints:
+        Earth is treated as time-indexed only (no 'batch' axis supported):
+          earth_hint=('time','state') -> (N,6)
+          earth_hint=('state','time') -> (6,N)
+          earth_hint=('time','position') -> (N,3)
+          earth_hint=('position','time') -> (3,N)
+        If earth is constant, pass (3,) or (6,) (hint optional).
+
+    Returns: same layout as obj (including the hinted axis order if hint was used).
     """
 
     if layout not in ("auto", "batch", "time"):
@@ -2936,17 +3479,18 @@ def geo_secr_to_geo_eclip_generic(obj, earth, eps=1e-12, layout="auto",
     E = np.asarray(earth, dtype=float)
 
     # -----------------------
-    # Hint parsing
+    # Hint parsing: explicit axis order
     # -----------------------
-    def _parse_hint(h):
+    def _parse_struct_hint(h, name, allow_batch=True):
         """
-        Returns (mode, forced_dim) where:
-          mode in {None,'batch','time'}
-          forced_dim in {None,3,6}
+        Returns (order, dim) where:
+          order: list like ['batch','dim'] or ['time','dim','batch'] (axis order)
+          dim: 3 or 6 or None
         """
         if h is None:
             return None, None
 
+        # tokenize
         if isinstance(h, (tuple, list, set)):
             tokens = list(h)
         elif isinstance(h, str):
@@ -2955,41 +3499,77 @@ def geo_secr_to_geo_eclip_generic(obj, earth, eps=1e-12, layout="auto",
                 s = s[1:-1]
             tokens = [t.strip() for t in s.split(",") if t.strip()]
         else:
-            raise ValueError("hint must be None, a tuple/list/set, or a string like '(batch,6)'")
+            raise ValueError(f"{name}_hint must be None, a tuple/list/set, or a string like '(time,state,batch)'")
 
-        mode = None
-        forced_dim = None
+        order = []
+        dim = None
+
+        def _add_axis(ax):
+            if ax in order:
+                raise ValueError(f"{name}_hint repeats axis '{ax}'. Got {h}.")
+            order.append(ax)
 
         for t in tokens:
+            # ints
             if isinstance(t, (int, np.integer)):
-                if int(t) in (3, 6):
-                    forced_dim = int(t)
+                iv = int(t)
+                if iv in (3, 6):
+                    dim = iv
                 else:
-                    raise ValueError(f"Invalid hint dim {t} (use 3 or 6)")
+                    raise ValueError(f"{name}_hint invalid dim {t} (use 3 or 6)")
                 continue
 
             ts = str(t).strip().lower()
-            if ts in ("batch", "time"):
-                if mode is None:
-                    mode = ts
-                elif mode != ts:
-                    raise ValueError(f"Conflicting hint modes: got both '{mode}' and '{ts}'")
+
+            if ts == "batch":
+                if not allow_batch:
+                    raise ValueError(f"{name}_hint may not include 'batch'. Earth cannot be batch-indexed here.")
+                _add_axis("batch")
+            elif ts == "time":
+                _add_axis("time")
+            elif ts in ("position", "pos"):
+                if dim is not None and dim != 3:
+                    raise ValueError(f"{name}_hint conflicts: both state(6) and position(3) implied.")
+                dim = 3
+                _add_axis("dim")
+            elif ts in ("state", "st"):
+                if dim is not None and dim != 6:
+                    raise ValueError(f"{name}_hint conflicts: both position(3) and state(6) implied.")
+                dim = 6
+                _add_axis("dim")
             elif ts in ("3", "6"):
-                forced_dim = int(ts)
+                dim = int(ts)
+                # if user did NOT include position/state token, we still need a 'dim' axis
+                if "dim" not in order:
+                    _add_axis("dim")
             elif ts == "":
                 continue
             else:
-                raise ValueError(f"Unrecognized hint token '{t}'. Use 'batch', 'time', 3, or 6.")
+                raise ValueError(
+                    f"{name}_hint token '{t}' unrecognized. Use 'batch','time','position','state',3,6."
+                )
 
-        return mode, forced_dim
+        # if they set dim via int but forgot to include dim axis explicitly (should not happen due to above)
+        if dim is not None and "dim" not in order:
+            _add_axis("dim")
 
-    obj_mode_hint, obj_dim_hint = _parse_hint(obj_hint)
-    earth_mode_hint, earth_dim_hint = _parse_hint(earth_hint)
+        # allow hints like ('batch','time')? -> no, must specify position/state or 3/6
+        if "dim" not in order:
+            raise ValueError(f"{name}_hint must include 'position'/'state' (or 3/6). Got {h}.")
+
+        # sanity
+        if (dim not in (3, 6)):
+            raise ValueError(f"{name}_hint must resolve dim to 3 or 6. Got {h}.")
+
+        return order, dim
+
+    obj_order_hint, obj_dim_hint = _parse_struct_hint(obj_hint, "obj", allow_batch=True)
+    earth_order_hint, earth_dim_hint = _parse_struct_hint(earth_hint, "earth", allow_batch=False) if earth_hint is not None else (None, None)
 
     # -----------------------
-    # Infer dim (3 or 6) robustly
+    # Dim inference (fallback when no explicit hint)
     # -----------------------
-    def infer_dim(A, name, forced_dim=None):
+    def infer_dim_fallback(A, name):
         if A.ndim == 1:
             if A.shape in [(3,), (6,)]:
                 return A.shape[0]
@@ -2997,35 +3577,23 @@ def geo_secr_to_geo_eclip_generic(obj, earth, eps=1e-12, layout="auto",
 
         if A.ndim == 2:
             r, c = A.shape
-
-            if forced_dim is not None:
-                if forced_dim not in (3, 6):
-                    raise ValueError(f"{name} forced_dim must be 3 or 6")
-                if (r != forced_dim) and (c != forced_dim):
-                    raise ValueError(f"{name} hint forces dim={forced_dim} but shape is {A.shape}")
-                return forced_dim
-
             r_is = r in (3, 6)
             c_is = c in (3, 6)
-
             if r_is and not c_is:
                 return r
             if c_is and not r_is:
                 return c
-
-            # Ambiguous: both axes are in {3,6}
             if r_is and c_is:
-                if (r == 6) or (c == 6):
-                    return 6
-                return 3
+                # prefer 6 if present
+                return 6 if (r == 6 or c == 6) else 3
 
-        if A.ndim == 3 and A.shape[2] in (3, 6):
-            return A.shape[2]
+        if A.ndim == 3 and A.shape[-1] in (3, 6):
+            return A.shape[-1]
 
         raise ValueError(f"Could not infer dim for {name} with shape {A.shape}")
 
-    obj_dim = infer_dim(O, "obj", obj_dim_hint)
-    earth_dim = infer_dim(E, "earth", earth_dim_hint)
+    obj_dim = obj_dim_hint if obj_dim_hint is not None else infer_dim_fallback(O, "obj")
+    earth_dim = earth_dim_hint if earth_dim_hint is not None else infer_dim_fallback(E, "earth")
 
     # -----------------------
     # STRICT RULE
@@ -3037,9 +3605,177 @@ def geo_secr_to_geo_eclip_generic(obj, earth, eps=1e-12, layout="auto",
         )
 
     # -----------------------
-    # Normalize earth to (N,earth_dim)
+    # Normalize obj to internal (M,N,dim), and record how to restore
     # -----------------------
-    def earth_to_Nd(Earr, N, dim):
+    def _normalize_obj_with_hint(A, order, dim):
+        """
+        Uses explicit axis order to convert A to (M,N,dim).
+        Returns (A_int, restore_info)
+        restore_info includes:
+          - used_hint: True
+          - order: original order list
+          - orig_ndim: 1/2/3
+        Missing axes ('batch' or 'time') are treated as singleton.
+        """
+        if A.ndim == 1:
+            if A.shape != (dim,):
+                raise ValueError(f"obj expected ({dim},), got {A.shape}")
+            A_int = A[None, None, :]
+            restore = {"used_hint": True, "order": ["dim"], "orig_ndim": 1}
+            return A_int, restore
+
+        # order can be length 2 or 3; A.ndim must match it
+        if A.ndim != len(order):
+            raise ValueError(f"obj_hint implies {len(order)}D but obj has ndim={A.ndim}, shape={A.shape}")
+
+        # locate axes
+        ax_dim = order.index("dim")
+        ax_batch = order.index("batch") if "batch" in order else None
+        ax_time  = order.index("time")  if "time" in order else None
+
+        # verify dim axis length
+        if A.shape[ax_dim] != dim:
+            raise ValueError(f"obj dim axis length {A.shape[ax_dim]} does not match hinted dim={dim}.")
+
+        # compute M, N (singleton if missing)
+        M = A.shape[ax_batch] if ax_batch is not None else 1
+        N = A.shape[ax_time]  if ax_time  is not None else 1
+
+        # Permute to (batch,time,dim) with missing axes injected
+        # Build an array with explicit axes in current A:
+        # Start from A, transpose existing axes into the order [batch,time,dim] (without missing)
+        target_axes_existing = []
+        if ax_batch is not None:
+            target_axes_existing.append(ax_batch)
+        if ax_time is not None:
+            target_axes_existing.append(ax_time)
+        target_axes_existing.append(ax_dim)
+
+        A_perm = np.transpose(A, axes=target_axes_existing)
+
+        # Now A_perm is either:
+        #   (M,N,dim) if both present
+        #   (M,dim)   if only batch
+        #   (N,dim)   if only time
+        if ax_batch is not None and ax_time is not None:
+            A_int = A_perm  # (M,N,dim)
+        elif ax_batch is not None and ax_time is None:
+            A_int = A_perm[:, None, :]  # (M,1,dim)
+        elif ax_batch is None and ax_time is not None:
+            A_int = A_perm[None, :, :]  # (1,N,dim)
+        else:
+            # only dim axis in a 2D/3D hint would be weird; but keep safe
+            A_int = A_perm[None, None, :]
+
+        restore = {"used_hint": True, "order": order, "orig_ndim": A.ndim}
+        return A_int, restore
+
+    def _choose_obj_mode_for_Kdim(K):
+        # fallback behavior when no explicit hint and obj is (K,dim)
+        if layout in ("batch", "time"):
+            return layout
+        # layout == auto: infer from earth shape heuristic
+        earth_time_like = (
+            E.ndim == 2 and (
+                (E.shape[1] == earth_dim and E.shape[0] == K) or
+                (E.shape[0] == earth_dim and E.shape[1] == K)
+            )
+        )
+        return "time" if earth_time_like else "batch"
+
+    if obj_order_hint is not None:
+        O_int, obj_restore = _normalize_obj_with_hint(O, obj_order_hint, obj_dim)
+        out_style = ("hinted", obj_restore)
+    else:
+        # ---- original-ish fallback normalization ----
+        if O.ndim == 1:
+            if O.shape != (obj_dim,):
+                raise ValueError(f"obj expected ({obj_dim},), got {O.shape}")
+            O_int = O[None, None, :]
+            out_style = ("single",)
+
+        elif O.ndim == 2:
+            if O.shape == (obj_dim, 1):
+                O_int = O[:, 0][None, None, :]
+                out_style = ("single",)
+
+            elif O.shape == (1, obj_dim):
+                O_int = O[0, :][None, None, :]
+                out_style = ("single",)
+
+            elif O.shape[0] == obj_dim and O.shape[1] != obj_dim:  # (dim,N)
+                O_int = O.T[None, :, :]
+                out_style = ("dimxN",)
+
+            elif O.shape[1] == obj_dim and O.shape[0] != obj_dim:  # (K,dim)
+                K = O.shape[0]
+                mode = _choose_obj_mode_for_Kdim(K)
+                if mode == "time":
+                    O_int = O[None, :, :]
+                    out_style = ("Nxdim_time",)
+                else:
+                    O_int = O[:, None, :]
+                    out_style = ("Mxdim",)
+
+            elif O.shape[0] == obj_dim and O.shape[1] == obj_dim:
+                raise ValueError(
+                    f"Ambiguous obj shape {O.shape}. Reshape explicitly or use obj_hint."
+                )
+            else:
+                raise ValueError(f"obj unsupported shape {O.shape}")
+
+        elif O.ndim == 3:
+            if O.shape[2] != obj_dim:
+                raise ValueError(f"obj expected (M,N,{obj_dim}), got {O.shape}")
+            O_int = O
+            out_style = ("MNdim",)
+
+        else:
+            raise ValueError(f"obj unsupported ndim={O.ndim}")
+
+    M, N, _ = O_int.shape
+
+    # -----------------------
+    # Normalize earth to (N, earth_dim) (time-indexed only)
+    # -----------------------
+    def _normalize_earth_to_Nd(Earr, N, dim, order_hint=None):
+        # If explicit earth hint provided, obey it and transpose/reshape accordingly.
+        if order_hint is not None:
+            # earth can be (dim,), (N,dim), (dim,N); or hinted 2D/1D
+            if Earr.ndim == 1:
+                if Earr.shape != (dim,):
+                    raise ValueError(f"earth expected ({dim},), got {Earr.shape}")
+                return np.repeat(Earr[None, :], N, axis=0)
+
+            if Earr.ndim != len(order_hint):
+                raise ValueError(f"earth_hint implies {len(order_hint)}D but earth has ndim={Earr.ndim}, shape={Earr.shape}")
+
+            if "batch" in order_hint:
+                raise ValueError("earth_hint may not include 'batch' in this function.")
+
+            ax_dim = order_hint.index("dim")
+            ax_time = order_hint.index("time") if "time" in order_hint else None
+
+            if Earr.shape[ax_dim] != dim:
+                raise ValueError(f"earth dim axis length {Earr.shape[ax_dim]} does not match hinted dim={dim}.")
+
+            if ax_time is None:
+                # no time axis: treat as constant
+                if Earr.ndim != 1:
+                    # if user gave e.g. (dim,1) or (1,dim) they should include time; but allow (dim,1) etc by squeeze
+                    squeezed = np.squeeze(Earr)
+                    if squeezed.shape != (dim,):
+                        raise ValueError(f"earth constant form must squeeze to ({dim},), got {squeezed.shape}")
+                    return np.repeat(squeezed[None, :], N, axis=0)
+                return np.repeat(Earr[None, :], N, axis=0)
+
+            # transpose to (time,dim)
+            E_td = np.transpose(Earr, axes=[ax_time, ax_dim])
+            if E_td.shape[0] != N:
+                raise ValueError(f"earth has N={E_td.shape[0]} but obj has N={N}")
+            return E_td
+
+        # ---- fallback behavior (original) ----
         if Earr.ndim == 1:
             if Earr.shape != (dim,):
                 raise ValueError(f"earth expected ({dim},), got {Earr.shape}")
@@ -3051,98 +3787,26 @@ def geo_secr_to_geo_eclip_generic(obj, earth, eps=1e-12, layout="auto",
             if Earr.shape == (1, dim):
                 return np.repeat(Earr[0, :][None, :], N, axis=0)
 
-            # (N,dim)
-            if Earr.shape[1] == dim and Earr.shape[0] == N:
+            if Earr.shape[1] == dim and Earr.shape[0] == N:  # (N,dim)
                 return Earr
-
-            # (dim,N)
-            if Earr.shape[0] == dim and Earr.shape[1] == N:
+            if Earr.shape[0] == dim and Earr.shape[1] == N:  # (dim,N)
                 return Earr.T
 
-            # If N==dim, (dim,dim) is ambiguous; refuse to guess.
             if Earr.shape[0] == dim and Earr.shape[1] == dim:
                 raise ValueError(
-                    f"Ambiguous earth shape {Earr.shape} with dim={dim} (could be (N,dim) or (dim,N)). "
-                    f"Reshape explicitly."
+                    f"Ambiguous earth shape {Earr.shape} with dim={dim}. Reshape explicitly or use earth_hint."
                 )
 
         raise ValueError(f"earth unsupported shape {Earr.shape} for dim={dim} and N={N}")
 
-    # -----------------------
-    # Normalize obj to internal (M,N,obj_dim) and remember return style
-    # -----------------------
-    def _choose_obj_mode_for_Kdim(K):
-        # Priority: obj_hint -> layout -> (auto uses earth shape heuristic) -> batch default
-        if obj_mode_hint in ("batch", "time"):
-            return obj_mode_hint
-        if layout in ("batch", "time"):
-            return layout
-        # layout == auto: infer from earth shape
-        earth_time_like = (
-            E.ndim == 2 and (
-                (E.shape[1] == earth_dim and E.shape[0] == K) or
-                (E.shape[0] == earth_dim and E.shape[1] == K)
-            )
-        )
-        return "time" if earth_time_like else "batch"
-
-    if O.ndim == 1:
-        if O.shape != (obj_dim,):
-            raise ValueError(f"obj expected ({obj_dim},), got {O.shape}")
-        O_int = O[None, None, :]
-        out_style = ("single",)
-
-    elif O.ndim == 2:
-        if O.shape == (obj_dim, 1):
-            O_int = O[:, 0][None, None, :]
-            out_style = ("single",)
-
-        elif O.shape == (1, obj_dim):
-            O_int = O[0, :][None, None, :]
-            out_style = ("single",)
-
-        elif O.shape[0] == obj_dim and O.shape[1] != obj_dim:  # (dim,N)
-            O_int = O.T[None, :, :]
-            out_style = ("dimxN",)
-
-        elif O.shape[1] == obj_dim and O.shape[0] != obj_dim:  # (K,dim)
-            K = O.shape[0]
-            mode = _choose_obj_mode_for_Kdim(K)
-            if mode == "time":
-                O_int = O[None, :, :]
-                out_style = ("Nxdim_time",)
-            else:
-                O_int = O[:, None, :]
-                out_style = ("Mxdim",)
-
-        elif O.shape[0] == obj_dim and O.shape[1] == obj_dim:
-            raise ValueError(
-                f"Ambiguous obj shape {O.shape}. This could be (dim,N) or (K,dim) with K=dim. "
-                f"Reshape explicitly to (dim,N) or (K,dim), or pass a 3D array (M,N,dim)."
-            )
-        else:
-            raise ValueError(f"obj unsupported shape {O.shape}")
-
-    elif O.ndim == 3:
-        if O.shape[2] != obj_dim:
-            raise ValueError(f"obj expected (M,N,{obj_dim}), got {O.shape}")
-        O_int = O
-        out_style = ("MNdim",)
-
-    else:
-        raise ValueError(f"obj unsupported ndim={O.ndim}")
-
-    M, N, _ = O_int.shape
-
-    # Earth normalized to (N, earth_dim)
-    E_N = earth_to_Nd(E, N, earth_dim)
+    E_N = _normalize_earth_to_Nd(E, N, earth_dim, earth_order_hint)
 
     # For obj_dim==3, allow earth_dim==6 but ignore vel; for obj_dim==6 earth_dim==6 is guaranteed
-    h_r_E = E_N[:, :3]  # (N,3)
+    h_r_E = E_N[:, :3]                 # (N,3)
     h_v_E = E_N[:, 3:] if obj_dim == 6 else None
 
     # ---- unpack SECR obj ----
-    r_p = O_int[:, :, :3]  # (M,N,3) in SECR
+    r_p = O_int[:, :, :3]              # (M,N,3) in SECR
     v_p = O_int[:, :, 3:] if obj_dim == 6 else None
 
     # angles from Earth-Sun direction (same convention as forward function)
@@ -3178,11 +3842,70 @@ def geo_secr_to_geo_eclip_generic(obj, earth, eps=1e-12, layout="auto",
 
         # inertial relative velocity: v = R * (v' + omega' x r')
         v_rel_p = v_p + np.cross(omega_p[None, :, :], r_p)  # (M,N,3)
-        geo_v = np.einsum("nij,mnj->mni", R, v_rel_p)  # (M,N,3)
+        geo_v = np.einsum("nij,mnj->mni", R, v_rel_p)        # (M,N,3)
 
-        out_int = np.concatenate([geo_r, geo_v], axis=2)  # (M,N,6)
+        out_int = np.concatenate([geo_r, geo_v], axis=2)     # (M,N,6)
 
-    # ---- restore original layout ----
+    # -----------------------
+    # Restore original layout
+    # -----------------------
+    def _restore_obj_from_hint(out_int_MNdim, restore):
+        order = restore["order"]
+        orig_ndim = restore["orig_ndim"]
+
+        # If original was 1D dim-only
+        if orig_ndim == 1:
+            return out_int_MNdim[0, 0, :]
+
+        # Build an array in the original hinted axis order.
+        # We have out_int in (M,N,dim). We need to:
+        #  - drop singleton axes for missing batch/time in the hint
+        #  - permute to the hint order
+        have_batch = "batch" in order
+        have_time  = "time" in order
+
+        # start from (M,N,dim)
+        A = out_int_MNdim
+
+        # if hint did not include batch, drop M axis
+        if not have_batch:
+            A = A[0, :, :]  # (N,dim)
+        # if hint did not include time, drop N axis
+        if not have_time:
+            if have_batch:
+                A = A[:, 0, :]  # (M,dim)
+            else:
+                A = A[0, :]     # (dim,)
+
+        # Now A has axes among:
+        #  - batch, time, dim that were present
+        present_axes = []
+        if have_batch:
+            present_axes.append("batch")
+        if have_time:
+            present_axes.append("time")
+        present_axes.append("dim")
+
+        # If A is 1D (dim,), nothing to permute
+        if A.ndim == 1:
+            return A
+
+        # Permute from present_axes order to the user's requested 'order'
+        # BUT order may include all 2 or 3 axes; present_axes is in canonical [batch,time,dim] subset order
+        src = present_axes
+        dst = order[:]  # user's order (2D or 3D)
+
+        # sanity: they should match as sets
+        if set(src) != set(dst):
+            raise RuntimeError(f"Internal restore mismatch: src={src}, dst={dst}")
+
+        perm = [src.index(ax) for ax in dst]
+        return np.transpose(A, axes=perm)
+
+    if out_style[0] == "hinted":
+        return _restore_obj_from_hint(out_int, out_style[1])
+
+    # fallback restore (original)
     if out_style[0] == "single":
         return out_int[0, 0, :]
     if out_style[0] == "Mxdim":
@@ -3194,7 +3917,6 @@ def geo_secr_to_geo_eclip_generic(obj, earth, eps=1e-12, layout="auto",
     return out_int
 
 
-
 def geo_eme_to_geo_eclip_generic(x, eps=1e-12, layout="auto", hint=None):
     """
     Convert geocentric EME/J2000 position(s) or state(s) to geocentric ECLIPJ2000.
@@ -3202,40 +3924,57 @@ def geo_eme_to_geo_eclip_generic(x, eps=1e-12, layout="auto", hint=None):
     If x has 3 components -> treat as position, return position.
     If x has 6 components -> treat as full state, return full state.
 
-    Supported x shapes:
+    Supported x shapes (fallback, when no explicit hint):
       Position: (3,), (M,3), (N,3), (3,N), (M,N,3)
       State:    (6,), (M,6), (N,6), (6,N), (M,N,6)
 
-    layout resolves ambiguity when x is (K,3) or (K,6):
+    layout resolves ambiguity when x is (K,3) or (K,6) (fallback mode):
       - "batch": interpret as (M,dim) objects at one time (N=1)
       - "time" : interpret as (N,dim) time series for one object (M=1)
       - "auto" : default to "batch" (safer)
 
-    NEW: hint (optional) to disambiguate awkward 2D cases like (3,6), (6,3), (3,3), (6,6).
-      Accepts permutations of tokens in a tuple/list/set or string, e.g.:
-        "(batch, 6)", "(time, 3)", "(6, batch)", "(time, batch, 6)"
-      Rules:
-        - Any occurrence of 'batch' or 'time' sets the interpretation for ambiguous (K,dim) inputs.
-        - Any occurrence of 3 or 6 forces the dimensionality if ambiguous.
-        - If hint contains both 'batch' and 'time' -> ValueError.
+    NEW (explicit structure hint):
+      You can explicitly define the axis order using tokens:
+        - 'batch'   : M axis (multiple objects)
+        - 'time'    : N axis (time series)
+        - 'position': dim=3
+        - 'state'   : dim=6
+        - 3 or 6    : dim override (optional)
 
-    Returns: same layout as x.
+      Any permutation is accepted, and missing axes are treated as singleton.
+
+      Examples:
+        hint=('batch','position')   -> expects x shape (M,3)
+        hint=('position','batch')   -> expects x shape (3,M)
+
+        hint=('time','state')       -> expects x shape (N,6)
+        hint=('state','time')       -> expects x shape (6,N)
+
+        hint=('time','state','batch')  -> expects x shape (N,6,M)
+        hint=('batch','time','state')  -> expects x shape (M,N,6)
+        hint=('state','batch','time')  -> expects x shape (6,M,N)
+        etc.
+
+      Notes:
+        - If you provide a hint, it is used strictly (shape must match its rank and dim axis size).
+        - If you do NOT provide a hint, behavior matches your previous function:
+            infer dim, then use layout/auto heuristics for (K,dim) 2D inputs.
+
+    Returns: same layout as input x; if a hint was used, it returns in that hinted axis order.
     """
-    import numpy as np
-
     if layout not in ("auto", "batch", "time"):
         raise ValueError("layout must be one of {'auto','batch','time'}")
 
     X = np.asarray(x, dtype=float)
 
     # -----------------------
-    # Hint parsing
+    # Hint parsing: explicit axis order
     # -----------------------
-    def _parse_hint(h):
+    def _parse_struct_hint(h, name="hint"):
         """
-        Returns (mode, forced_dim) where:
-          mode in {None,'batch','time'}
-          forced_dim in {None,3,6}
+        Returns (order, dim) where:
+          order: list like ['batch','dim'] or ['time','dim','batch'] (axis order)
+          dim: 3 or 6
         """
         if h is None:
             return None, None
@@ -3248,135 +3987,194 @@ def geo_eme_to_geo_eclip_generic(x, eps=1e-12, layout="auto", hint=None):
                 s = s[1:-1]
             tokens = [t.strip() for t in s.split(",") if t.strip()]
         else:
-            raise ValueError("hint must be None, a tuple/list/set, or a string like '(batch,6)'")
+            raise ValueError(f"{name} must be None, a tuple/list/set, or a string like '(time,state,batch)'")
 
-        mode = None
-        forced_dim = None
+        order = []
+        dim = None
+
+        def _add_axis(ax):
+            if ax in order:
+                raise ValueError(f"{name} repeats axis '{ax}'. Got {h}.")
+            order.append(ax)
 
         for t in tokens:
             if isinstance(t, (int, np.integer)):
-                if int(t) in (3, 6):
-                    forced_dim = int(t)
+                iv = int(t)
+                if iv in (3, 6):
+                    dim = iv
+                    if "dim" not in order:
+                        _add_axis("dim")
                 else:
-                    raise ValueError(f"Invalid hint dim {t} (use 3 or 6)")
+                    raise ValueError(f"{name} invalid dim {t} (use 3 or 6)")
                 continue
 
             ts = str(t).strip().lower()
-            if ts in ("batch", "time"):
-                if mode is None:
-                    mode = ts
-                elif mode != ts:
-                    raise ValueError(f"Conflicting hint modes: got both '{mode}' and '{ts}'")
+
+            if ts == "batch":
+                _add_axis("batch")
+            elif ts == "time":
+                _add_axis("time")
+            elif ts in ("position", "pos"):
+                if dim is not None and dim != 3:
+                    raise ValueError(f"{name} conflicts: both state(6) and position(3) implied.")
+                dim = 3
+                _add_axis("dim")
+            elif ts in ("state", "st"):
+                if dim is not None and dim != 6:
+                    raise ValueError(f"{name} conflicts: both position(3) and state(6) implied.")
+                dim = 6
+                _add_axis("dim")
             elif ts in ("3", "6"):
-                forced_dim = int(ts)
+                dim = int(ts)
+                if "dim" not in order:
+                    _add_axis("dim")
             elif ts == "":
                 continue
             else:
-                raise ValueError(f"Unrecognized hint token '{t}'. Use 'batch', 'time', 3, or 6.")
+                raise ValueError(
+                    f"{name} token '{t}' unrecognized. Use 'batch','time','position','state',3,6."
+                )
 
-        return mode, forced_dim
+        if "dim" not in order:
+            raise ValueError(f"{name} must include 'position'/'state' (or 3/6). Got {h}.")
+        if dim not in (3, 6):
+            raise ValueError(f"{name} must resolve dim to 3 or 6. Got {h}.")
 
-    hint_mode, hint_dim = _parse_hint(hint)
+        return order, dim
+
+    hint_order, hint_dim = _parse_struct_hint(hint, "hint")
 
     # -----------------------
-    # Infer dim (3 or 6) robustly
+    # Dim inference (fallback when no explicit hint)
     # -----------------------
-    def infer_dim(A, forced_dim=None):
+    def infer_dim_fallback(A):
         if A.ndim == 1 and A.shape in [(3,), (6,)]:
             return A.shape[0]
 
         if A.ndim == 2:
             r, c = A.shape
-
-            if forced_dim is not None:
-                if forced_dim not in (3, 6):
-                    raise ValueError("forced dim must be 3 or 6")
-                if (r != forced_dim) and (c != forced_dim):
-                    raise ValueError(f"hint forces dim={forced_dim} but shape is {A.shape}")
-                return forced_dim
-
             r_is = r in (3, 6)
             c_is = c in (3, 6)
-
-            # Unambiguous: only one axis matches {3,6}
             if r_is and not c_is:
                 return r
             if c_is and not r_is:
                 return c
-
-            # Ambiguous: both axes match {3,6}
             if r_is and c_is:
-                # Prefer 6 if present (state beats position)
-                if (r == 6) or (c == 6):
-                    return 6
-                return 3
+                return 6 if (r == 6 or c == 6) else 3
 
-        if A.ndim == 3 and A.shape[2] in (3, 6):
-            return A.shape[2]
+        if A.ndim == 3 and A.shape[-1] in (3, 6):
+            return A.shape[-1]
 
         raise ValueError(f"Input must be position (3) or state (6); got shape {A.shape}")
 
-    dim = infer_dim(X, hint_dim)
+    dim = hint_dim if hint_dim is not None else infer_dim_fallback(X)
 
     # -----------------------
-    # Normalize to internal (M,N,dim) and remember output layout
+    # Normalize X to internal (M,N,dim) and remember how to restore
     # -----------------------
+    def _normalize_with_hint(A, order, dim):
+        """
+        Strictly interpret A using explicit axis order -> return (M,N,dim)
+        Missing 'batch' or 'time' axes are treated as singleton.
+        Also returns restore_info to put output back into the same hinted order.
+        """
+        if A.ndim == 1:
+            if A.shape != (dim,):
+                raise ValueError(f"x expected ({dim},), got {A.shape}")
+            A_int = A[None, None, :]
+            restore = {"used_hint": True, "order": ["dim"], "orig_ndim": 1}
+            return A_int, restore
+
+        if A.ndim != len(order):
+            raise ValueError(f"hint implies {len(order)}D but x has ndim={A.ndim}, shape={A.shape}")
+
+        ax_dim = order.index("dim")
+        ax_batch = order.index("batch") if "batch" in order else None
+        ax_time  = order.index("time")  if "time"  in order else None
+
+        if A.shape[ax_dim] != dim:
+            raise ValueError(f"x dim axis length {A.shape[ax_dim]} does not match hinted dim={dim}.")
+
+        # transpose existing axes into canonical [batch,time,dim] (dropping missing)
+        axes = []
+        if ax_batch is not None:
+            axes.append(ax_batch)
+        if ax_time is not None:
+            axes.append(ax_time)
+        axes.append(ax_dim)
+
+        A_perm = np.transpose(A, axes=axes)
+
+        # inject missing axes to make (M,N,dim)
+        if ax_batch is not None and ax_time is not None:
+            A_int = A_perm                       # (M,N,dim)
+        elif ax_batch is not None and ax_time is None:
+            A_int = A_perm[:, None, :]           # (M,1,dim)
+        elif ax_batch is None and ax_time is not None:
+            A_int = A_perm[None, :, :]           # (1,N,dim)
+        else:
+            # only 'dim' in order (shouldn't happen for nd>1 because we'd require dim + something),
+            # but keep a safe path
+            A_int = A_perm[None, None, :]
+
+        restore = {"used_hint": True, "order": order, "orig_ndim": A.ndim}
+        return A_int, restore
+
     def _choose_mode_for_Kdim(K):
-        # Priority: hint -> layout -> (auto -> batch)
-        if hint_mode in ("batch", "time"):
-            return hint_mode
+        # Priority: layout if not auto; else default batch
         if layout in ("batch", "time"):
             return layout
-        return "batch"  # auto default
+        return "batch"
 
-    if X.ndim == 1:
-        if X.shape != (dim,):
-            raise ValueError(f"Expected ({dim},), got {X.shape}")
-        X_int = X[None, None, :]
-        out_style = ("single",)
-
-    elif X.ndim == 2:
-        if X.shape == (dim, 1):
-            X_int = X[:, 0][None, None, :]
-            out_style = ("single",)
-
-        elif X.shape == (1, dim):
-            X_int = X[0, :][None, None, :]
-            out_style = ("single",)
-
-        # (dim,N) if rows are dim and columns not equal dim
-        elif X.shape[0] == dim and X.shape[1] != dim:
-            X_int = X.T[None, :, :]  # (1,N,dim)
-            out_style = ("dimxN",)
-
-        # (K,dim) if last axis equals dim and first axis not equal dim
-        elif X.shape[1] == dim and X.shape[0] != dim:
-            K = X.shape[0]
-            mode = _choose_mode_for_Kdim(K)
-            if mode == "time":
-                X_int = X[None, :, :]  # (1,N,dim)
-                out_style = ("Nxdim_time",)
-            else:
-                X_int = X[:, None, :]  # (M,1,dim)
-                out_style = ("Mxdim",)
-
-        # Truly ambiguous squares like (3,3) or (6,6)
-        elif X.shape[0] == dim and X.shape[1] == dim:
-            raise ValueError(
-                f"Ambiguous input shape {X.shape}. This could be (dim,N) or (K,dim) with K=dim. "
-                f"Reshape explicitly to (dim,N) or (K,dim), or pass a 3D array (M,N,dim)."
-            )
-        else:
-            raise ValueError(f"Unsupported shape {X.shape} for dim={dim}")
-
-    elif X.ndim == 3:
-        if X.shape[2] != dim:
-            raise ValueError(f"Expected (M,N,{dim}), got {X.shape}")
-        X_int = X
-        out_style = ("MNdim",)
-
+    if hint_order is not None:
+        X_int, restore_info = _normalize_with_hint(X, hint_order, dim)
+        out_style = ("hinted", restore_info)
     else:
-        raise ValueError(f"Unsupported ndim={X.ndim}")
+        # ---- fallback normalization (matches your previous behavior) ----
+        if X.ndim == 1:
+            if X.shape != (dim,):
+                raise ValueError(f"Expected ({dim},), got {X.shape}")
+            X_int = X[None, None, :]
+            out_style = ("single",)
+
+        elif X.ndim == 2:
+            if X.shape == (dim, 1):
+                X_int = X[:, 0][None, None, :]
+                out_style = ("single",)
+
+            elif X.shape == (1, dim):
+                X_int = X[0, :][None, None, :]
+                out_style = ("single",)
+
+            elif X.shape[0] == dim and X.shape[1] != dim:      # (dim,N)
+                X_int = X.T[None, :, :]                         # (1,N,dim)
+                out_style = ("dimxN",)
+
+            elif X.shape[1] == dim and X.shape[0] != dim:      # (K,dim)
+                K = X.shape[0]
+                mode = _choose_mode_for_Kdim(K)
+                if mode == "time":
+                    X_int = X[None, :, :]                       # (1,N,dim)
+                    out_style = ("Nxdim_time",)
+                else:
+                    X_int = X[:, None, :]                       # (M,1,dim)
+                    out_style = ("Mxdim",)
+
+            elif X.shape[0] == dim and X.shape[1] == dim:
+                raise ValueError(
+                    f"Ambiguous input shape {X.shape}. Reshape explicitly or pass hint."
+                )
+            else:
+                raise ValueError(f"Unsupported shape {X.shape} for dim={dim}")
+
+        elif X.ndim == 3:
+            if X.shape[2] != dim:
+                raise ValueError(f"Expected (M,N,{dim}), got {X.shape}")
+            X_int = X
+            out_style = ("MNdim",)
+
+        else:
+            raise ValueError(f"Unsupported ndim={X.ndim}")
 
     # ---- rotation EME -> ecliptic is inverse of (ecliptic -> EME) ----
     eps_deg = 23.439281
@@ -3405,7 +4203,50 @@ def geo_eme_to_geo_eclip_generic(x, eps=1e-12, layout="auto", hint=None):
         v_ecl = np.einsum("ij,mnj->mni", R_T, v)
         out_int = np.concatenate([r_ecl, v_ecl], axis=2)  # (M,N,6)
 
-    # ---- restore original layout ----
+    # -----------------------
+    # Restore output layout
+    # -----------------------
+    def _restore_from_hint(out_int_MNdim, restore):
+        order = restore["order"]
+        orig_ndim = restore["orig_ndim"]
+
+        if orig_ndim == 1:
+            return out_int_MNdim[0, 0, :]
+
+        have_batch = "batch" in order
+        have_time  = "time"  in order
+
+        A = out_int_MNdim  # (M,N,dim)
+
+        if not have_batch:
+            A = A[0, :, :]         # (N,dim)
+        if not have_time:
+            if have_batch:
+                A = A[:, 0, :]     # (M,dim)
+            else:
+                A = A[0, :]        # (dim,)
+
+        # present axes are in canonical subset order:
+        present = []
+        if have_batch:
+            present.append("batch")
+        if have_time:
+            present.append("time")
+        present.append("dim")
+
+        if A.ndim == 1:
+            return A
+
+        if set(present) != set(order):
+            raise RuntimeError(f"Internal restore mismatch: present={present}, order={order}")
+
+        perm = [present.index(ax) for ax in order]
+        return np.transpose(A, axes=perm)
+
+    if out_style[0] == "hinted":
+        return _restore_from_hint(out_int, out_style[1])
+
+    # fallback restore
     if out_style[0] == "single":
         return out_int[0, 0, :]
     if out_style[0] == "Mxdim":

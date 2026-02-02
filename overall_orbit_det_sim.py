@@ -665,7 +665,6 @@ def run_sim_runnumbers_MPI_getIOD(config):
     return
 
 
-
 def run_IOD(config):
     """
     MPI stage that reads MASTER_IOD.csv, runs the IOD solver per row, and writes results
@@ -1251,26 +1250,33 @@ def run_OD(config):
         ast_helio_ae_kms = util.parse_vec_cell(row['HELIO_AST(kms)'])
 
         sc_helio_se_kms = np.zeros((M, 6))
+        earth_helio_se_kms = np.zeros((M, 6))
         for i in range(M):
             sc_str = f'HELIO_SC_{i + 1}(kms)'
             sc_helio_se_kms[i, :] = util.parse_vec_cell(row[sc_str])
 
-        earth_helio_se_kms = util.parse_vec_cell(row['EARTH_HELIO_SE(kms)'])
-        print(sc_helio_se_kms)
+            se_str = f'EPOCH_SC_{i + 1}(jdtdb)'
+            se_jdtdb = row[se_str]
+            se_et = sp.unitim(se_jdtdb, 'JDTDB', 'ET')
+            reference_body = 10  # sun
+            body = 399  # earth
+            earth_helio_se_i, _ = sp.spkgeo(body, se_et, "ECLIPJ2000", reference_body)
+            earth_helio_se_kms[i, :] = earth_helio_se_i
 
-        fig = plt.figure()
-        for i, sc in enumerate(sc_helio_se_kms):
-            plt.scatter(sc[0], sc[1], label=f'{i}')
-        plt.scatter(earth_helio_se_kms[0], earth_helio_se_kms[1], color='black')
-        plt.legend()
 
         sc_pointing_sunearth_cartesian = np.zeros((M, 3))
         for i in range(M):
-            sc_point_str = f'POINTING_SC_{i + 1}'
+            sc_point_str = f'BORESIGHT_SC_{i+1}_GEO_SECR'
             sc_pointing_sunearth_cartesian[i, :] = util.parse_vec_cell(row[sc_point_str])
 
         # convert IOD master data into a EMEJ2000 for ukf, and SECR visulazation for interpretation
         # convert ast_helio to eme
+        ae_str = 'EPOCH_AST(jdtdb)'
+        ae_jdtdb = row[ae_str]
+        ae_et = sp.unitim(ae_jdtdb, 'JDTDB', 'ET')
+        reference_body = 10
+        body = 399
+        earth_helio_ae_kms, _ = sp.spkgeo(body, ae_et, "ECLIPJ2000", reference_body)
         ast_eme_ae_kms = util.helio_eclip_to_geo_eme_generic(ast_helio_ae_kms, earth_helio_ae_kms,
                                                              layout="batch")
         # covert ast_helio to geo secr
@@ -1278,7 +1284,9 @@ def run_OD(config):
                                                              layout="batch")
 
         # convert s/c to GEO SECR using SE
-        sc_secr_se_kms = util.helio_eclip_to_geo_secr_generic(sc_helio_se_kms, earth_helio_se_kms,
+        sc_secr_se_kms = np.zeros((M, 6))
+        for i in range (M):
+            sc_secr_se_kms[i, :] = util.helio_eclip_to_geo_secr_generic(sc_helio_se_kms[i, :], earth_helio_se_kms[i, :],
                                                               layout="batch", obj_hint="(batch, 6)")
 
         # convert s/c GEO SECR to eme using AE
@@ -1288,9 +1296,10 @@ def run_OD(config):
 
         # convert pointing from SECR to eme
         sc_pointing_geoeclip_cartesian = util.geo_secr_to_geo_eclip_generic(sc_pointing_sunearth_cartesian,
-                                                                            earth_helio_ae_kms, layout="batch")
+                                                                            earth_helio_ae_kms, layout="batch",
+                                                                            obj_hint="(batch, 3)")
         sc_pointing_eme_cartesian = util.geo_eclip_to_geo_eme_generic(sc_pointing_geoeclip_cartesian,
-                                                                      layout="batch")
+                                                                      layout="batch", hint="(batch, 3)")
 
         # get pointing angles - both SECR and EME - ccw from +x
         sc_pointing_secr_angle_rad = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_sunearth_cartesian)
@@ -1361,8 +1370,37 @@ def run_OD(config):
             agent_orbit_tracks_xy=None,  # or list of (K,2)
         )
 
+        # SECR seems fine now, multiple spacecraft, but not eme, positions don't match up
 
-        # confirmed for secr viz and one spacecraft, need to confirm for mutiple
+        # EME Visualization
+        agents_xy = sc_eme_ae_kms[:, :2]
+        pointing_angles_rad = sc_pointing_eme_angle_rad
+        theta_h_rad = np.deg2rad(2.5)
+
+        target_mean_xy = ast_iod_eme_ae_kms[:2]
+        target_cov_xy = ast_iod_uncertainty_topoeme_cartesian_covmat[sc_detecting_id, :2, :2]
+        true_target_xy = ast_eme_ae_kms[:2]
+
+        ems_center_xy = np.array([0, 0])
+        ems_radius = 5e5
+
+        fig2, ax2 = util.plot_od_scenario_2d(
+            agents_xy=agents_xy,
+            pointing_angles_rad=pointing_angles_rad,
+            theta_h_rad=theta_h_rad,
+            ray_length=ray_length,
+            target_mean_xy=target_mean_xy,
+            target_cov_xy=target_cov_xy,
+            d_mahal=2.0,
+            true_target_xy=true_target_xy,
+            ems_center_xy=ems_center_xy,
+            ems_radius=ems_radius,
+            xlim=(-5e6, 2e6), ylim=(-3e6, 3e6),
+            agent_orbit_tracks_xy=None,  # or list of (K,2)
+        )
+
+
+
 
 
         # Generic visualization example ############################
