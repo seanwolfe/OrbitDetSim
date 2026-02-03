@@ -440,6 +440,94 @@ def plot_od_scenario_3d(
     return fig, ax
 
 
+def clamp_point_into_fov_cone(point_xyz,
+                              sc_pos_xyz,
+                              boresight_u_xyz,
+                              theta_h_rad,
+                              max_range=None,
+                              eps=1e-15):
+    """
+    Ensure point_xyz lies within the spacecraft FOV cone defined by:
+      apex = sc_pos_xyz
+      axis = boresight_u_xyz (need not be unit; we normalize)
+      half-angle = theta_h_rad
+      optional max_range (distance from apex)
+
+    Returns:
+      point_clamped_xyz, inside_bool, info_dict
+    """
+    p = np.asarray(point_xyz, dtype=float).reshape(3,)
+    A = np.asarray(sc_pos_xyz, dtype=float).reshape(3,)
+    u = np.asarray(boresight_u_xyz, dtype=float).reshape(3,)
+
+    nu = np.linalg.norm(u)
+    if nu < eps:
+        raise ValueError("boresight_u_xyz has near-zero norm")
+    u = u / nu
+
+    v = p - A
+    r = np.linalg.norm(v)
+    if r < eps:
+        # Point at apex -> treat as inside (degenerate)
+        return p.copy(), True, {"reason": "at_apex"}
+
+    h = float(np.dot(v, u))           # axial distance along cone axis
+    w = v - h * u                     # perpendicular component
+    s = float(np.linalg.norm(w))      # radial distance from axis
+
+    # Must be in front of spacecraft: h >= 0
+    # Must satisfy angle constraint: s <= h*tan(theta)
+    tan_th = float(np.tan(theta_h_rad))
+    cos_th = float(np.cos(theta_h_rad))
+    inside = (h >= 0.0) and (s <= h * tan_th + 1e-12)
+
+    # If inside angle but beyond max_range, clamp along same ray
+    if inside and (max_range is not None) and (r > float(max_range)):
+        p2 = A + (float(max_range) / r) * v
+        return p2, False, {"reason": "range_clamp_only", "old_r": r, "new_r": float(max_range)}
+
+    if inside:
+        return p.copy(), True, {"reason": "inside"}
+
+    # --- Outside: compute closest point in (solid) cone ---
+    # If behind the apex, the closest point in the cone is the apex (or along axis at h=0)
+    if h <= 0.0:
+        p2 = A.copy()
+        if max_range is not None:
+            # apex already within any range
+            pass
+        return p2, False, {"reason": "behind_apex_clamp_to_apex"}
+
+    # For closest point on the cone surface (same azimuth as w):
+    if s > eps:
+        w_hat = w / s
+    else:
+        # v almost on axis but not inside only happens if h<0, handled above
+        # still provide a stable perpendicular direction
+        tmp = np.array([1.0, 0.0, 0.0]) if abs(u[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+        w_hat = np.cross(u, tmp)
+        w_hat /= (np.linalg.norm(w_hat) + eps)
+
+    # Minimize ||(h' u + (h' tanθ) w_hat) - (h u + s w_hat)||^2 over h' >= 0
+    # Closed form:
+    #   h' = cos^2θ (h + tanθ s)
+    h_prime = (cos_th * cos_th) * (h + tan_th * s)
+    h_prime = max(0.0, float(h_prime))
+
+    v_prime = h_prime * u + (h_prime * tan_th) * w_hat
+    p2 = A + v_prime
+
+    # Optional max_range clamp (keep direction from apex to p2)
+    if max_range is not None:
+        r2 = float(np.linalg.norm(v_prime))
+        L = float(max_range)
+        if r2 > L and r2 > eps:
+            p2 = A + (L / r2) * v_prime
+            return p2, False, {"reason": "angle_and_range_clamp", "old_r": r, "new_r": L}
+
+    return p2, False, {"reason": "angle_clamp", "old_r": r}
+
+
 def parse_vec_cell(cell, expected_len=None, dtype=float, default=None):
     """
     Parse a MASTER cell that may contain:

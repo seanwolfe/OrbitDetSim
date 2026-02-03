@@ -1307,6 +1307,45 @@ def run_OD(config):
         ast_iod_secr_ae_kms = util.helio_eclip_to_geo_secr_generic(ast_iod_helioeclip_ae_kms,
                                                                                   earth_helio_ae_kms, layout="batch")
 
+        # Correct IOD if out of FOV
+        # SECR
+        sc_pos = sc_secr_se_kms[sc_detecting_id, :3]  # apex
+        u_bore = sc_pointing_sunearth_cartesian[sc_detecting_id, :]  # axis (SECR)
+        theta_h_rad = np.deg2rad(2.5)
+
+        iod_pos_secr = ast_iod_secr_ae_kms[:3].copy()
+
+        iod_pos_secr_clamped, inside, info = util.clamp_point_into_fov_cone(
+            iod_pos_secr,
+            sc_pos_xyz=sc_pos,
+            boresight_u_xyz=u_bore,
+            theta_h_rad=theta_h_rad,
+        )
+
+        if not inside:
+            # overwrite the IOD position used downstream (position only)
+            ast_iod_secr_ae_kms[:3] = iod_pos_secr_clamped
+            print(f"[IOD clamp] detecting SC {sc_detecting_id}: {info}")
+
+        # eme
+        sc_pos = sc_eme_ae_kms[sc_detecting_id, :3]  # apex
+        u_bore = sc_pointing_eme_cartesian[sc_detecting_id, :]  # axis (SECR)
+        theta_h_rad = np.deg2rad(2.5)
+
+        iod_pos_eme = ast_iod_eme_ae_kms[:3].copy()
+
+        iod_pos_eme_clamped, inside_eme, info = util.clamp_point_into_fov_cone(
+            iod_pos_eme,
+            sc_pos_xyz=sc_pos,
+            boresight_u_xyz=u_bore,
+            theta_h_rad=theta_h_rad,
+        )
+
+        if not inside_eme:
+            # overwrite the IOD position used downstream (position only)
+            ast_iod_eme_ae_kms[:3] = iod_pos_eme_clamped
+            print(f"[IOD clamp] detecting SC {sc_detecting_id}: {info}")
+
 
         # these are (M,6), topo for each s/c
         ast_iod_topoeme_radecrho_radkms = util.topocentric_alpha_delta_rho_6d(
