@@ -31,6 +31,415 @@ import json
 import re
 
 
+# -------------------------
+# Geometry helpers (3D)
+# -------------------------
+def _normalize_rows(X, eps=1e-15):
+    X = np.asarray(X, dtype=float)
+    n = np.linalg.norm(X, axis=1, keepdims=True)
+    return X / (n + eps)
+
+
+def orthonormal_basis(u):
+    """
+    Build (e1,e2) orthonormal basis spanning the plane perpendicular to unit vector u.
+    """
+    u = np.asarray(u, dtype=float)
+    u = u / (np.linalg.norm(u) + 1e-15)
+
+    # Pick a vector not parallel to u
+    a = np.array([1.0, 0.0, 0.0]) if abs(u[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    e1 = np.cross(u, a)
+    e1 = e1 / (np.linalg.norm(e1) + 1e-15)
+    e2 = np.cross(u, e1)
+    e2 = e2 / (np.linalg.norm(e2) + 1e-15)
+    return e1, e2
+
+
+def cone_boundary_circle(apex, u, theta_h, length, n_circle=60):
+    """
+    Return circle points (n_circle,3) at the cone cap and the cap center.
+    """
+    apex = np.asarray(apex, dtype=float).reshape(3,)
+    u = np.asarray(u, dtype=float).reshape(3,)
+    u = u / (np.linalg.norm(u) + 1e-15)
+
+    e1, e2 = orthonormal_basis(u)
+    center = apex + length * u
+    radius = length * np.tan(float(theta_h))
+
+    phi = np.linspace(0, 2*np.pi, int(n_circle), endpoint=True)
+    circle = center + radius * (np.cos(phi)[:, None] * e1[None, :] + np.sin(phi)[:, None] * e2[None, :])
+    return circle, center
+
+
+def plot_fov_cone(ax, apex, u, theta_h, length,
+                  n_rays=12, n_circle=80,
+                  alpha=0.18, lw=1.2, color="tab:blue", label=None):
+    """
+    Draw a cone as:
+      - a handful of boundary rays
+      - a circle connecting their endpoints
+    """
+    apex = np.asarray(apex, dtype=float).reshape(3,)
+    u = np.asarray(u, dtype=float).reshape(3,)
+    u = u / (np.linalg.norm(u) + 1e-15)
+
+    circle, _ = cone_boundary_circle(apex, u, theta_h, length, n_circle=n_circle)
+
+    # Circle (cap)
+    ax.plot(circle[:, 0], circle[:, 1], circle[:, 2],
+            lw=lw, alpha=alpha, color=color, label=label)
+
+    # Boundary rays
+    n_rays = int(max(3, n_rays))
+    idx = np.linspace(0, circle.shape[0] - 1, n_rays, dtype=int)
+    for k in idx:
+        p = circle[k]
+        ax.plot([apex[0], p[0]], [apex[1], p[1]], [apex[2], p[2]],
+                lw=lw, alpha=alpha, color=color)
+
+
+
+def set_axes_equal_3d(ax):
+    """
+    Make 3D axes have equal scale (matplotlib doesn't do this automatically).
+    """
+    x_limits = ax.get_xlim3d()
+    y_limits = ax.get_ylim3d()
+    z_limits = ax.get_zlim3d()
+
+    x_range = abs(x_limits[1] - x_limits[0])
+    y_range = abs(y_limits[1] - y_limits[0])
+    z_range = abs(z_limits[1] - z_limits[0])
+
+    x_mid = np.mean(x_limits)
+    y_mid = np.mean(y_limits)
+    z_mid = np.mean(z_limits)
+
+    plot_radius = 0.5 * max([x_range, y_range, z_range])
+
+    ax.set_xlim3d([x_mid - plot_radius, x_mid + plot_radius])
+    ax.set_ylim3d([y_mid - plot_radius, y_mid + plot_radius])
+    ax.set_zlim3d([z_mid - plot_radius, z_mid + plot_radius])
+
+
+# -------------------------
+# Coverage in 3D (point cloud)
+# -------------------------
+def coverage_count_3d(points_xyz, agents_xyz, u_opt_agents_xyz, theta_h_rad, max_range):
+    """
+    points_xyz: (N,3)
+    agents_xyz: (M,3)
+    u_opt_agents_xyz: (M,3) unit-ish boresight vectors in same frame
+    Returns:
+      cov: (N,) integer coverage count (how many cones contain each point)
+    """
+    P = np.asarray(points_xyz, dtype=float)
+    A = np.asarray(agents_xyz, dtype=float)
+    U = np.asarray(u_opt_agents_xyz, dtype=float)
+
+    M = A.shape[0]
+    N = P.shape[0]
+
+    U = _normalize_rows(U)
+    theta_h = float(theta_h_rad)
+    cos_th = np.cos(theta_h)
+    max_range = float(max_range)
+
+    cov = np.zeros(N, dtype=int)
+
+    # Vectorized per-agent loop (good balance of clarity + speed for typical sizes)
+    for i in range(M):
+        v = P - A[i]  # (N,3)
+        d = np.linalg.norm(v, axis=1)  # (N,)
+        in_range = d <= max_range
+
+        # Avoid division by zero for points at the apex
+        vhat = v / (d[:, None] + 1e-15)
+        cosang = vhat @ U[i]  # (N,)
+
+        in_cone = in_range & (cosang >= cos_th)
+        cov += in_cone.astype(int)
+
+    return cov
+
+
+# -------------------------
+# Uncertainty ellipsoid (3D)
+# -------------------------
+def mahalanobis_ellipsoid_mesh(mu, Sigma, d_mahal=3.0, n_u=40, n_v=20):
+    """
+    Mesh points on the ellipsoid:
+      (x-mu)^T Sigma^{-1} (x-mu) = d_mahal^2
+
+    Returns X,Y,Z each (n_v, n_u) suitable for ax.plot_wireframe / ax.plot_surface.
+    """
+    mu = np.asarray(mu, dtype=float).reshape(3,)
+    Sigma = np.asarray(Sigma, dtype=float).reshape(3, 3)
+
+    eigvals, eigvecs = np.linalg.eigh(Sigma)
+    eigvals = np.maximum(eigvals, 1e-12)
+
+    # Unit sphere parameterization
+    u = np.linspace(0, 2*np.pi, int(n_u))
+    v = np.linspace(0, np.pi, int(n_v))
+    uu, vv = np.meshgrid(u, v)
+
+    xs = np.cos(uu) * np.sin(vv)
+    ys = np.sin(uu) * np.sin(vv)
+    zs = np.cos(vv)
+
+    sphere = np.stack([xs, ys, zs], axis=0).reshape(3, -1)  # (3, n_u*n_v)
+
+    axes_lengths = float(d_mahal) * np.sqrt(eigvals)  # (3,)
+    ell_local = (np.diag(axes_lengths) @ sphere)       # (3, npts)
+    ell_world = (eigvecs @ ell_local).T + mu           # (npts, 3)
+
+    X = ell_world[:, 0].reshape(vv.shape)
+    Y = ell_world[:, 1].reshape(vv.shape)
+    Z = ell_world[:, 2].reshape(vv.shape)
+    return X, Y, Z
+
+
+# -------------------------
+# EMS sphere mesh
+# -------------------------
+def sphere_mesh(center, radius, n_u=60, n_v=30):
+    center = np.asarray(center, dtype=float).reshape(3,)
+    R = float(radius)
+
+    u = np.linspace(0, 2*np.pi, int(n_u))
+    v = np.linspace(0, np.pi, int(n_v))
+    uu, vv = np.meshgrid(u, v)
+
+    X = center[0] + R * np.cos(uu) * np.sin(vv)
+    Y = center[1] + R * np.sin(uu) * np.sin(vv)
+    Z = center[2] + R * np.cos(vv)
+    return X, Y, Z
+
+
+# -------------------------
+# Main plotting function (3D)
+# -------------------------
+def plot_od_scenario_3d(
+        *,
+        # epoch/meta
+        t_label=None,
+
+        # agents
+        agents_xyz,            # (M,3)
+        u_opt_agents_xyz,      # (M,3) boresight unit-ish vectors in this frame
+        theta_h_rad,           # scalar half-angle of cone
+        ray_length=10.0,
+
+        # optional: current boresight vectors for dotted line + slew text
+        u_curr_agents_xyz=None,   # (M,3)
+        boresight_line_len=3.0,
+
+        # optional: orbit tracks / quasi-halo projections
+        agent_orbit_tracks_xyz=None,  # list length M; each entry (K,3)
+
+        # coverage extents + sampling
+        xlim=None, ylim=None, zlim=None,
+        Nx=40, Ny=40, Nz=20,
+        max_points_for_scatter=120_000,
+
+        # target uncertainty + truth
+        target_mean_xyz=None,      # (3,)
+        target_cov_xyz=None,       # (3,3)
+        d_mahal=2.0,
+        true_target_xyz=None,      # (3,)
+
+        # EMS sphere
+        ems_center_xyz=None,       # (3,)
+        ems_radius=None,           # scalar
+
+        # styling toggles
+        show_coverage=True,
+        show_uncertainty=True,
+        show_truth=True,
+        show_ems=True,
+        title=None,
+):
+    """
+    Pure 3D visualization: everything is passed in (positions, vectors, cov, tracks).
+    Returns (fig, ax).
+    """
+    A = np.asarray(agents_xyz, dtype=float)
+    M = A.shape[0]
+    Uopt = _normalize_rows(np.asarray(u_opt_agents_xyz, dtype=float).reshape(M, 3))
+
+    # Determine plot bounds if not provided
+    if (xlim is None) or (ylim is None) or (zlim is None):
+        xs = [A[:, 0]]
+        ys = [A[:, 1]]
+        zs = [A[:, 2]]
+
+        if target_mean_xyz is not None:
+            mu = np.asarray(target_mean_xyz, dtype=float).reshape(3,)
+            xs.append([mu[0]]); ys.append([mu[1]]); zs.append([mu[2]])
+        if true_target_xyz is not None:
+            tr = np.asarray(true_target_xyz, dtype=float).reshape(3,)
+            xs.append([tr[0]]); ys.append([tr[1]]); zs.append([tr[2]])
+        if ems_center_xyz is not None:
+            ec = np.asarray(ems_center_xyz, dtype=float).reshape(3,)
+            xs.append([ec[0]]); ys.append([ec[1]]); zs.append([ec[2]])
+
+        xall = np.concatenate([np.asarray(v).ravel() for v in xs])
+        yall = np.concatenate([np.asarray(v).ravel() for v in ys])
+        zall = np.concatenate([np.asarray(v).ravel() for v in zs])
+
+        pad = 2.0
+        if xlim is None:
+            xlim = (np.min(xall) - pad, np.max(xall) + pad)
+        if ylim is None:
+            ylim = (np.min(yall) - pad, np.max(yall) + pad)
+        if zlim is None:
+            zlim = (np.min(zall) - pad, np.max(zall) + pad)
+
+    fig = plt.figure(figsize=(9, 7))
+    ax = fig.add_subplot(111, projection="3d")
+
+    # Coverage point cloud
+    # Coverage point cloud (dense, discrete colors: 1=blue, 2=green, 3+=red)
+    if show_coverage:
+        # Make it denser by default (override via function args if you want)
+        Nx_i, Ny_i, Nz_i = int(Nx), int(Ny), int(Nz)
+
+        xg = np.linspace(xlim[0], xlim[1], Nx_i)
+        yg = np.linspace(ylim[0], ylim[1], Ny_i)
+        zg = np.linspace(zlim[0], zlim[1], Nz_i)
+        XX, YY, ZZ = np.meshgrid(xg, yg, zg, indexing="xy")
+        grid = np.stack([XX.ravel(), YY.ravel(), ZZ.ravel()], axis=1)
+
+        # Optional downsample cap (raise this a lot for denser clouds)
+        if grid.shape[0] > int(max_points_for_scatter):
+            rng = np.random.default_rng(0)
+            idx = rng.choice(grid.shape[0], size=int(max_points_for_scatter), replace=False)
+            grid = grid[idx]
+
+        cov = coverage_count_3d(grid, A, Uopt, theta_h_rad, max_range=ray_length)
+
+        # Keep only covered points
+        mask_any = cov > 0
+        if np.any(mask_any):
+            Pcov = grid[mask_any]
+            Ccov = cov[mask_any]
+
+            m1 = (Ccov == 1)
+            m2 = (Ccov == 2)
+            m3 = (Ccov >= 3)
+
+            # Much smaller dots + dense cloud
+            dot_size = 1.0  # try 0.5 if you want even smaller
+            dot_alpha = 0.35  # lower if it looks too saturated
+
+            # Scatter by class (colors fixed)
+            h1 = None
+            h2 = None
+            h3 = None
+
+            if np.any(m1):
+                h1 = ax.scatter(Pcov[m1, 0], Pcov[m1, 1], Pcov[m1, 2],
+                                s=dot_size, alpha=dot_alpha, color="tab:blue",
+                                label="Single coverage")
+            if np.any(m2):
+                h2 = ax.scatter(Pcov[m2, 0], Pcov[m2, 1], Pcov[m2, 2],
+                                s=dot_size, alpha=dot_alpha, color="tab:green",
+                                label="Double coverage")
+            if np.any(m3):
+                h3 = ax.scatter(Pcov[m3, 0], Pcov[m3, 1], Pcov[m3, 2],
+                                s=dot_size, alpha=dot_alpha, color="red",
+                                label="3+ coverage")
+
+    # Orbit tracks / projections (3D)
+    if agent_orbit_tracks_xyz is not None:
+        for i, trk in enumerate(agent_orbit_tracks_xyz):
+            if trk is None:
+                continue
+            trk = np.asarray(trk, dtype=float)
+            if trk.ndim != 2 or trk.shape[1] != 3:
+                raise ValueError(f"agent_orbit_tracks_xyz[{i}] must be (K,3)")
+            ax.plot(trk[:, 0], trk[:, 1], trk[:, 2], lw=1.2, alpha=0.7,
+                    label="Agent orbit" if i == 0 else None)
+
+    # FOV cones + agent markers
+    for i in range(M):
+        plot_fov_cone(ax, A[i], Uopt[i], theta_h_rad, float(ray_length),
+                      n_rays=12, n_circle=80, alpha=0.18, lw=1.0,
+                      color="tab:blue",
+                      label="Agent FOV" if i == 0 else None)
+
+        ax.scatter(A[i, 0], A[i, 1], A[i, 2],
+                   s=40, color="tab:blue",
+                   label="Agent position" if i == 0 else None)
+
+        ax.text(A[i, 0], A[i, 1], A[i, 2], f"  A{i}", fontsize=9)
+
+    # Optional: current boresight dotted line + slew annotation
+    if u_curr_agents_xyz is not None:
+        Uc = np.asarray(u_curr_agents_xyz, dtype=float)
+        if Uc.shape != (M, 3):
+            raise ValueError("u_curr_agents_xyz must be (M,3) matching agents")
+        Uc = _normalize_rows(Uc)
+
+        for i in range(M):
+            p_end = A[i] + Uc[i] * float(boresight_line_len)
+            ax.plot([A[i, 0], p_end[0]], [A[i, 1], p_end[1]], [A[i, 2], p_end[2]],
+                    linestyle=":", color="black", lw=1.2,
+                    label="Initial boresight" if i == 0 else None)
+
+            dot = float(np.clip(np.dot(Uc[i], Uopt[i]), -1.0, 1.0))
+            slew_deg = float(np.degrees(np.arccos(dot)))
+
+            ax.text(A[i, 0], A[i, 1], A[i, 2] + 0.6, f"{slew_deg:.1f}°",
+                    fontsize=9, color="black")
+
+    # Target mean + uncertainty ellipsoid (wireframe)
+    if show_uncertainty and (target_mean_xyz is not None) and (target_cov_xyz is not None):
+        mu = np.asarray(target_mean_xyz, dtype=float).reshape(3,)
+        P = np.asarray(target_cov_xyz, dtype=float).reshape(3, 3)
+
+        ax.scatter(mu[0], mu[1], mu[2], marker="x", s=50, linewidths=2, label="Target mean", color='red')
+
+        X, Y, Z = mahalanobis_ellipsoid_mesh(mu, P, d_mahal=float(d_mahal), n_u=44, n_v=22)
+        ax.plot_wireframe(X, Y, Z, rstride=2, cstride=2,
+                          linewidth=0.9, alpha=0.45,
+                          color="tab:red",
+                          label="Uncertainty ellipsoid")
+
+    # True target
+    if show_truth and (true_target_xyz is not None):
+        tr = np.asarray(true_target_xyz, dtype=float).reshape(3, )
+        ax.scatter(tr[0], tr[1], tr[2],
+                   s=40, color="green", marker="o",
+                   label="True position")
+
+    # EMS sphere
+    if show_ems and (ems_center_xyz is not None) and (ems_radius is not None) and (float(ems_radius) > 0):
+        c = np.asarray(ems_center_xyz, dtype=float).reshape(3,)
+        R = float(ems_radius)
+
+        Xs, Ys, Zs = sphere_mesh(c, R, n_u=60, n_v=30)
+        ax.plot_wireframe(Xs, Ys, Zs, rstride=2, cstride=2, linewidth=0.7, alpha=0.35,
+                          label="EMS sphere", color='orange')
+
+    # Labels, limits, title
+    ax.set_xlim(xlim); ax.set_ylim(ylim); ax.set_zlim(zlim)
+    ax.set_xlabel("x"); ax.set_ylabel("y"); ax.set_zlabel("z")
+
+    if title is None:
+        title = f"Scenario @ {t_label}" if t_label is not None else "Scenario (3D)"
+    ax.set_title(title)
+
+    ax.grid(alpha=0.25)
+    set_axes_equal_3d(ax)
+    ax.legend(loc="upper right")
+
+    return fig, ax
+
+
 def parse_vec_cell(cell, expected_len=None, dtype=float, default=None):
     """
     Parse a MASTER cell that may contain:

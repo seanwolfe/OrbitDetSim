@@ -679,12 +679,6 @@ def run_IOD(config):
           EPOCH_SC(jdtdb), EPOCH_SC_i(jdtdb), HELIO_SC_i(kms), BORESIGHT_SC_i_GEO_SECR
       - Robust UID fallback if IOD_DATA_SAVED_AS is empty/missing
     """
-    import os
-    import gc
-    import json
-    import numpy as np
-    import pandas as pd
-    from mpi4py import MPI
 
     # --- MPI setup ---
     comm = MPI.COMM_WORLD
@@ -786,7 +780,6 @@ def run_IOD(config):
             "EPOCH_AST(jdtdb)",
             "HELIO_AST(kms)",
             "DETECTING_SC_ID",
-            "EPOCH_SC(jdtdb)",
             "VALUES_IDX",
             "TOTAL_LENGTH",
             "SPACECRAFT_1_INI_POS(km)",
@@ -1292,7 +1285,9 @@ def run_OD(config):
         # convert s/c GEO SECR to eme using AE
         sc_geoeclip_ae_kms = util.geo_secr_to_geo_eclip_generic(sc_secr_se_kms, earth_helio_ae_kms,
                                                                 layout="batch")
+
         sc_eme_ae_kms = util.geo_eclip_to_geo_eme_generic(sc_geoeclip_ae_kms, layout="batch")
+
 
         # convert pointing from SECR to eme
         sc_pointing_geoeclip_cartesian = util.geo_secr_to_geo_eclip_generic(sc_pointing_sunearth_cartesian,
@@ -1341,63 +1336,158 @@ def run_OD(config):
             ast_iod_uncertainty_topoeme_radecrho_covmat_radkms  # (6,6) same measurement covariance
         )
 
+
+        #################################################
+        # 2D Visualizations, for SECR, ECLIP vs EME, they look different because of projection onto xy plane
+        ##############################################
         # SECR Visualization
-        agents_xy = sc_secr_se_kms[:, :2]
-        pointing_angles_rad = sc_pointing_secr_angle_rad
-        theta_h_rad = np.deg2rad(2.5)
-
-        target_mean_xy = ast_iod_secr_ae_kms[:2]
-        target_cov_xy = ast_iod_uncertainty_toposecr_cartesian_covmat[sc_detecting_id, :2, :2]
-        true_target_xy = ast_secr_ae_kms[:2]
-
-        ems_center_xy = np.array([0, 0])
-        ems_radius = 5e5
-
-        ray_length = 5e6
-
-        fig, ax = util.plot_od_scenario_2d(
-            agents_xy=agents_xy,
-            pointing_angles_rad=pointing_angles_rad,
-            theta_h_rad=theta_h_rad,
-            ray_length=ray_length,
-            target_mean_xy=target_mean_xy,
-            target_cov_xy=target_cov_xy,
-            d_mahal=2.0,
-            true_target_xy=true_target_xy,
-            ems_center_xy=ems_center_xy,
-            ems_radius=ems_radius,
-            xlim=(-5e6, 2e6), ylim=(-3e6, 3e6),
-            agent_orbit_tracks_xy=None,  # or list of (K,2)
-        )
-
-        # SECR seems fine now, multiple spacecraft, but not eme, positions don't match up
-
+        # agents_xy = sc_secr_se_kms[:, :2]
+        # pointing_angles_rad = sc_pointing_secr_angle_rad
+        # theta_h_rad = np.deg2rad(2.5)
+        #
+        # target_mean_xy = ast_iod_secr_ae_kms[:2]
+        # target_cov_xy = ast_iod_uncertainty_toposecr_cartesian_covmat[sc_detecting_id, :2, :2]
+        # true_target_xy = ast_secr_ae_kms[:2]
+        #
+        # ems_center_xy = np.array([0, 0])
+        # ems_radius = 5e5
+        #
+        # ray_length = 5e6
+        #
+        # fig, ax = util.plot_od_scenario_2d(
+        #     agents_xy=agents_xy,
+        #     pointing_angles_rad=pointing_angles_rad,
+        #     theta_h_rad=theta_h_rad,
+        #     ray_length=ray_length,
+        #     target_mean_xy=target_mean_xy,
+        #     target_cov_xy=target_cov_xy,
+        #     d_mahal=2.0,
+        #     true_target_xy=true_target_xy,
+        #     ems_center_xy=ems_center_xy,
+        #     ems_radius=ems_radius,
+        #     xlim=(-5e6, 2e6), ylim=(-3e6, 3e6),
+        #     agent_orbit_tracks_xy=None,  # or list of (K,2)
+        # )
+        #
+                #
         # EME Visualization
-        agents_xy = sc_eme_ae_kms[:, :2]
-        pointing_angles_rad = sc_pointing_eme_angle_rad
+        # agents_xy = sc_eme_ae_kms[:, :2]
+        # pointing_angles_rad = sc_pointing_eme_angle_rad
+        # theta_h_rad = np.deg2rad(2.5)
+        #
+        # target_mean_xy = ast_iod_eme_ae_kms[:2]
+        # target_cov_xy = ast_iod_uncertainty_topoeme_cartesian_covmat[sc_detecting_id, :2, :2]
+        # true_target_xy = ast_eme_ae_kms[:2]
+        #
+        # ems_center_xy = np.array([0, 0])
+        # ems_radius = 5e5
+        #
+        # fig2, ax2 = util.plot_od_scenario_2d(
+        #     agents_xy=agents_xy,
+        #     pointing_angles_rad=pointing_angles_rad,
+        #     theta_h_rad=theta_h_rad,
+        #     ray_length=ray_length,
+        #     target_mean_xy=target_mean_xy,
+        #     target_cov_xy=target_cov_xy,
+        #     d_mahal=2.0,
+        #     true_target_xy=true_target_xy,
+        #     ems_center_xy=ems_center_xy,
+        #     ems_radius=ems_radius,
+        #     xlim=(-5e6, 2e6), ylim=(-3e6, 3e6),
+        #     agent_orbit_tracks_xy=None,  # or list of (K,2)
+        # )
+
+        # Eclip Visualization - just the spacecraft are in elcip at the moment
+        # agents_xy = sc_geoeclip_ae_kms[:, :2]
+        # pointing_angles_rad = sc_pointing_eme_angle_rad
+        # theta_h_rad = np.deg2rad(2.5)
+        #
+        # target_mean_xy = ast_iod_eme_ae_kms[:2]
+        # target_cov_xy = ast_iod_uncertainty_topoeme_cartesian_covmat[sc_detecting_id, :2, :2]
+        # true_target_xy = ast_eme_ae_kms[:2]
+        #
+        # ems_center_xy = np.array([0, 0])
+        # ems_radius = 5e5
+        #
+        # fig3, ax3 = util.plot_od_scenario_2d(
+        #     agents_xy=agents_xy,
+        #     pointing_angles_rad=pointing_angles_rad,
+        #     theta_h_rad=theta_h_rad,
+        #     ray_length=ray_length,
+        #     target_mean_xy=target_mean_xy,
+        #     target_cov_xy=target_cov_xy,
+        #     d_mahal=2.0,
+        #     true_target_xy=true_target_xy,
+        #     ems_center_xy=ems_center_xy,
+        #     ems_radius=ems_radius,
+        #     xlim=(-5e6, 2e6), ylim=(-3e6, 3e6),
+        #     agent_orbit_tracks_xy=None,  # or list of (K,2)
+        # )
+
+
+        ###########################################
+        # 3D Visulization
+        ##########################################
+
+        # SECR
+        agents_xyz = sc_secr_se_kms[:, :3]
         theta_h_rad = np.deg2rad(2.5)
-
-        target_mean_xy = ast_iod_eme_ae_kms[:2]
-        target_cov_xy = ast_iod_uncertainty_topoeme_cartesian_covmat[sc_detecting_id, :2, :2]
-        true_target_xy = ast_eme_ae_kms[:2]
-
-        ems_center_xy = np.array([0, 0])
+        ray_length = 5e6
+        target_cov_xyz = ast_iod_uncertainty_toposecr_cartesian_covmat[sc_detecting_id, :3, :3]
+        ems_center_xyz = np.array([0, 0, 0])
         ems_radius = 5e5
 
-        fig2, ax2 = util.plot_od_scenario_2d(
-            agents_xy=agents_xy,
-            pointing_angles_rad=pointing_angles_rad,
+        fig, ax = util.plot_od_scenario_3d(
+            agents_xyz=agents_xyz,
+            u_opt_agents_xyz=sc_pointing_sunearth_cartesian,
             theta_h_rad=theta_h_rad,
             ray_length=ray_length,
-            target_mean_xy=target_mean_xy,
-            target_cov_xy=target_cov_xy,
+            xlim=(-5e6, 2e6), ylim=(-3e6, 3e6), zlim=(-3e6, 3e6),
+            Nx=120, Ny=120, Nz=70,  # coverage resolution
+            max_points_for_scatter=800_000,
+            target_mean_xyz=ast_iod_secr_ae_kms[:3],
+            target_cov_xyz=target_cov_xyz,
             d_mahal=2.0,
-            true_target_xy=true_target_xy,
-            ems_center_xy=ems_center_xy,
+            true_target_xyz=ast_secr_ae_kms[:3],
+            ems_center_xyz=ems_center_xyz,
             ems_radius=ems_radius,
-            xlim=(-5e6, 2e6), ylim=(-3e6, 3e6),
-            agent_orbit_tracks_xy=None,  # or list of (K,2)
+            show_coverage=True,
+            show_uncertainty=True,
+            show_truth=True,
+            show_ems=True,
+            title="3D OD Scenario Demo"
         )
+
+        # EME
+        agents_xyz = sc_eme_ae_kms[:, :3]
+        theta_h_rad = np.deg2rad(2.5)
+        ray_length = 5e6
+        target_cov_xyz = ast_iod_uncertainty_topoeme_cartesian_covmat[sc_detecting_id, :3, :3]
+        ems_center_xyz = np.array([0, 0, 0])
+        ems_radius = 5e5
+
+        fig, ax = util.plot_od_scenario_3d(
+            agents_xyz=agents_xyz,
+            u_opt_agents_xyz=sc_pointing_eme_cartesian,
+            theta_h_rad=theta_h_rad,
+            ray_length=ray_length,
+            xlim=(-5e6, 2e6), ylim=(-3e6, 3e6), zlim=(-3e6, 3e6),
+            Nx=120, Ny=120, Nz=70,  # coverage resolution
+            max_points_for_scatter=800_000,
+            target_mean_xyz=ast_iod_eme_ae_kms[:3],
+            target_cov_xyz=target_cov_xyz,
+            d_mahal=2.0,
+            true_target_xyz=ast_eme_ae_kms[:3],
+            ems_center_xyz=ems_center_xyz,
+            ems_radius=ems_radius,
+            show_coverage=True,
+            show_uncertainty=True,
+            show_truth=True,
+            show_ems=True,
+            title="3D OD Scenario Demo"
+        )
+
+        plt.show()
 
 
 
