@@ -31,6 +31,10 @@ def run_runs_x_minimoons_MPI(minimoon_master, config):
       run_number in [1..number_of_runs]  AND  minimoon_master rows [0..M-1]
     Saves outputs under a directory named `spacecraft_<num_spacecraft>` and
     includes that tag in the filename.
+
+    Now stores BOTH:
+      - values:        visible indices with (FOV + Earth/Moon occlusion)
+      - values_ems:    visible indices further filtered by EMS exclusion
     """
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
@@ -59,13 +63,14 @@ def run_runs_x_minimoons_MPI(minimoon_master, config):
     comm.Barrier()  # ensure dir exists before others write
 
     # ------------- task decomposition ----------
-    # Total tasks = N_runs * M_mm. Assign a disjoint slice per rank.
     T = N_runs * M_mm
     task_indices = np.array_split(np.arange(T), size)[rank]
 
     # ------------- buffers / counters ----------
-    cols = ["run_number", "object_id", "spacecraft_number",
-            "values", "total_length", "spacecraft_1_ini_pos"]
+    cols = [
+        "run_number", "object_id", "spacecraft_number",
+        "values", "values_ems", "total_length", "spacecraft_1_ini_pos"
+    ]
     df_buffer = pd.DataFrame(columns=cols)
     part_number = 1
 
@@ -93,13 +98,11 @@ def run_runs_x_minimoons_MPI(minimoon_master, config):
 
     # ------------- main loop over my tasks -----
     for t in task_indices:
-        # Map linear index -> (run_no, mm_idx)
         run_idx, mm_idx = divmod(int(t), M_mm)
         run_no = run_idx + 1
 
         # Reproducible RNG per (run_no, mm_idx)
         ss = np.random.SeedSequence([base_seed, run_no, mm_idx])
-        # If your downstream code uses global np.random, you can seed it:
         np.random.seed(ss.generate_state(1)[0] & 0xFFFFFFFF)
 
         # ======= do the work for ONE (run, minimoon) =======
@@ -120,16 +123,27 @@ def run_runs_x_minimoons_MPI(minimoon_master, config):
         new_rows = []
         for jdx, spacecraft in enumerate(formation.spacecraft):
             sc_pos = spacecraft.matched_trajectory
-            visible = spacecraft.asteroid_in_fov_batch(asteroid_pos, sc_pos, earth_pos, moon_pos, config)
-            visible = np.asarray(visible)
-            len_vis = len(visible)
-            visible = visible[visible >= 0]
+
+            # NEW: function now returns (base_result, ems_filtered_result)
+            visible_base, visible_ems = spacecraft.asteroid_in_fov_batch(
+                asteroid_pos, sc_pos, earth_pos, moon_pos, config
+            )
+
+            visible_base = np.asarray(visible_base)
+            visible_ems = np.asarray(visible_ems)
+
+            len_vis = len(visible_base)  # total epochs
+
+            # Extract indices (>=0)
+            base_idx = visible_base[visible_base >= 0].astype(int)
+            ems_idx = visible_ems[visible_ems >= 0].astype(int)
 
             new_rows.append({
                 "run_number": run_no,
                 "object_id": current_minimoon.id,
                 "spacecraft_number": jdx + 1,
-                "values": tuple(visible),
+                "values": tuple(base_idx),
+                "values_ems": tuple(ems_idx),
                 "total_length": len_vis,
                 "spacecraft_1_ini_pos": tuple(formation.spacecraft[0].ini_position)
             })
@@ -152,25 +166,25 @@ def run_sim_runnumbers_MPI_getIOD(config):
         IOD_folder_path/spacecraft_{num_spacecraft}
     Also appends a single MASTER_IOD.csv (resumable, duplicate-safe).
 
-    MASTER row now contains:
-      - original detection metadata columns you requested:
-          VALUES_IDX (serialized)
-          TOTAL_LENGTH
-          SPACECRAFT_1_INI_POS(km)  (serialized 3-vector)
-          MIN_NONNEGATIVE
-      - asteroid epoch/state:
-          EPOCH_AST(jdtdb)
-          HELIO_AST(kms)
-      - detecting SC:
-          DETECTING_SC_ID
-      - all SC epochs:
-          EPOCH_SC_i(jdtdb) for i=1..num_sc
-      - all SC helio initial states (kms) computed directly from DF initial geo-eclip states and SPICE Sun geo state:
-          HELIO_SC_i(kms)
-      - all SC boresights:
-          BORESIGHT_SC_i_GEO_SECR
-      - IOD output files:
-          IOD_DATA_SAVED_AS
+    UPDATE (EMS-aware selection):
+      Visible files now contain:
+        - values       : indices visible with (FOV + Earth/Moon occlusion)
+        - values_ems   : indices visible with (FOV + Earth/Moon occlusion + EMS exclusion)
+
+      This stage writes BOTH into MASTER:
+        - VALUES_IDX
+        - VALUES_IDX_EMS
+
+      And chooses INDEX_USED depending on:
+        - config["INCLUDE_EMS_EXCLUSION"] (bool, default False)
+          * False -> INDEX_USED = min(VALUES_IDX)
+          * True  -> INDEX_USED = min(VALUES_IDX_EMS) if non-empty else min(VALUES_IDX)
+
+      Adds:
+        - OCCLUDED_BY_EMS (0/1): at INDEX_USED, would EMS exclude it?
+          * defined as 1 iff INDEX_USED not in VALUES_IDX_EMS (and INDEX_USED exists)
+          * else 0
+          * left blank if INDEX_USED missing
     """
 
     comm = MPI.COMM_WORLD
@@ -184,6 +198,8 @@ def run_sim_runnumbers_MPI_getIOD(config):
     iod_root = os.path.abspath(config["IOD_folder_path"])
     iod_dir = os.path.join(iod_root, f"spacecraft_{num_sc}")  # OUTPUTS
     save_format = config.get("save_format", "csv")  # 'csv' | 'parquet' | 'both'
+
+    include_ems_exclusion = bool(config.get("INCLUDE_EMS_EXCLUSION", False))
 
     # Master CSV + per-row done markers (for resumability)
     master_name = "MASTER_IOD.csv"
@@ -202,12 +218,14 @@ def run_sim_runnumbers_MPI_getIOD(config):
     epoch_sc_cols = [f"EPOCH_SC_{i+1}(jdtdb)" for i in range(num_sc)]
     boresight_cols = [f"BORESIGHT_SC_{i+1}_GEO_SECR" for i in range(num_sc)]
 
-    # requested original detection metadata columns (in MASTER)
+    # detection metadata columns (in MASTER)
     det_meta_cols = [
         "VALUES_IDX",                 # serialized list/tuple
+        "VALUES_IDX_EMS",             # serialized list/tuple (EMS-filtered)
         "TOTAL_LENGTH",
         "SPACECRAFT_1_INI_POS(km)",   # serialized 3-vector
-        "MIN_NONNEGATIVE",
+        "INDEX_USED",                 # chosen index for IOD (EMS-aware toggle + fallback)
+        "OCCLUDED_BY_EMS",            # 0/1 (blank if INDEX_USED missing)
     ]
 
     master_columns = (
@@ -242,10 +260,52 @@ def run_sim_runnumbers_MPI_getIOD(config):
             arr = np.asarray(x)
             if arr.ndim == 0:
                 return str(x)
-            # flatten and serialize (keeps "similar to other similar columns")
             return ",".join(f"{float(v):.16g}" for v in arr.ravel())
         except Exception:
             return str(x)
+
+    def _as_int_listlike(x):
+        """
+        Robustly coerce a 'values' cell into a 1D int numpy array.
+        Works if x is already list/tuple/ndarray. If x is a comma-separated string,
+        tries to parse it. Empty/invalid -> empty array.
+        """
+        if x is None:
+            return np.array([], dtype=int)
+        if isinstance(x, str):
+            s = x.strip()
+            if s == "" or s == "()" or s == "[]" or s.lower() == "nan":
+                return np.array([], dtype=int)
+            # util.read_master often parses these already, but handle plain CSV strings too
+            parts = [p for p in s.replace("(", "").replace(")", "").replace("[", "").replace("]", "").split(",") if p.strip() != ""]
+            out = []
+            for p in parts:
+                try:
+                    out.append(int(float(p)))
+                except Exception:
+                    pass
+            return np.asarray(out, dtype=int)
+        try:
+            arr = np.asarray(x).ravel()
+            out = []
+            for v in arr:
+                try:
+                    out.append(int(v))
+                except Exception:
+                    pass
+            return np.asarray(out, dtype=int)
+        except Exception:
+            return np.array([], dtype=int)
+
+    def _min_index_or_nan(values_cell):
+        arr = _as_int_listlike(values_cell)
+        if arr.size == 0:
+            return np.nan
+        # stored values should already be indices >= 0, but keep it safe:
+        arr = arr[arr >= 0]
+        if arr.size == 0:
+            return np.nan
+        return float(np.min(arr))
 
     def write_master_header_if_needed():
         if not os.path.exists(master_path):
@@ -355,11 +415,48 @@ def run_sim_runnumbers_MPI_getIOD(config):
         if rank == 0:
             run_data = util.read_master(file_i, config)
 
-            run_data["min_nonnegative"] = run_data["values"].apply(
-                lambda x: min(x) if np.any(np.asarray(x) >= 0) else np.nan
-            )
+            # Expecting new columns from visible files:
+            #   values      (base visibility)
+            #   values_ems  (EMS-filtered visibility)
+            if "values" not in run_data.columns:
+                raise KeyError(f"'values' column not found in visible file: {file_i}")
+            if "values_ems" not in run_data.columns:
+                raise KeyError(
+                    f"'values_ems' column not found in visible file: {file_i}. "
+                    f"Update the visible-file generation to include values_ems."
+                )
 
-            detected_pop = run_data[~np.isnan(run_data["min_nonnegative"])]
+            # compute base/ems mins
+            run_data["min_nonnegative_base"] = run_data["values"].apply(_min_index_or_nan)
+            run_data["min_nonnegative_ems"] = run_data["values_ems"].apply(_min_index_or_nan)
+
+            # choose INDEX_USED based on toggle + fallback
+            def _choose_index_used(row):
+                b = row["min_nonnegative_base"]
+                e = row["min_nonnegative_ems"]
+                if include_ems_exclusion:
+                    if np.isfinite(e):
+                        return e
+                    return b
+                else:
+                    return b
+
+            run_data["index_used"] = run_data.apply(_choose_index_used, axis=1)
+
+            # OCCLUDED_BY_EMS: at index_used, would EMS exclude it?
+            # definition: 1 iff index_used is finite AND not present in values_ems
+            def _occluded_by_ems_flag(row):
+                idx = row["index_used"]
+                if not np.isfinite(idx):
+                    return np.nan
+                idx = int(idx)
+                ems_list = _as_int_listlike(row["values_ems"])
+                return 0 if np.any(ems_list == idx) else 1
+
+            run_data["occluded_by_ems"] = run_data.apply(_occluded_by_ems_flag, axis=1)
+
+            # "detected" population for IOD = rows where INDEX_USED is finite
+            detected_pop = run_data[np.isfinite(run_data["index_used"])]
 
             if len(detected_pop) == 0:
                 with open(done_marker_path(src_base), "w") as f:
@@ -411,7 +508,8 @@ def run_sim_runnumbers_MPI_getIOD(config):
             for _, detected_minimoon in detected_appended_pop_chunk.iterrows():
                 mm_id = detected_minimoon.name[1]
                 sc_id = detected_minimoon.name[2]
-                idx0 = int(detected_minimoon["min_nonnegative"])
+
+                idx0 = int(detected_minimoon["index_used"])
 
                 file_name = f"minimoon-{mm_id}_sc-{int(sc_id)}_index-{idx0}_{src_base}"
                 base_path = os.path.join(iod_dir, file_name)
@@ -498,8 +596,9 @@ def run_sim_runnumbers_MPI_getIOD(config):
                     config["time_between_frames"], type="SPACECRAFT-ASTEROIDTIME"
                 )
 
-                sc_eme_states = util.helio_eclip_to_geo_eme_generic(sc_helio_states, asteroid_earth_states,
-                                                                    layout="time")
+                sc_eme_states = util.helio_eclip_to_geo_eme_generic(
+                    sc_helio_states, asteroid_earth_states, layout="time"
+                )
                 sc_eme_states = _as_6xN(sc_eme_states)
 
                 x_rel_p = ast_geo_eme[0, :] - sc_eme_states[0, :]
@@ -542,7 +641,7 @@ def run_sim_runnumbers_MPI_getIOD(config):
                 saved_as_str = ";".join(saved_files) if saved_files else ""
 
                 # ==========================
-                # MASTER row (with requested original columns)
+                # MASTER row
                 # ==========================
                 if not master_row_already_done(row_uid):
                     did = int(detected_minimoon["detecting_id"])
@@ -573,20 +672,33 @@ def run_sim_runnumbers_MPI_getIOD(config):
 
                     # requested detection metadata
                     values_ser = serialize_any_listlike(detected_minimoon.get("values", ""))
+                    values_ems_ser = serialize_any_listlike(detected_minimoon.get("values_ems", ""))
+
                     total_length_val = int(detected_minimoon.get("total_length", 0))
                     sc1_ini_pos = detected_minimoon.get("spacecraft_1_ini_pos", None)
                     sc1_ini_pos_ser = serialize_vec(sc1_ini_pos) if sc1_ini_pos is not None else ""
-                    min_nonneg_val = int(detected_minimoon.get("min_nonnegative", -1))
+
+                    index_used_val = int(detected_minimoon.get("index_used", -1))
+
+                    occluded_flag = detected_minimoon.get("occluded_by_ems", np.nan)
+                    if np.isfinite(occluded_flag):
+                        occluded_flag_ser = str(int(occluded_flag))
+                    else:
+                        occluded_flag_ser = ""
 
                     row_dict = {
                         "ID_AST": mm_id,
                         "EPOCH_AST(jdtdb)": f"{asteroid_epoch:.16f}",
                         "HELIO_AST(kms)": serialize_vec(asteroid_state_helio),
                         "DETECTING_SC_ID": did,
+
                         "VALUES_IDX": values_ser,
+                        "VALUES_IDX_EMS": values_ems_ser,
                         "TOTAL_LENGTH": str(total_length_val),
                         "SPACECRAFT_1_INI_POS(km)": sc1_ini_pos_ser,
-                        "MIN_NONNEGATIVE": str(min_nonneg_val),
+                        "INDEX_USED": str(index_used_val),
+                        "OCCLUDED_BY_EMS": occluded_flag_ser,
+
                         "IOD_DATA_SAVED_AS": saved_as_str,
                     }
 
@@ -665,19 +777,16 @@ def run_sim_runnumbers_MPI_getIOD(config):
     return
 
 
+
 def run_IOD(config):
     """
     MPI stage that reads MASTER_IOD.csv, runs the IOD solver per row, and writes results
     back into MASTER_IOD.csv (resumable via per-row .done markers).
 
-    UPDATED for the "new MASTER" schema:
-      - No EARTH_HELIO_* columns assumed
-      - No POINTING_SC_* columns assumed
-      - Supports dynamic num_spacecraft
-      - Detection/context block includes:
-          VALUES_IDX, TOTAL_LENGTH, SPACECRAFT_1_INI_POS(km), MIN_NONNEGATIVE
-          EPOCH_SC(jdtdb), EPOCH_SC_i(jdtdb), HELIO_SC_i(kms), BORESIGHT_SC_i_GEO_SECR
-      - Robust UID fallback if IOD_DATA_SAVED_AS is empty/missing
+    UPDATED for EMS-aware MASTER schema:
+      - INDEX_USED replaces MIN_NONNEGATIVE
+      - Includes VALUES_IDX_EMS and OCCLUDED_BY_EMS in the detection/context block
+      - Robust UID fallback uses INDEX_USED
     """
 
     # --- MPI setup ---
@@ -742,12 +851,12 @@ def run_IOD(config):
     def fallback_uid_from_row(row, row_index: int):
         """
         Fallback UID if IOD_DATA_SAVED_AS is empty.
-        Uses the stable fields you have in the new master.
+        Uses stable fields in MASTER.
         """
         try:
             a = row.get("ID_AST", "")
             did = int(row.get("DETECTING_SC_ID", -1))
-            idx0 = int(row.get("MIN_NONNEGATIVE", -1))
+            idx0 = int(row.get("INDEX_USED", -1))  # <-- UPDATED
             if str(a).strip() and did >= 0 and idx0 >= 0:
                 return f"minimoon-{a}_sc-{did}_index-{idx0}"
         except Exception:
@@ -781,9 +890,11 @@ def run_IOD(config):
             "HELIO_AST(kms)",
             "DETECTING_SC_ID",
             "VALUES_IDX",
+            "VALUES_IDX_EMS",           # <-- NEW
             "TOTAL_LENGTH",
             "SPACECRAFT_1_INI_POS(km)",
-            "MIN_NONNEGATIVE",
+            "INDEX_USED",               # <-- UPDATED (was MIN_NONNEGATIVE)
+            "OCCLUDED_BY_EMS",          # <-- NEW
         ]
         + epoch_sc_cols
         + helio_sc_cols
@@ -804,6 +915,7 @@ def run_IOD(config):
         "HIDDEN_DIMENSION",
         "PHYSICS_WEIGHT",
         "LAMBDA_DIST",
+        "LAMBDA_DIST",  # (keep if you actually use it twice; otherwise remove)
         "WEIGHT_SCALE_FACTOR",
         "NUMBER_OF_ITERATIONS",
         "TEMPERATURE",
@@ -1057,19 +1169,11 @@ def run_IOD(config):
             # Column reordering:
             current_cols = list(df.columns)
 
-            # Start with detection block (keep only those that exist)
             ordered = [c for c in detection_block if c in current_cols]
-
-            # Then IOD_DATA_SAVED_AS if present
             ordered += [c for c in saved_as_col if c in current_cols]
-
-            # Then parameter block
             ordered += [c for c in param_block if c in current_cols]
-
-            # Then metrics block
             ordered += [c for c in metrics_block if c in current_cols]
 
-            # Finally, any leftover columns not in the ordered list
             leftovers = [c for c in current_cols if c not in set(ordered)]
             leftovers = [c for c in leftovers if c not in internal_skip_keys]
 
@@ -1111,6 +1215,7 @@ def run_IOD(config):
 
     comm.Barrier()
     return
+
 
 
 def run_OD(config):
@@ -1209,11 +1314,11 @@ def run_OD(config):
 
     # Columns we’ll add/update in MASTER (we’ll enforce a nice order on write)
     od_metrics_cols = [
-        "OD_RESULT_SAVED_AS",  # per-row OD time-series log filename
-        "OD_FINAL_TIME_JDTDB",  # final epoch reached (jdtdb)
-        "OD_N_STEPS",  # number of OD steps performed
-        "OD_LAST_POS_RMSE",  # last-step position RMSE [km] or your chosen units
-        "OD_LAST_VEL_RMSE",  # last-step velocity RMSE [km/s]
+        "OD_RESULT_SAVED_AS",       # per-row OD time-series log filename
+        "OD_FINAL_TIME_JDTDB",      # final epoch reached (jdtdb)
+        "OD_N_STEPS",               # number of OD steps performed
+        "OD_LAST_POS_RMSE",         # last-step position RMSE [km] or your chosen units
+        "OD_LAST_VEL_RMSE",         # last-step velocity RMSE [km/s]
     ]
 
     # Collect per-rank updates to MASTER rows
@@ -1256,7 +1361,6 @@ def run_OD(config):
             earth_helio_se_i, _ = sp.spkgeo(body, se_et, "ECLIPJ2000", reference_body)
             earth_helio_se_kms[i, :] = earth_helio_se_i
 
-
         sc_pointing_sunearth_cartesian = np.zeros((M, 3))
         for i in range(M):
             sc_point_str = f'BORESIGHT_SC_{i+1}_GEO_SECR'
@@ -1274,20 +1378,19 @@ def run_OD(config):
                                                              layout="batch")
         # covert ast_helio to geo secr
         ast_secr_ae_kms = util.helio_eclip_to_geo_secr_generic(ast_helio_ae_kms, earth_helio_ae_kms,
-                                                             layout="batch")
+                                                               layout="batch")
 
         # convert s/c to GEO SECR using SE
         sc_secr_se_kms = np.zeros((M, 6))
-        for i in range (M):
+        for i in range(M):
             sc_secr_se_kms[i, :] = util.helio_eclip_to_geo_secr_generic(sc_helio_se_kms[i, :], earth_helio_se_kms[i, :],
-                                                              layout="batch", obj_hint="(batch, 6)")
+                                                                        layout="batch", obj_hint="(batch, 6)")
 
         # convert s/c GEO SECR to eme using AE
         sc_geoeclip_ae_kms = util.geo_secr_to_geo_eclip_generic(sc_secr_se_kms, earth_helio_ae_kms,
                                                                 layout="batch")
 
         sc_eme_ae_kms = util.geo_eclip_to_geo_eme_generic(sc_geoeclip_ae_kms, layout="batch")
-
 
         # convert pointing from SECR to eme
         sc_pointing_geoeclip_cartesian = util.geo_secr_to_geo_eclip_generic(sc_pointing_sunearth_cartesian,
@@ -1305,7 +1408,7 @@ def run_OD(config):
         ast_iod_geoeclip_ae_kms = util.geo_eme_to_geo_eclip_generic(ast_iod_eme_ae_kms)
         ast_iod_helioeclip_ae_kms = ast_iod_geoeclip_ae_kms + earth_helio_ae_kms
         ast_iod_secr_ae_kms = util.helio_eclip_to_geo_secr_generic(ast_iod_helioeclip_ae_kms,
-                                                                                  earth_helio_ae_kms, layout="batch")
+                                                                   earth_helio_ae_kms, layout="batch")
 
         # Correct IOD if out of FOV
         # SECR
@@ -1329,7 +1432,7 @@ def run_OD(config):
 
         # eme
         sc_pos = sc_eme_ae_kms[sc_detecting_id, :3]  # apex
-        u_bore = sc_pointing_eme_cartesian[sc_detecting_id, :]  # axis (SECR)
+        u_bore = sc_pointing_eme_cartesian[sc_detecting_id, :]  # axis (EME)
         theta_h_rad = np.deg2rad(2.5)
 
         iod_pos_eme = ast_iod_eme_ae_kms[:3].copy()
@@ -1345,7 +1448,6 @@ def run_OD(config):
             # overwrite the IOD position used downstream (position only)
             ast_iod_eme_ae_kms[:3] = iod_pos_eme_clamped
             print(f"[IOD clamp] detecting SC {sc_detecting_id}: {info}")
-
 
         # these are (M,6), topo for each s/c
         ast_iod_topoeme_radecrho_radkms = util.topocentric_alpha_delta_rho_6d(
@@ -1374,7 +1476,6 @@ def run_OD(config):
             ast_iod_toposecr_radecrho_radkms,  # (M,6)
             ast_iod_uncertainty_topoeme_radecrho_covmat_radkms  # (6,6) same measurement covariance
         )
-
 
         #################################################
         # 2D Visualizations, for SECR, ECLIP vs EME, they look different because of projection onto xy plane
@@ -1408,7 +1509,6 @@ def run_OD(config):
         #     agent_orbit_tracks_xy=None,  # or list of (K,2)
         # )
         #
-                #
         # EME Visualization
         # agents_xy = sc_eme_ae_kms[:, :2]
         # pointing_angles_rad = sc_pointing_eme_angle_rad
@@ -1435,7 +1535,7 @@ def run_OD(config):
         #     xlim=(-5e6, 2e6), ylim=(-3e6, 3e6),
         #     agent_orbit_tracks_xy=None,  # or list of (K,2)
         # )
-
+        #
         # Eclip Visualization - just the spacecraft are in elcip at the moment
         # agents_xy = sc_geoeclip_ae_kms[:, :2]
         # pointing_angles_rad = sc_pointing_eme_angle_rad
@@ -1463,105 +1563,74 @@ def run_OD(config):
         #     agent_orbit_tracks_xy=None,  # or list of (K,2)
         # )
 
-
         ###########################################
         # 3D Visulization
         ##########################################
 
-        # SECR
-        agents_xyz = sc_secr_se_kms[:, :3]
-        theta_h_rad = np.deg2rad(2.5)
-        ray_length = 5e6
-        target_cov_xyz = ast_iod_uncertainty_toposecr_cartesian_covmat[sc_detecting_id, :3, :3]
-        ems_center_xyz = np.array([0, 0, 0])
-        ems_radius = 5e5
+        # Force visualization ON (as requested)
+        viz_flag = True
 
-        fig, ax = util.plot_od_scenario_3d(
-            agents_xyz=agents_xyz,
-            u_opt_agents_xyz=sc_pointing_sunearth_cartesian,
-            theta_h_rad=theta_h_rad,
-            ray_length=ray_length,
-            xlim=(-5e6, 2e6), ylim=(-3e6, 3e6), zlim=(-3e6, 3e6),
-            Nx=120, Ny=120, Nz=70,  # coverage resolution
-            max_points_for_scatter=800_000,
-            target_mean_xyz=ast_iod_secr_ae_kms[:3],
-            target_cov_xyz=target_cov_xyz,
-            d_mahal=2.0,
-            true_target_xyz=ast_secr_ae_kms[:3],
-            ems_center_xyz=ems_center_xyz,
-            ems_radius=ems_radius,
-            show_coverage=True,
-            show_uncertainty=True,
-            show_truth=True,
-            show_ems=True,
-            title="3D OD Scenario Demo"
-        )
+        if viz_flag:
+            # SECR
+            agents_xyz = sc_secr_se_kms[:, :3]
+            theta_h_rad = np.deg2rad(2.5)
+            ray_length = 5e6
+            target_cov_xyz = ast_iod_uncertainty_toposecr_cartesian_covmat[sc_detecting_id, :3, :3]
+            ems_center_xyz = np.array([0, 0, 0])
+            ems_radius = 5e5
 
-        # EME
-        agents_xyz = sc_eme_ae_kms[:, :3]
-        theta_h_rad = np.deg2rad(2.5)
-        ray_length = 5e6
-        target_cov_xyz = ast_iod_uncertainty_topoeme_cartesian_covmat[sc_detecting_id, :3, :3]
-        ems_center_xyz = np.array([0, 0, 0])
-        ems_radius = 5e5
+            fig, ax = util.plot_od_scenario_3d(
+                agents_xyz=agents_xyz,
+                u_opt_agents_xyz=sc_pointing_sunearth_cartesian,
+                theta_h_rad=theta_h_rad,
+                ray_length=ray_length,
+                xlim=(-5e6, 2e6), ylim=(-3e6, 3e6), zlim=(-3e6, 3e6),
+                Nx=120, Ny=120, Nz=70,  # coverage resolution
+                max_points_for_scatter=800_000,
+                target_mean_xyz=ast_iod_secr_ae_kms[:3],
+                target_cov_xyz=target_cov_xyz,
+                d_mahal=2.0,
+                true_target_xyz=ast_secr_ae_kms[:3],
+                ems_center_xyz=ems_center_xyz,
+                ems_radius=ems_radius,
+                show_coverage=True,
+                show_uncertainty=True,
+                show_truth=True,
+                show_ems=True,
+                title="3D OD Scenario Demo (SECR)"
+            )
 
-        fig, ax = util.plot_od_scenario_3d(
-            agents_xyz=agents_xyz,
-            u_opt_agents_xyz=sc_pointing_eme_cartesian,
-            theta_h_rad=theta_h_rad,
-            ray_length=ray_length,
-            xlim=(-5e6, 2e6), ylim=(-3e6, 3e6), zlim=(-3e6, 3e6),
-            Nx=120, Ny=120, Nz=70,  # coverage resolution
-            max_points_for_scatter=800_000,
-            target_mean_xyz=ast_iod_eme_ae_kms[:3],
-            target_cov_xyz=target_cov_xyz,
-            d_mahal=2.0,
-            true_target_xyz=ast_eme_ae_kms[:3],
-            ems_center_xyz=ems_center_xyz,
-            ems_radius=ems_radius,
-            show_coverage=True,
-            show_uncertainty=True,
-            show_truth=True,
-            show_ems=True,
-            title="3D OD Scenario Demo"
-        )
+            # EME
+            agents_xyz = sc_eme_ae_kms[:, :3]
+            theta_h_rad = np.deg2rad(2.5)
+            ray_length = 5e6
+            target_cov_xyz = ast_iod_uncertainty_topoeme_cartesian_covmat[sc_detecting_id, :3, :3]
+            ems_center_xyz = np.array([0, 0, 0])
+            ems_radius = 5e5
 
-        plt.show()
+            fig, ax = util.plot_od_scenario_3d(
+                agents_xyz=agents_xyz,
+                u_opt_agents_xyz=sc_pointing_eme_cartesian,
+                theta_h_rad=theta_h_rad,
+                ray_length=ray_length,
+                xlim=(-5e6, 2e6), ylim=(-3e6, 3e6), zlim=(-3e6, 3e6),
+                Nx=120, Ny=120, Nz=70,  # coverage resolution
+                max_points_for_scatter=800_000,
+                target_mean_xyz=ast_iod_eme_ae_kms[:3],
+                target_cov_xyz=target_cov_xyz,
+                d_mahal=2.0,
+                true_target_xyz=ast_eme_ae_kms[:3],
+                ems_center_xyz=ems_center_xyz,
+                ems_radius=ems_radius,
+                show_coverage=True,
+                show_uncertainty=True,
+                show_truth=True,
+                show_ems=True,
+                title="3D OD Scenario Demo (EME)"
+            )
 
+            plt.show()
 
-
-
-
-        # Generic visualization example ############################
-        # agents_xy = np.array([[0, 0], [5, 1], [2, 6]], float)
-        # pointing_angles_rad = np.deg2rad([10, 140, 250])
-        # theta_h_rad = np.deg2rad(15)
-        #
-        # target_mean_xy = np.array([3.0, 3.0])
-        # target_cov_xy = np.array([[1.0, 0.2], [0.2, 0.8]])
-        # true_target_xy = np.array([3.5, 2.7])
-        #
-        # ems_center_xy = np.array([1.5, 4.5])
-        # ems_radius = 1.2
-        #
-        # fig, ax = util.plot_od_scenario_2d(
-        #     t_label="JD 2460000.1234",
-        #     agents_xy=agents_xy,
-        #     pointing_angles_rad=pointing_angles_rad,
-        #     theta_h_rad=theta_h_rad,
-        #     ray_length=8.0,
-        #     target_mean_xy=target_mean_xy,
-        #     target_cov_xy=target_cov_xy,
-        #     d_mahal=2.0,
-        #     true_target_xy=true_target_xy,
-        #     ems_center_xy=ems_center_xy,
-        #     ems_radius=ems_radius,
-        #     xlim=(-3, 10), ylim=(-3, 10),
-        #     agent_orbit_tracks_xy=None,  # or list of (K,2)
-        # )
-        ##################################################
-
-        plt.show()
         """
         # --------------------------
         # Initialization (first step)
@@ -1687,7 +1756,6 @@ def run_OD(config):
 
                 # TODO: update state of the system
 
-
                 # -------------- Log the step -------------------------
                 # Stringify vectors/matrices compactly to keep CSV readable:
                 def _vec_to_str(v):
@@ -1737,15 +1805,9 @@ def run_OD(config):
 
         # tidy
         gc.collect()
-    """
-        # except Exception as e:
-        #     Don’t mark done here; only after MASTER commit
-            # print(e)
-            # errors += 1
-            # Optional: you could write a per-row error note:
-            # with open(os.path.join(od_done_dir, f"{uid}.err"), "w") as fe:
-            #     fe.write(str(e))
-            # continue
+        """
+
+        # NOTE: your OD loop is still inside the triple-quoted block above (as in your original).
 
     # ===== Gather updates → rank 0 writes MASTER (ordered) → broadcast committed UIDs → write .done =====
     gathered = comm.gather(updates, root=0)
@@ -1775,9 +1837,7 @@ def run_OD(config):
                         continue
                     df.at[ri, k] = v
 
-            # Optional: reorder columns — keep existing order but put OD columns at the end,
-            # or place them after your metrics. If you want a strict order, add it here.
-            # We’ll append OD columns after whatever currently exists and isn’t OD:
+            # Optional: reorder columns — keep existing order but put OD columns at the end
             existing_cols = list(df.columns)
             non_od = [c for c in existing_cols if c not in od_metrics_cols]
             final_cols = non_od + [c for c in od_metrics_cols if c in df.columns]
@@ -1809,10 +1869,12 @@ def run_OD(config):
 
     if rank == 0:
         print(
-            f"[Stage: OD] committed_rows={len(committed_uids)}, processed={processed}, skipped={skipped}, errors={errors}")
+            f"[Stage: OD] committed_rows={len(committed_uids)}, processed={processed}, skipped={skipped}, errors={errors}"
+        )
 
     comm.Barrier()
     return
+
 
 
 def run_overall_OD(master, config):

@@ -4999,7 +4999,7 @@ def get_scs_initial_states_new(detected_pop, config):
         detecting_ids.append(sc_id_detect)
 
         # first detection sample index
-        idx0 = int(detection["min_nonnegative"])
+        idx0 = int(detection["index_used"])
 
         # --- compute per-spacecraft epochs + states + boresights at idx0 ---
         for j, sc in enumerate(formation.spacecraft, start=1):
@@ -5035,9 +5035,6 @@ def get_scs_initial_states_new(detected_pop, config):
 
     for col, values in sc_boresight_cols.items():
         out_df.loc[:, col] = values
-
-
-    out_df.to_csv('test.csv')
 
     return out_df
 

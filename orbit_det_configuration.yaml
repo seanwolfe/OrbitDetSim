@@ -135,7 +135,10 @@ od_file_dir: 'OD_results'
 od_duration_days: 1
 od_max_steps: 1000
 iod_cov_topo_std: [4.4, 2.31, 1.28e+6, 3.27e-5, 2.44e-5, 1.09]  # ra, dec, rho, ra dot, dec dot, rho dot (deg, km, deg/s, km/s)
-
+p_em: [0.0, 0.0, 0.0]
+R_em: 0.5e+6
+alpha_s_deg: 0
+INCLUDE_EMS_EXCLUSION: 0
 
 
 

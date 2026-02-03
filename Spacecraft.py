@@ -56,43 +56,181 @@ class Spacecraft:
         return (check_occlusion(earth_pos, configs['EARTH_RADIUS_KM'] * configs['KM_TO_M'] / configs['AU_TO_M'])
                 | check_occlusion(moon_pos, configs['MOON_RADIUS_KM'] * configs['KM_TO_M']  / configs['AU_TO_M']))
 
-    def asteroid_in_fov_batch(self, asteroid_trajectory, spacecraft_position, earth_position, moon_position, configs):
+    def asteroid_in_fov_batch_old(self,
+                              asteroid_trajectory,  # (N,3) in same frame as s/c & boresight
+                              spacecraft_position,  # (N,3)
+                              earth_position,  # (N,3)
+                              moon_position,  # (N,3)
+                              configs):
         """
-        Determine when the asteroid is in the field of view, considering occlusion.
-
-        Parameters:
-            asteroid_positions Nx3 array in AU
-            spacecraft_position (Nx3 array in AU): Spacecraft position at each epoch.
-            earth_position (Nx3 array in AU): Earth position at each epoch.
-            moon_position (Nx3 array in AU): Moon position at each epoch.
-            configs: confiugaration from yaml file
+        Determine when the asteroid is inside the spacecraft's conical FOV,
+        accounting for Earth/Moon occlusion.
 
         Returns:
-            in_fov (Nx1 array): Indices where the asteroid is visible, NaN if not visible.
+            result (N,) array:
+                index where visible, -1 where not visible
         """
-        positions = asteroid_trajectory
-        fov_radians = np.radians(np.sqrt(self.fov))
 
-        # Compute relative position vectors (N,3)
-        rel_pos = positions - spacecraft_position
-        rel_pos_norm = np.linalg.norm(rel_pos, axis=1)
+        positions = np.asarray(asteroid_trajectory, dtype=float)
+        sc_pos = np.asarray(spacecraft_position, dtype=float)
 
-        # Compute angle with boresight
-        dot_product = np.dot(rel_pos, self.boresight)
-        angles = np.arccos(dot_product / rel_pos_norm)
+        # ---- Correct half-angle from FOV area ----
+        def fov_deg2_to_half_angle_rad(FOV_deg2):
+            """
+            Convert sky area FOV (deg^2) to cone half-angle (radians)
+            using spherical cap geometry.
+            """
+            return np.arccos(
+                1.0 - (FOV_deg2 / (180.0 / np.pi) ** 2) / (2.0 * np.pi)
+            )
+        theta_h = fov_deg2_to_half_angle_rad(self.fov)
+        cos_theta_h = np.cos(theta_h)
 
-        # Check if inside FOV
-        in_fov = angles < (fov_radians / 2)
+        # ---- Normalize boresight once ----
+        b = np.asarray(self.boresight, dtype=float)
+        b = b / (np.linalg.norm(b) + 1e-15)
 
-        # Check occlusion
-        occluded = self.is_occluded_batch(spacecraft_position, positions, earth_position, moon_position, configs)
+        # ---- Relative vectors from s/c to asteroid ----
+        rel_pos = positions - sc_pos  # (N,3)
+        rel_norm = np.linalg.norm(rel_pos, axis=1)  # (N,)
 
-        # Final visibility check
-        visible_indices = np.where(in_fov & ~occluded)[0]
+        # ---- Use cosine test instead of angle ----
+        vhat = rel_pos / (rel_norm[:, None] + 1e-15)
+        cos_angles = vhat @ b  # (N,)
 
-        # Create output array
-        result = np.full_like(asteroid_trajectory[:, 0], -1, dtype=float)  # Initialize with NaN
-        result[visible_indices] = visible_indices  # Assign index where visible
+        # Inside conical FOV
+        in_fov = cos_angles >= cos_theta_h
+
+        # ---- Occlusion check (unchanged) ----
+        occluded = self.is_occluded_batch(
+            spacecraft_position,
+            positions,
+            earth_position,
+            moon_position,
+            configs
+        )
+
+        visible = in_fov & (~occluded)
+
+        # ---- Output format exactly like your original ----
+        result = np.full(positions.shape[0], -1.0, dtype=float)
+        visible_indices = np.where(visible)[0]
+        result[visible_indices] = visible_indices
 
         return result
+
+
+    def asteroid_in_fov_batch(self, asteroid_trajectory, spacecraft_position,
+                              earth_position, moon_position, configs):
+        """
+        Determine when the asteroid is in the field of view, considering:
+          1) conical FOV test
+          2) Earth/Moon occlusion (existing is_occluded_batch)
+          3) EMS exclusion sphere occlusion (new), with angular margin alpha_s_deg
+
+        Parameters (as in your original):
+            asteroid_trajectory (N,3) in AU
+            spacecraft_position (N,3) in AU
+            earth_position (N,3) in AU
+            moon_position (N,3) in AU
+            configs: YAML config dict containing:
+                p_em: [x,y,z] in km
+                R_em: radius in km
+                alpha_s_deg: margin in degrees
+
+        Returns:
+            result_base (N,) float array: index where visible, -1 where not visible
+            result_ems_filtered (N,) float array: same, but also filtered by EMS exclusion
+        """
+        positions = np.asarray(asteroid_trajectory, dtype=float)  # (N,3) AU
+        sc_pos = np.asarray(spacecraft_position, dtype=float)  # (N,3) AU
+
+        N = positions.shape[0]
+
+        AU_KM = 149_597_870.7
+        def fov_deg2_to_half_angle_rad(FOV_deg2):
+            """
+            Convert sky area FOV (deg^2) to cone half-angle (radians)
+            using spherical cap geometry.
+            """
+            return np.arccos(
+                1.0 - (FOV_deg2 / (180.0 / np.pi) ** 2) / (2.0 * np.pi)
+            )
+        theta_h = fov_deg2_to_half_angle_rad(self.fov)
+        cos_theta_h = np.cos(theta_h)
+
+        # ---- Normalize boresight (assumed in same frame) ----
+        b = np.asarray(self.boresight, dtype=float).reshape(3, )
+        b = b / (np.linalg.norm(b) + 1e-15)
+
+        # ---- Relative LOS spacecraft -> asteroid ----
+        rel_pos = positions - sc_pos  # (N,3)
+        rel_norm = np.linalg.norm(rel_pos, axis=1)  # (N,)
+        vhat = rel_pos / (rel_norm[:, None] + 1e-15)  # (N,3)
+
+        # ---- Conical FOV test via cosine threshold ----
+        cos_angles = vhat @ b  # (N,)
+        in_fov = cos_angles >= cos_theta_h
+
+        # ---- Existing occlusion (Earth/Moon) ----
+        occluded_em = self.is_occluded_batch(sc_pos, positions, earth_position, moon_position, configs)
+
+        # Base visibility (your current logic)
+        visible_base = in_fov & (~occluded_em)
+
+        # Build base result array
+        result_base = np.full(N, -1.0, dtype=float)
+        base_idx = np.where(visible_base)[0]
+        result_base[base_idx] = base_idx
+
+        # ---------------------------------------------------------
+        # NEW: EMS exclusion sphere occlusion
+        # ---------------------------------------------------------
+        # Read EMS config
+        p_em_km = np.asarray(configs.get("p_em", [0.0, 0.0, 0.0]), dtype=float).reshape(3, )
+        R_em_km = float(configs.get("R_em", 0.0))
+        alpha_s_deg = float(configs.get("alpha_s_deg", 0.0))
+
+        # If R_em <= 0, treat as disabled (no extra filtering)
+        if R_em_km <= 0.0:
+            result_ems_filtered = result_base.copy()
+            return result_base, result_ems_filtered
+
+        # Convert EMS center/radius to AU (inputs are AU, config is km)
+        p_em = p_em_km / AU_KM
+        R_em = R_em_km / AU_KM
+        alpha_s = np.deg2rad(alpha_s_deg)
+
+        # Vector spacecraft -> EMS center
+        c_vec = p_em[None, :] - sc_pos  # (N,3)
+        c_dist = np.linalg.norm(c_vec, axis=1)  # (N,)
+        c_hat = c_vec / (c_dist[:, None] + 1e-15)  # (N,3)
+
+        # Separation angle between LOS-to-asteroid and LOS-to-EMS-center
+        dot_uc = np.einsum("ij,ij->i", vhat, c_hat)  # (N,)
+        dot_uc = np.clip(dot_uc, -1.0, 1.0)
+        sep = np.arccos(dot_uc)  # (N,)
+
+        # Apparent angular radius of EMS sphere as seen from spacecraft
+        # If spacecraft is inside the sphere (c_dist < R_em), treat as fully occluded.
+        inside_sphere = c_dist <= R_em
+
+        # arcsin argument must be <= 1
+        arg = np.zeros_like(c_dist)
+        valid = c_dist > 1e-15
+        arg[valid] = np.clip(R_em / c_dist[valid], 0.0, 1.0)
+        beta = np.arcsin(arg)  # (N,)
+
+        # Occluded by EMS if LOS passes within (beta + alpha_s) of the EMS center direction
+        occluded_ems = inside_sphere | (sep <= (beta + alpha_s))
+
+        # Final visibility with EMS exclusion applied
+        visible_ems_filtered = visible_base & (~occluded_ems)
+
+        result_ems_filtered = np.full(N, -1.0, dtype=float)
+        idx2 = np.where(visible_ems_filtered)[0]
+        result_ems_filtered[idx2] = idx2
+
+        return result_base, result_ems_filtered
+
 
