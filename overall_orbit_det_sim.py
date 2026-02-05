@@ -5,7 +5,7 @@ from Asteroid import Asteroid
 from Formation import Formation
 import numpy as np
 import mpi4py.rc
-from astropy import units as u
+from od_spkf import OD_UKF, od_setup_from_iod
 
 mpi4py.rc.threads = False
 from mpi4py import MPI
@@ -1339,258 +1339,125 @@ def run_OD(config):
 
         # try:
 
-        M = config['num_spacecraft']
-
-        # detecting s/c id
-        sc_detecting_id = int(row['DETECTING_SC_ID'] - 1)
-
-        # access iod master row data
-        ast_helio_ae_kms = util.parse_vec_cell(row['HELIO_AST(kms)'])
-
-        sc_helio_se_kms = np.zeros((M, 6))
-        earth_helio_se_kms = np.zeros((M, 6))
-        for i in range(M):
-            sc_str = f'HELIO_SC_{i + 1}(kms)'
-            sc_helio_se_kms[i, :] = util.parse_vec_cell(row[sc_str])
-
-            se_str = f'EPOCH_SC_{i + 1}(jdtdb)'
-            se_jdtdb = row[se_str]
-            se_et = sp.unitim(se_jdtdb, 'JDTDB', 'ET')
-            reference_body = 10  # sun
-            body = 399  # earth
-            earth_helio_se_i, _ = sp.spkgeo(body, se_et, "ECLIPJ2000", reference_body)
-            earth_helio_se_kms[i, :] = earth_helio_se_i
-
-        sc_pointing_sunearth_cartesian = np.zeros((M, 3))
-        for i in range(M):
-            sc_point_str = f'BORESIGHT_SC_{i+1}_GEO_SECR'
-            sc_pointing_sunearth_cartesian[i, :] = util.parse_vec_cell(row[sc_point_str])
-
-        # convert IOD master data into a EMEJ2000 for ukf, and SECR visulazation for interpretation
-        # convert ast_helio to eme
-        ae_str = 'EPOCH_AST(jdtdb)'
-        ae_jdtdb = row[ae_str]
-        ae_et = sp.unitim(ae_jdtdb, 'JDTDB', 'ET')
-        reference_body = 10
-        body = 399
-        earth_helio_ae_kms, _ = sp.spkgeo(body, ae_et, "ECLIPJ2000", reference_body)
-        ast_eme_ae_kms = util.helio_eclip_to_geo_eme_generic(ast_helio_ae_kms, earth_helio_ae_kms,
-                                                             layout="batch")
-        # covert ast_helio to geo secr
-        ast_secr_ae_kms = util.helio_eclip_to_geo_secr_generic(ast_helio_ae_kms, earth_helio_ae_kms,
-                                                               layout="batch")
-
-        # convert s/c to GEO SECR using SE
-        sc_secr_se_kms = np.zeros((M, 6))
-        for i in range(M):
-            sc_secr_se_kms[i, :] = util.helio_eclip_to_geo_secr_generic(sc_helio_se_kms[i, :], earth_helio_se_kms[i, :],
-                                                                        layout="batch", obj_hint="(batch, 6)")
-
-        # convert s/c GEO SECR to eme using AE
-        sc_geoeclip_ae_kms = util.geo_secr_to_geo_eclip_generic(sc_secr_se_kms, earth_helio_ae_kms,
-                                                                layout="batch")
-
-        sc_eme_ae_kms = util.geo_eclip_to_geo_eme_generic(sc_geoeclip_ae_kms, layout="batch")
-
-        # convert pointing from SECR to eme
-        sc_pointing_geoeclip_cartesian = util.geo_secr_to_geo_eclip_generic(sc_pointing_sunearth_cartesian,
-                                                                            earth_helio_ae_kms, layout="batch",
-                                                                            obj_hint="(batch, 3)")
-        sc_pointing_eme_cartesian = util.geo_eclip_to_geo_eme_generic(sc_pointing_geoeclip_cartesian,
-                                                                      layout="batch", hint="(batch, 3)")
-
-        # get pointing angles - both SECR and EME - ccw from +x
-        sc_pointing_secr_angle_rad = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_sunearth_cartesian)
-        sc_pointing_eme_angle_rad = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_eme_cartesian)
-
-        # iod solution
-        ast_iod_eme_ae_kms = util.parse_vec_cell(row['IOD_FINAL_STATE'])
-        ast_iod_geoeclip_ae_kms = util.geo_eme_to_geo_eclip_generic(ast_iod_eme_ae_kms)
-        ast_iod_helioeclip_ae_kms = ast_iod_geoeclip_ae_kms + earth_helio_ae_kms
-        ast_iod_secr_ae_kms = util.helio_eclip_to_geo_secr_generic(ast_iod_helioeclip_ae_kms,
-                                                                   earth_helio_ae_kms, layout="batch")
-
-        # Correct IOD if out of FOV
-        # SECR
-        sc_pos = sc_secr_se_kms[sc_detecting_id, :3]  # apex
-        u_bore = sc_pointing_sunearth_cartesian[sc_detecting_id, :]  # axis (SECR)
-        theta_h_rad = np.deg2rad(2.5)
-
-        iod_pos_secr = ast_iod_secr_ae_kms[:3].copy()
-
-        iod_pos_secr_clamped, inside, info = util.clamp_point_into_fov_cone(
-            iod_pos_secr,
-            sc_pos_xyz=sc_pos,
-            boresight_u_xyz=u_bore,
-            theta_h_rad=theta_h_rad,
-        )
-
-        if not inside:
-            # overwrite the IOD position used downstream (position only)
-            ast_iod_secr_ae_kms[:3] = iod_pos_secr_clamped
-            print(f"[IOD clamp] detecting SC {sc_detecting_id}: {info}")
-
-        # eme
-        sc_pos = sc_eme_ae_kms[sc_detecting_id, :3]  # apex
-        u_bore = sc_pointing_eme_cartesian[sc_detecting_id, :]  # axis (EME)
-        theta_h_rad = np.deg2rad(2.5)
-
-        iod_pos_eme = ast_iod_eme_ae_kms[:3].copy()
-
-        iod_pos_eme_clamped, inside_eme, info = util.clamp_point_into_fov_cone(
-            iod_pos_eme,
-            sc_pos_xyz=sc_pos,
-            boresight_u_xyz=u_bore,
-            theta_h_rad=theta_h_rad,
-        )
-
-        if not inside_eme:
-            # overwrite the IOD position used downstream (position only)
-            ast_iod_eme_ae_kms[:3] = iod_pos_eme_clamped
-            print(f"[IOD clamp] detecting SC {sc_detecting_id}: {info}")
-
-        # these are (M,6), topo for each s/c
-        ast_iod_topoeme_radecrho_radkms = util.topocentric_alpha_delta_rho_6d(
-            ast_iod_eme_ae_kms[:3], ast_iod_eme_ae_kms[3:],
-            sc_eme_ae_kms[:, :3], sc_eme_ae_kms[:, 3:]
-        )
-
-        ast_iod_toposecr_radecrho_radkms = util.topocentric_alpha_delta_rho_6d(
-            ast_iod_secr_ae_kms[:3], ast_iod_secr_ae_kms[3:],
-            sc_secr_se_kms[:, :3], sc_secr_se_kms[:, 3:]
-        )
-
-        # convert uncertainty from topo to both eme and secr
-        # eme
-        ast_iod_uncertainty_topoeme_radecrho_std_degkms = config['iod_cov_topo_std']  # ra, dec, rho, ra dot, dec dot, rho dot (deg, km, deg/s, km/s)
-        ast_iod_uncertainty_topoeme_radecrho_std_radkms = util.topo_std_degkms_to_radkms(ast_iod_uncertainty_topoeme_radecrho_std_degkms)
-        ast_iod_uncertainty_topoeme_radecrho_covmat_radkms = np.diag(ast_iod_uncertainty_topoeme_radecrho_std_radkms ** 2)
-
-        # P_topo is (6,6) in (rad, km, rad/s, km/s)
-        ast_iod_uncertainty_topoeme_cartesian_covmat = util.cov_radec_rho_6d_to_xyz_6d(
-            ast_iod_topoeme_radecrho_radkms,  # (M,6)
-            ast_iod_uncertainty_topoeme_radecrho_covmat_radkms  # (6,6)
-        )
-
-        ast_iod_uncertainty_toposecr_cartesian_covmat = util.cov_radec_rho_6d_to_xyz_6d(
-            ast_iod_toposecr_radecrho_radkms,  # (M,6)
-            ast_iod_uncertainty_topoeme_radecrho_covmat_radkms  # (6,6) same measurement covariance
-        )
-
-        #################################################
-        # 2D Visualizations, for SECR, ECLIP vs EME, they look different because of projection onto xy plane
-        ##############################################
-        # SECR Visualization
-        # agents_xy = sc_secr_se_kms[:, :2]
-        # pointing_angles_rad = sc_pointing_secr_angle_rad
-        # theta_h_rad = np.deg2rad(2.5)
-        #
-        # target_mean_xy = ast_iod_secr_ae_kms[:2]
-        # target_cov_xy = ast_iod_uncertainty_toposecr_cartesian_covmat[sc_detecting_id, :2, :2]
-        # true_target_xy = ast_secr_ae_kms[:2]
-        #
-        # ems_center_xy = np.array([0, 0])
-        # ems_radius = 5e5
-        #
-        # ray_length = 5e6
-        #
-        # fig, ax = util.plot_od_scenario_2d(
-        #     agents_xy=agents_xy,
-        #     pointing_angles_rad=pointing_angles_rad,
-        #     theta_h_rad=theta_h_rad,
-        #     ray_length=ray_length,
-        #     target_mean_xy=target_mean_xy,
-        #     target_cov_xy=target_cov_xy,
-        #     d_mahal=2.0,
-        #     true_target_xy=true_target_xy,
-        #     ems_center_xy=ems_center_xy,
-        #     ems_radius=ems_radius,
-        #     xlim=(-5e6, 2e6), ylim=(-3e6, 3e6),
-        #     agent_orbit_tracks_xy=None,  # or list of (K,2)
-        # )
-        #
-        # EME Visualization
-        # agents_xy = sc_eme_ae_kms[:, :2]
-        # pointing_angles_rad = sc_pointing_eme_angle_rad
-        # theta_h_rad = np.deg2rad(2.5)
-        #
-        # target_mean_xy = ast_iod_eme_ae_kms[:2]
-        # target_cov_xy = ast_iod_uncertainty_topoeme_cartesian_covmat[sc_detecting_id, :2, :2]
-        # true_target_xy = ast_eme_ae_kms[:2]
-        #
-        # ems_center_xy = np.array([0, 0])
-        # ems_radius = 5e5
-        #
-        # fig2, ax2 = util.plot_od_scenario_2d(
-        #     agents_xy=agents_xy,
-        #     pointing_angles_rad=pointing_angles_rad,
-        #     theta_h_rad=theta_h_rad,
-        #     ray_length=ray_length,
-        #     target_mean_xy=target_mean_xy,
-        #     target_cov_xy=target_cov_xy,
-        #     d_mahal=2.0,
-        #     true_target_xy=true_target_xy,
-        #     ems_center_xy=ems_center_xy,
-        #     ems_radius=ems_radius,
-        #     xlim=(-5e6, 2e6), ylim=(-3e6, 3e6),
-        #     agent_orbit_tracks_xy=None,  # or list of (K,2)
-        # )
-        #
-        # Eclip Visualization - just the spacecraft are in elcip at the moment
-        # agents_xy = sc_geoeclip_ae_kms[:, :2]
-        # pointing_angles_rad = sc_pointing_eme_angle_rad
-        # theta_h_rad = np.deg2rad(2.5)
-        #
-        # target_mean_xy = ast_iod_eme_ae_kms[:2]
-        # target_cov_xy = ast_iod_uncertainty_topoeme_cartesian_covmat[sc_detecting_id, :2, :2]
-        # true_target_xy = ast_eme_ae_kms[:2]
-        #
-        # ems_center_xy = np.array([0, 0])
-        # ems_radius = 5e5
-        #
-        # fig3, ax3 = util.plot_od_scenario_2d(
-        #     agents_xy=agents_xy,
-        #     pointing_angles_rad=pointing_angles_rad,
-        #     theta_h_rad=theta_h_rad,
-        #     ray_length=ray_length,
-        #     target_mean_xy=target_mean_xy,
-        #     target_cov_xy=target_cov_xy,
-        #     d_mahal=2.0,
-        #     true_target_xy=true_target_xy,
-        #     ems_center_xy=ems_center_xy,
-        #     ems_radius=ems_radius,
-        #     xlim=(-5e6, 2e6), ylim=(-3e6, 3e6),
-        #     agent_orbit_tracks_xy=None,  # or list of (K,2)
-        # )
-
-        ###########################################
-        # 3D Visulization
-        ##########################################
-
+        # ----------------------------------------------
+        # Setup
+        # ---------------------------------------------
+        setup = od_setup_from_iod(config, row, util=util, sp=sp)
         # Force visualization ON (as requested)
         viz_flag = True
-
         if viz_flag:
-            # SECR
-            agents_xyz = sc_secr_se_kms[:, :3]
-            theta_h_rad = np.deg2rad(2.5)
+
+            sid = setup["sc_detecting_id"]
+
+            # Common viz params
+            theta_h_rad = util.fov_deg2_to_half_angle_rad(config["fov"])
+            ems_center_xy = np.array(config["p_em"][:2])
+            ems_center_xyz = np.array(config["p_em"])
+            ems_radius = config['R_em']
             ray_length = 5e6
-            target_cov_xyz = ast_iod_uncertainty_toposecr_cartesian_covmat[sc_detecting_id, :3, :3]
-            ems_center_xyz = np.array([0, 0, 0])
-            ems_radius = 5e5
+
+            # Helpers: handle (M,6,6) vs (6,6)
+            def _pick_cov(P, sid, block=(slice(0, 2), slice(0, 2))):
+                P = np.asarray(P)
+                if P.ndim == 3:
+                    return P[sid][block]
+                return P[block]
+
+            # Pull states/vectors from setup
+            sc_secr_se_kms = setup["frames"]["sc_secr_se_kms"]  # (M,6)
+            sc_eme_ae_kms = setup["frames"]["sc_eme_ae_kms"]  # (M,6)
+            sc_geoeclip_ae_kms = setup["frames"].get("sc_geoeclip_ae_kms", None)
+
+            sc_pointing_secr = setup["frames"]["sc_pointing_sunearth_cartesian"]  # (M,3)
+            sc_pointing_eme = setup["frames"]["sc_pointing_eme_cartesian"]  # (M,3)
+
+            ang_secr = setup["frames"]["sc_pointing_secr_angle_rad"]  # (M,)
+            ang_eme = setup["frames"]["sc_pointing_eme_angle_rad"]  # (M,)
+
+            ast_truth_secr = setup["frames"]["ast_secr_ae_kms"]  # (6,) or (1,6)
+            ast_truth_eme = setup["frames"]["ast_eme_ae_kms"]  # (6,) or (1,6)
+
+            ast_iod_secr = setup["iod"]["ast_iod_secr_ae_kms"]  # (6,)
+            ast_iod_eme = setup["iod"]["ast_iod_eme_ae_kms"]  # (6,)
+
+            P_cart_secr = setup["iod"]["cov"]["P_cart_secr"]  # (M,6,6) or (6,6)
+            P_cart_eme = setup["iod"]["cov"]["P_cart_eme"]  # (M,6,6) or (6,6)
+
+            # Ensure truth shapes are (6,) if they came back as (1,6)
+            ast_truth_secr = np.asarray(ast_truth_secr).reshape(-1)
+            ast_truth_eme = np.asarray(ast_truth_eme).reshape(-1)
+
+            #################################################
+            # 2D Visualizations
+            #################################################
+
+            # ---- SECR 2D ----
+            agents_xy = sc_secr_se_kms[:, :2]
+            pointing_angles_rad = ang_secr
+
+            target_mean_xy = ast_iod_secr[:2]
+            target_cov_xy = _pick_cov(P_cart_secr, sid, block=(slice(0, 2), slice(0, 2)))
+            true_target_xy = ast_truth_secr[:2]
+
+            fig, ax = util.plot_od_scenario_2d(
+                agents_xy=agents_xy,
+                pointing_angles_rad=pointing_angles_rad,
+                theta_h_rad=theta_h_rad,
+                ray_length=ray_length,
+                target_mean_xy=target_mean_xy,
+                target_cov_xy=target_cov_xy,
+                d_mahal=2.0,
+                true_target_xy=true_target_xy,
+                ems_center_xy=ems_center_xy,
+                ems_radius=ems_radius,
+                xlim=(-5e6, 2e6), ylim=(-3e6, 3e6),
+                agent_orbit_tracks_xy=None,
+            )
+
+            # ---- EME 2D ----
+            agents_xy = sc_eme_ae_kms[:, :2]
+            pointing_angles_rad = ang_eme
+
+            target_mean_xy = ast_iod_eme[:2]
+            target_cov_xy = _pick_cov(P_cart_eme, sid, block=(slice(0, 2), slice(0, 2)))
+            true_target_xy = ast_truth_eme[:2]
+
+            fig2, ax2 = util.plot_od_scenario_2d(
+                agents_xy=agents_xy,
+                pointing_angles_rad=pointing_angles_rad,
+                theta_h_rad=theta_h_rad,
+                ray_length=ray_length,
+                target_mean_xy=target_mean_xy,
+                target_cov_xy=target_cov_xy,
+                d_mahal=2.0,
+                true_target_xy=true_target_xy,
+                ems_center_xy=ems_center_xy,
+                ems_radius=ems_radius,
+                xlim=(-5e6, 2e6), ylim=(-3e6, 3e6),
+                agent_orbit_tracks_xy=None,
+            )
+
+
+            #################################################
+            # 3D Visualizations
+            #################################################
+
+            # ---- SECR 3D ----
+            agents_xyz = sc_secr_se_kms[:, :3]
+            target_cov_xyz = _pick_cov(P_cart_secr, sid, block=(slice(0, 3), slice(0, 3)))
 
             fig, ax = util.plot_od_scenario_3d(
                 agents_xyz=agents_xyz,
-                u_opt_agents_xyz=sc_pointing_sunearth_cartesian,
+                u_opt_agents_xyz=sc_pointing_secr,
                 theta_h_rad=theta_h_rad,
                 ray_length=ray_length,
                 xlim=(-5e6, 2e6), ylim=(-3e6, 3e6), zlim=(-3e6, 3e6),
-                Nx=120, Ny=120, Nz=70,  # coverage resolution
+                Nx=120, Ny=120, Nz=70,
                 max_points_for_scatter=800_000,
-                target_mean_xyz=ast_iod_secr_ae_kms[:3],
+                target_mean_xyz=ast_iod_secr[:3],
                 target_cov_xyz=target_cov_xyz,
                 d_mahal=2.0,
-                true_target_xyz=ast_secr_ae_kms[:3],
+                true_target_xyz=ast_truth_secr[:3],
                 ems_center_xyz=ems_center_xyz,
                 ems_radius=ems_radius,
                 show_coverage=True,
@@ -1600,26 +1467,22 @@ def run_OD(config):
                 title="3D OD Scenario Demo (SECR)"
             )
 
-            # EME
+            # ---- EME 3D ----
             agents_xyz = sc_eme_ae_kms[:, :3]
-            theta_h_rad = np.deg2rad(2.5)
-            ray_length = 5e6
-            target_cov_xyz = ast_iod_uncertainty_topoeme_cartesian_covmat[sc_detecting_id, :3, :3]
-            ems_center_xyz = np.array([0, 0, 0])
-            ems_radius = 5e5
+            target_cov_xyz = _pick_cov(P_cart_eme, sid, block=(slice(0, 3), slice(0, 3)))
 
             fig, ax = util.plot_od_scenario_3d(
                 agents_xyz=agents_xyz,
-                u_opt_agents_xyz=sc_pointing_eme_cartesian,
+                u_opt_agents_xyz=sc_pointing_eme,
                 theta_h_rad=theta_h_rad,
                 ray_length=ray_length,
                 xlim=(-5e6, 2e6), ylim=(-3e6, 3e6), zlim=(-3e6, 3e6),
-                Nx=120, Ny=120, Nz=70,  # coverage resolution
+                Nx=120, Ny=120, Nz=70,
                 max_points_for_scatter=800_000,
-                target_mean_xyz=ast_iod_eme_ae_kms[:3],
+                target_mean_xyz=ast_iod_eme[:3],
                 target_cov_xyz=target_cov_xyz,
                 d_mahal=2.0,
-                true_target_xyz=ast_eme_ae_kms[:3],
+                true_target_xyz=ast_truth_eme[:3],
                 ems_center_xyz=ems_center_xyz,
                 ems_radius=ems_radius,
                 show_coverage=True,
@@ -1630,44 +1493,6 @@ def run_OD(config):
             )
 
             plt.show()
-
-        """
-        # --------------------------
-        # Initialization (first step)
-        # --------------------------
-        # Epochs
-        try:
-            # Prefer SC epoch if present; else asteroid epoch
-            t0_jdtdb = float(row.get("EPOCH_AST(jdtdb)", np.nan))
-        except Exception:
-            t0_jdtdb = np.nan
-        if not np.isfinite(t0_jdtdb):
-            raise RuntimeError("Cannot determine initial epoch (EPOCH_AST missing).")
-
-        # End time and step size
-        t_end   = t0_jdtdb + od_duration_days
-
-        # Load IOD result to initialize OD (from Stage 3)
-        iod_result_name = str(row.get("IOD_RESULT_SAVED_AS", "") or "")
-        if not iod_result_name.strip():
-            # If user wants OD to initialize from raw IOD_DATA_SAVED_AS (time series) instead,
-            # you can fallback. We keep it strict here:
-            raise FileNotFoundError("IOD_RESULT_SAVED_AS missing in MASTER row; cannot initialize OD.")
-        iod_result_path = os.path.join(out_dir, iod_result_name)
-        if not os.path.exists(iod_result_path):
-            # If files are elsewhere, adjust to your layout.
-            # Alternatively store absolute paths in IOD_RESULT_SAVED_AS.
-            raise FileNotFoundError(f"IOD result file not found: {iod_result_path}")
-
-        # TODO: load your IOD outputs for initialization
-        # Example (replace with your actual loader):
-        # iod_init = util.load_iod_result(iod_result_path)
-        # x0_est, P0_est = iod_init['x_est'], iod_init['P_est']  # state & covariance (example)
-        # x_true0       = iod_init.get('x_true', None)          # if available
-        # For now, use placeholders:
-        x0_est  = None    # TODO: replace with real estimate
-        P0_est  = None    # TODO: replace with real covariance
-        x_true0 = None    # TODO: replace with truth if available
 
         # Prepare per-row OD log (unique filename, no overwrite)
         base = f"{uid}__OD_{config['dynamics']}_{config['orbit']}_{config['observer']}_{config['optimizer']}"
@@ -1681,8 +1506,8 @@ def run_OD(config):
                 "STEP_INDEX",
                 "EPOCH_JDTDB",
                 # estimated state vector (flatten as comma-separated strings if needed)
-                "X_EST",             # stringified state estimate
-                "P_EST_TRACE",       # scalar or compact representation
+                "X_EST",  # stringified state estimate
+                "P_EST_TRACE",  # scalar or compact representation
                 # true state, if available
                 "X_TRUE",
                 # control/attitude targets, if applicable
@@ -1692,104 +1517,108 @@ def run_OD(config):
                 "VEL_RMSE",
             ])
 
-            # ----------------------------------------------------------
-            # Time loop
-            # ----------------------------------------------------------
-            step_idx = 0
-            t_cur = t0_jdtdb
+        # --------------------------
+        # Initialization (first step)
+        # --------------------------
+        x0_est = setup["iod"]["ast_iod_eme_ae_kms"]
+        P0_est = setup["iod"]["cov"]["P_cart_eme"]
+        x_true0 = setup["frames"]["ast_eme_ae_kms"]
+        t0_jdtdb = setup["epochs"]["ae_jdtdb"]
 
-            # Working state (initialize from IOD)
-            x_est = x0_est
-            P_est = P0_est
-            x_true = x_true0
+        # Process noise initialization - since I have different time steps, my Q is not constant
+        r_noise = config['radial_process_noise']
+        t_noise = config['track_process_noise']
+        n_noise = config['normal_process_noise']
 
-            last_pos_rmse = np.nan
-            last_vel_rmse = np.nan
+        # Measurement noise initialization - this also evolves with time, because we measure LOS here, not RA and DEC
+        ra_noise = config['sigma_ra']
+        dec_noise = config['sigma_dec']
+        pointing_noise = config['sigma_pointing']
 
-            while True:
-                # End condition
-                if t_cur > t_end:
-                    break
-                if od_max_steps is not None and step_idx >= od_max_steps:
-                    break
+        # ukf weight values
+        alpha = config['alpha_ukf']
+        beta = config['beta_ukf']
+        kappa = config['kappa_ukf']
+        # cholesky decomposition to calc sigmapoints
+        epsilon = config['epsilon_ukf']  # constant to ensure positive defineteness
 
-                if step_idx == 0:
-                    # -------------- INITIALIZATION STEP ---------------
-                    # TODO: any one-time initialization for your OD filter (e.g., set process noise, etc.)
-                    # Example:
-                    # od_state = od.init_filter(x0_est, P0_est, config)
-                    # (We keep using x_est, P_est variables directly here.)
-                    pass
-                else:
-                    # -------------- REGULAR OD STEP -------------------
-                    # 1) Generate measurements at time t_cur for this master row
-                    #    (You can use MASTER columns and/or per-row IOD_DATA_SAVED_AS to drive geometry)
-                    # TODO: implement your measurement generation:
-                    # meas = util.generate_od_measurements(row, t_cur, config)
-                    meas = None
+        ukf = OD_UKF(
+            x0=setup["x0_eme_kms"],
+            P0=setup["P0_eme"],
+            Sa_rtn=(r_noise, t_noise, n_noise),
+            meas_units="mas",
+            sigma_ra=ra_noise,
+            sigma_dec=dec_noise,
+            sigma_pointing=pointing_noise,
+            ukf_alpha=alpha,
+            ukf_beta=beta,
+            ukf_kappa=kappa,
+            eps=epsilon,
+        )
 
-                    # 2) Propagate the filter to t_cur + dt and update with measurements
-                    # TODO: implement your OD step:
-                    # x_est, P_est = od.run_step(x_est, P_est, meas, config, t_cur, dt=dt_day)
-                    # Optionally also maintain a truth model for diagnostics:
-                    # x_true = truth.propagate(x_true, dt_day, config) if x_true is not None else None
-                    pass
 
-                # -------------- Post-step metrics & logging ----------
-                # TODO: compute RMSE (pos/vel) at this step if truth is available and uncertainty
-                # Example placeholders:
-                # last_pos_rmse, last_vel_rmse = util.compute_rmse(x_est, x_true)
-                # If not available, keep NaN or compute innovation-based proxies.
-                # For now, they remain as is.
+        # ----------------------------------------------------------
+        # Time loop
+        # ----------------------------------------------------------
+        step_idx = 0
+        t_cur = t0_jdtdb
+        t_end = t_cur + config['od_duration_days']
 
-                # -------------- Attitude / Slew Planning (optional) --
-                # TODO: plan pointing/attitude for next step, if needed:
-                # att_cmd = util.plan_attitude(x_est, row, t_cur, config)
-                att_cmd = ""
+        # Working state (initialize from IOD)
+        x_est = x0_est
+        P_est = P0_est
+        x_true = x_true0
 
-                # TODO: get time update
-                dt_day = 0.01
+        last_pos_rmse = np.nan
+        last_vel_rmse = np.nan
 
-                # TODO: get state of system after slew
-                # asteroid state, both true and predicted
-                # formation s/c states
+        while True:
+            # End condition
+            if t_cur > t_end:
+                break
+            if od_max_steps is not None and step_idx >= od_max_steps:
+                break
 
-                # TODO: update state of the system
+            # -------------- REGULAR OD STEP -------------------
+            # -----------------------------------------------------
+            # Perform Attitude Coordination - with uncertainty growth
+            # -------------------------------------------------------
+            print("You are ready to integrate att coor")
 
-                # -------------- Log the step -------------------------
-                # Stringify vectors/matrices compactly to keep CSV readable:
-                def _vec_to_str(v):
-                    if v is None:
-                        return ""
-                    try:
-                        arr = np.asarray(v).ravel()
-                        return ",".join(f"{float(x):.9g}" for x in arr)
-                    except Exception:
-                        return str(v)
+            # -------------- Log the step -------------------------
+            # Stringify vectors/matrices compactly to keep CSV readable:
+            def _vec_to_str(v):
+                if v is None:
+                    return ""
+                try:
+                    arr = np.asarray(v).ravel()
+                    return ",".join(f"{float(x):.9g}" for x in arr)
+                except Exception:
+                    return str(v)
 
-                def _mat_trace(m):
-                    if m is None:
-                        return np.nan
-                    try:
-                        a = np.asarray(m)
-                        return float(np.trace(a))
-                    except Exception:
-                        return np.nan
+            def _mat_trace(m):
+                if m is None:
+                    return np.nan
+                try:
+                    a = np.asarray(m)
+                    return float(np.trace(a))
+                except Exception:
+                    return np.nan
 
-                log_writer.writerow([
-                    step_idx,
-                    f"{t_cur:.9f}",
-                    _vec_to_str(x_est),
-                    _mat_trace(P_est),
-                    _vec_to_str(x_true),
-                    att_cmd,
-                    f"{last_pos_rmse:.9g}" if np.isfinite(last_pos_rmse) else "",
-                    f"{last_vel_rmse:.9g}" if np.isfinite(last_vel_rmse) else "",
-                ])
+            log_writer.writerow([
+                step_idx,
+                f"{t_cur:.9f}",
+                _vec_to_str(x_est),
+                _mat_trace(P_est),
+                _vec_to_str(x_true),
+                att_cmd,
+                f"{last_pos_rmse:.9g}" if np.isfinite(last_pos_rmse) else "",
+                f"{last_vel_rmse:.9g}" if np.isfinite(last_vel_rmse) else "",
+            ])
 
-                # -------------- Update time/state for next loop ------
-                t_cur += dt_day
-                step_idx += 1
+            # -------------- Update time/state for next loop ------
+            t_cur += dt_day
+            step_idx += 1
 
         # At this point, the OD row is complete; prepare MASTER update
         upd = {
@@ -1805,9 +1634,6 @@ def run_OD(config):
 
         # tidy
         gc.collect()
-        """
-
-        # NOTE: your OD loop is still inside the triple-quoted block above (as in your original).
 
     # ===== Gather updates → rank 0 writes MASTER (ordered) → broadcast committed UIDs → write .done =====
     gathered = comm.gather(updates, root=0)

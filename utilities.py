@@ -5251,6 +5251,16 @@ def parse_master_new_new_new(file_path):
     return master_data
 
 
+def fov_deg2_to_half_angle_rad(FOV_deg2):
+    """
+    Convert sky area FOV (deg^2) to cone half-angle (radians)
+    using spherical cap geometry.
+    """
+    return np.arccos(
+        1.0 - (FOV_deg2 / (180.0 / np.pi) ** 2) / (2.0 * np.pi)
+    )
+
+
 def count_files_in_folder(folder_path):
     num_files = sum(
         1 for entry in os.scandir(folder_path) if entry.is_file()

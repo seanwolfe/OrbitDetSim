@@ -139,6 +139,15 @@ p_em: [0.0, 0.0, 0.0]
 R_em: 0.5e+6
 alpha_s_deg: 0
 INCLUDE_EMS_EXCLUSION: 0
+radial_process_noise: 1.0e-28  # radial noise in RTN frame (km/s^2)^2
+track_process_noise: 1.0e-26  # along track noise in RTN frame (km/s^2)2
+normal_process_noise: 1.0e-28  # normal to track noise in RTN frame (km/s^2)2
+
+# weight values for SPKF portion
+alpha_ukf: 0.1                                     # alpha beta kappa together determine spread of sigmapoints
+beta_ukf: 2
+kappa_ukf: 0
+epsilon_ukf: 0.0000000001
 
 
 
