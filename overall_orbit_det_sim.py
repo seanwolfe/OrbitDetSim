@@ -1613,19 +1613,25 @@ def run_OD(config):
                 n_body_propagator.propagate_multiple_objects
             )
 
+            # propagate formation to each epoch
+            sc_eme_states_kms = setup["frames"]["sc_eme_ae_kms"]  # current sc pos at detection instant
+            sc_eme_trajs_kms = n_body_propagator.propagate_multiple_objects(sc_eme_states_kms, t_cur, big_t_set_jdtdb)
+
             # to visualize the possible att coord scenarios
             viz_prop_flag = True
             if viz_prop_flag:
                 util.plot_priors_positions_and_cov_2d(
                     x_ts,
                     P_ts,
-                    stride=1,  # draw ellipse every 6th epoch
-                    n_std=3.0,  # 1-sigma ellipse
+                    sc_trajs_km=sc_eme_trajs_kms,  # (K,M,6) or (K,M,3)
+                    stride=1,
+                    n_std=3.0,
                     planes=("xy", "xz", "yz"),
-                    title_prefix="Asteroid prior"
+                    title_prefix="Asteroid prior + spacecraft"
                 )
 
-            # perform attitude coord.
+            # perform attitude coord. - GET THIS WORKING
+            # result_att_coord_kcoverage, result_att_coord_mean = attitude_coordination.step(sc_eme_trajs_kms[:, :, :3],)
 
 
             # move to that epoch

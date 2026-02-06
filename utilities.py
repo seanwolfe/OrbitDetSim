@@ -1763,18 +1763,13 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
 
 
 def _cov_ellipse_2d(P2, n_std=1.0, n_pts=200):
-    """
-    Return ellipse points (x,y) for a 2x2 covariance matrix.
-    """
     P2 = np.asarray(P2, dtype=float).reshape(2, 2)
-    # eigendecomposition
     w, V = np.linalg.eigh(P2)
     w = np.maximum(w, 0.0)
     t = np.linspace(0.0, 2.0 * np.pi, n_pts)
     circle = np.vstack([np.cos(t), np.sin(t)])  # (2,n)
-    # scale by sqrt(eigs) and rotate
     A = V @ np.diag(np.sqrt(w)) * float(n_std)
-    pts = (A @ circle)  # (2,n)
+    pts = A @ circle
     return pts[0], pts[1]
 
 
@@ -1782,26 +1777,34 @@ def plot_priors_positions_and_cov_2d(
     X_pred_km,
     P_pred_km2,
     *,
+    sc_trajs_km=None,
+    sc_mark_every=1,
     planes=("xy", "xz", "yz"),
     stride=5,
     n_std=1.0,
     show_path=True,
+    show_sc_paths=True,
     title_prefix="Priors",
     equal_aspect=True,
 ):
     """
-    Visualize mean position trajectory and covariance ellipses in 2D planes.
+    Visualize mean position trajectory and covariance ellipses in 2D planes,
+    optionally overlaid with spacecraft trajectories.
 
     Inputs:
       - X_pred_km: (K,6) or (6,) from ukf.propagate_priors(...)
-      - P_pred_km2: (K,6,6) or (6,6)
-        NOTE: expects position covariance in km^2 (consistent with your UKF state units).
-              Uses the top-left 3x3 block of each P.
+      - P_pred_km2: (K,6,6) or (6,6) position covariance is top-left 3x3 (km^2)
+      - sc_trajs_km: optional spacecraft trajectories:
+          * (K,M,6) or (K,M,3) or (M,6) or (M,3)
+            - If (M,*) assumed static at one epoch (K=1)
+            - If (K,M,*) time-varying; uses first 3 components as position
+      - sc_mark_every: plot markers for s/c every this many steps (for clarity)
 
     Plots:
       - One figure per plane (xy, xz, yz)
-      - Mean trajectory (optional)
+      - Mean asteroid trajectory (optional)
       - Covariance ellipses every `stride` steps at `n_std` sigma
+      - Spacecraft trajectories (optional)
     """
     X = np.asarray(X_pred_km, dtype=float)
     P = np.asarray(P_pred_km2, dtype=float)
@@ -1817,25 +1820,55 @@ def plot_priors_positions_and_cov_2d(
     if P.shape != (K, 6, 6):
         raise ValueError(f"P_pred must be (K,6,6) matching X_pred, got {P.shape}")
 
-    idx_map = {
-        "xy": (0, 1),
-        "xz": (0, 2),
-        "yz": (1, 2),
-    }
+    # Normalize spacecraft trajectories to (K, M, 3) or None
+    sc_pos = None
+    if sc_trajs_km is not None:
+        sc = np.asarray(sc_trajs_km, dtype=float)
+
+        if sc.ndim == 2:
+            # (M,3) or (M,6) -> treat as static (K=1)
+            if sc.shape[1] not in (3, 6):
+                raise ValueError(f"sc_trajs_km (2D) must be (M,3) or (M,6), got {sc.shape}")
+            sc_pos = sc[:, :3].reshape(1, sc.shape[0], 3)
+        elif sc.ndim == 3:
+            # (K,M,3) or (K,M,6)
+            if sc.shape[2] not in (3, 6):
+                raise ValueError(f"sc_trajs_km (3D) must be (K,M,3) or (K,M,6), got {sc.shape}")
+            if sc.shape[0] != K:
+                raise ValueError(f"sc_trajs_km K mismatch: got {sc.shape[0]}, expected {K}")
+            sc_pos = sc[:, :, :3]
+        else:
+            raise ValueError(f"sc_trajs_km must be 2D or 3D array, got ndim={sc.ndim}")
+
+    idx_map = {"xy": (0, 1), "xz": (0, 2), "yz": (1, 2)}
 
     for pl in planes:
         if pl not in idx_map:
             raise ValueError(f"Unknown plane '{pl}'. Use one of {list(idx_map.keys())}.")
         a, b = idx_map[pl]
 
-        fig = plt.figure()
+        plt.figure()
         ax = plt.gca()
 
-        # Mean path
+        # Spacecraft trajectories
+        if show_sc_paths and sc_pos is not None:
+            Ksc, Msc, _ = sc_pos.shape
+            # If spacecraft traj only has K=1 but asteroid has K>1, plot just the initial positions
+            if Ksc == 1 and K > 1:
+                xs = sc_pos[0, :, a]
+                ys = sc_pos[0, :, b]
+                ax.plot(xs, ys, marker="o", linestyle="None")
+            else:
+                mark_every = max(int(sc_mark_every), 1)
+                for m in range(Msc):
+                    ax.plot(sc_pos[:, m, a], sc_pos[:, m, b])
+                    ax.plot(sc_pos[::mark_every, m, a], sc_pos[::mark_every, m, b], marker="o", linestyle="None")
+
+        # Asteroid mean path
         if show_path and K > 1:
             ax.plot(X[:, a], X[:, b])
 
-        # Ellipses
+        # Covariance ellipses
         for k in range(0, K, max(int(stride), 1)):
             mu = X[k, :3]
             Ppos = P[k, :3, :3]
@@ -1846,13 +1879,14 @@ def plot_priors_positions_and_cov_2d(
 
         ax.set_xlabel(f"{pl[0]} (km)")
         ax.set_ylabel(f"{pl[1]} (km)")
-        ax.set_title(f"{title_prefix}: mean + {n_std}σ ellipses in {pl.upper()} plane (stride={stride})")
+        ax.set_title(f"{title_prefix}: mean + {n_std}σ ellipses in {pl.upper()} plane")
 
         if equal_aspect:
             ax.set_aspect("equal", adjustable="datalim")
 
-        plt.grid(True)
+        ax.grid(True)
     plt.show()
+
 
 
 def viz(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, configs):
