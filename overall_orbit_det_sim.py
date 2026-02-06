@@ -19,6 +19,7 @@ import gc
 import glob
 import datetime as dt
 import matplotlib.pyplot as plt
+from od_attcoord import AttitudeCoordinator
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
 sp.furnsh("de430.bsp")
@@ -1216,7 +1217,6 @@ def run_IOD(config):
     return
 
 
-
 def run_OD(config):
     """
     Stage 4: Orbit Determination (OD)
@@ -1344,16 +1344,16 @@ def run_OD(config):
         setup = od_setup_from_iod(config, row, util=util, sp=sp)  # dict containing a lot of initial data
 
         # Force visualization ON (as requested)
-        viz_flag = True
+        viz_flag = False
         if viz_flag:
 
             sid = setup["sc_detecting_id"]
 
             # Common viz params
             theta_h_rad = util.fov_deg2_to_half_angle_rad(config["fov"])
-            ems_center_xy = np.array(config["p_em"][:2])
-            ems_center_xyz = np.array(config["p_em"])
-            ems_radius = config['R_em']
+            ems_center_xy = np.array(config["ems"]["p_em"][:2])
+            ems_center_xyz = np.array(config["ems"]["p_em"])
+            ems_radius = config["ems"]['R_em']
             ray_length = 5e6
 
             # Helpers: handle (M,6,6) vs (6,6)
@@ -1542,6 +1542,15 @@ def run_OD(config):
         # cholesky decomposition to calc sigmapoints
         epsilon = config['epsilon_ukf']  # constant to ensure positive defineteness
 
+
+        # ---------------------------------------------
+        # build ojects
+        # -------------------------------------------
+
+        # N-body propagator
+        n_body_propagator = nbody.NBodyPropagator(spice=sp, config=config)
+
+        # OD filter
         ukf = OD_UKF(
             x0=setup["x0_eme_kms"],
             P0=setup["P0_eme"],
@@ -1556,6 +1565,8 @@ def run_OD(config):
             eps=epsilon,
         )
 
+        # attitude coordinator
+        attitude_coordination = AttitudeCoordinator(config)
 
         # ----------------------------------------------------------
         # Time loop
@@ -1563,6 +1574,13 @@ def run_OD(config):
         step_idx = 0
         t_cur = t0_jdtdb
         t_end = t_cur + config['od_duration_days']
+
+        # epochs for attitude coordination
+        epochs = config.get("epochs", {})
+        dt_min = float(epochs.get("dt_min", 10.0))
+        dt_max = float(epochs.get("dt_max", 600.0))
+        n_dt = int(epochs.get("n_dt", 60))
+        big_t_set = np.linspace(dt_min, dt_max, n_dt)
 
         # Working state (initialize from IOD)
         x_est = x0_est
@@ -1583,7 +1601,36 @@ def run_OD(config):
             # -----------------------------------------------------
             # Perform Attitude Coordination - with uncertainty growth
             # -------------------------------------------------------
-            print("You are ready to integrate att coor")
+
+            # define epochs we want to look at
+            big_t_set_jdtdb = t_cur + (big_t_set / 86400.0)
+            big_t_set_jdtdb = big_t_set_jdtdb[big_t_set_jdtdb <= t_end + 1e-15]
+
+            # perform unscented transform
+            x_ts, P_ts = ukf.propagate_priors(
+                t_cur,
+                big_t_set_jdtdb,
+                n_body_propagator.propagate_multiple_objects
+            )
+
+            # to visualize the possible att coord scenarios
+            viz_prop_flag = True
+            if viz_prop_flag:
+                util.plot_priors_positions_and_cov_2d(
+                    x_ts,
+                    P_ts,
+                    stride=1,  # draw ellipse every 6th epoch
+                    n_std=3.0,  # 1-sigma ellipse
+                    planes=("xy", "xz", "yz"),
+                    title_prefix="Asteroid prior"
+                )
+
+            # perform attitude coord.
+
+
+            # move to that epoch
+
+
 
             # -------------- Log the step -------------------------
             # Stringify vectors/matrices compactly to keep CSV readable:

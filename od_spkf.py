@@ -258,8 +258,11 @@ class OD_UKF:
       Measurement noise: given sigma_ra/sigma_dec (+ sigma_pointing), mapped to
       unit-vector covariance R(t) via Jacobian.
 
-    This is a skeleton: predict/update logic is minimal; you plug in your propagator
-    and (optionally) a full UKF implementation.
+    This version updates predict() to an AUGMENTED UKF predict, and supports:
+      - t1 as a scalar epoch -> returns (x_pred, P_pred)
+      - t1 as a 1D array/list of epochs -> returns (X_pred, P_pred) with shapes
+            X_pred: (K,6), P_pred: (K,6,6)
+        using SEQUENTIAL prediction (each step uses previous predicted (x,P)).
     """
 
     def __init__(
@@ -292,13 +295,6 @@ class OD_UKF:
 
         self.eps = float(eps)
 
-        self.dimL = len(self.x)
-        self.lambd = ukf_alpha ** 2 * (self.dimL + ukf_kappa) - self.dimL
-        self.w_0_m = self.lambd / (self.lambd + self.dimL)  # first weight for computing the mean
-        self.w_j_m = 0.5 / (self.lambd + self.dimL)  # consequent weights for computing the mean
-        self.w_0_c = self.w_0_m + (1 - ukf_alpha ** 2 + ukf_beta)  # first weight for computing covariance
-        self.w_j_c = self.w_j_m
-
 
     # -----------------------------
     # Core builders: Q(dt), R(t)
@@ -311,8 +307,6 @@ class OD_UKF:
 
         Q(dt) = [[dt^3/3 * Sa_eme, dt^2/2 * Sa_eme],
                  [dt^2/2 * Sa_eme, dt     * Sa_eme]]
-
-        If r_eme_km/v_eme_km_s not provided, uses current self.x.
         """
         dt = float(dt)
         if r_eme_km is None or v_eme_km_s is None:
@@ -346,15 +340,6 @@ class OD_UKF:
         return Q
 
     def build_R(self, ra_rad, dec_rad, *, sigma_ra=None, sigma_dec=None, sigma_pointing=None, units=None):
-        """
-        Build epoch-dependent measurement covariance R(t) for unit LOS vector z=rho_hat (3x1),
-        from (sigma_ra, sigma_dec, sigma_pointing) in angle space.
-
-        R_hat = J(ra,dec) * diag(sigma_ra^2 + sigma_p^2, sigma_dec^2 + sigma_p^2) * J^T
-        where rho_hat(ra,dec) = [cos d cos a, cos d sin a, sin d]^T.
-
-        Returns a (3,3) covariance.
-        """
         if sigma_ra is None:
             sigma_ra = self.sigma_ra
         if sigma_dec is None:
@@ -366,7 +351,6 @@ class OD_UKF:
 
         s_ra, s_dec, s_pt = self._sigmas_to_rad(sigma_ra, sigma_dec, sigma_pointing, units)
 
-        # Add pointing in quadrature (common assumption; independent, isotropic)
         s_ra2 = s_ra**2 + s_pt**2
         s_de2 = s_dec**2 + s_pt**2
 
@@ -378,7 +362,6 @@ class OD_UKF:
         cra = np.cos(ra_rad)
         sra = np.sin(ra_rad)
 
-        # J = d(rho_hat)/d[ra,dec]
         J = np.array([
             [-c * sra,   -s * cra],
             [ c * cra,   -s * sra],
@@ -394,97 +377,325 @@ class OD_UKF:
 
     @staticmethod
     def h_los_unitvec(r_obj_km, r_obs_km, eps=1e-12):
-        """
-        z = rho_hat = (r_obj - r_obs) / ||r_obj - r_obs||  in EME/J2000.
-        """
         rho = np.asarray(r_obj_km, dtype=float) - np.asarray(r_obs_km, dtype=float)
         n = np.linalg.norm(rho)
         return rho / max(n, eps)
 
     @staticmethod
     def los_to_ra_dec(rho_hat, eps=1e-12):
-        """
-        Convert unit LOS vector to (RA, Dec) in radians.
-        Dec uses atan2 form for numerical robustness.
-        """
         x, y, z = rho_hat
         ra = np.arctan2(y, x)
         dec = np.arctan2(z, max(np.sqrt(x*x + y*y), eps))
         return ra, dec
 
     # -----------------------------
-    # UKF scaffolding (minimal)
+    # UKF predict/update
     # -----------------------------
+
+    def _sigma_points_augmented(self, x, P, Q, jitter=1e-12):
+        """
+        Augmented sigma points for additive process noise:
+            x_{k+1} = f(x_k) + w,  w ~ N(0, Q)
+
+        Constructs sigma points for augmented vector [x; w], mean [x; 0],
+        covariance blockdiag(P, Q).
+
+        Returns:
+          Xa: (2na+1, na) augmented sigma points
+          Wm, Wc: (2na+1,) weights
+          n: state dim
+          qn: noise dim
+        """
+        x = np.asarray(x, dtype=float).reshape(6)
+        P = np.asarray(P, dtype=float).reshape(6, 6)
+        Q = np.asarray(Q, dtype=float)
+
+        n = x.size
+        if Q.shape != (n, n):
+            raise ValueError(f"Augmented predict expects Q to be (6,6). Got {Q.shape}.")
+
+        qn = n
+        na = n + qn
+
+        xa = np.zeros(na, dtype=float)
+        xa[:n] = x  # noise mean is 0
+
+        Pa = np.zeros((na, na), dtype=float)
+        Pa[:n, :n] = P
+        Pa[n:, n:] = Q
+
+        lam = self.alpha**2 * (na + self.kappa) - na
+        c = na + lam
+
+        Wm = np.full(2 * na + 1, 1.0 / (2.0 * c), dtype=float)
+        Wc = np.full(2 * na + 1, 1.0 / (2.0 * c), dtype=float)
+        Wm[0] = lam / c
+        Wc[0] = lam / c + (1.0 - self.alpha**2 + self.beta)
+
+        # Cholesky with jitter fallback
+        Pa = self._symmetrize(Pa)
+        try:
+            S = np.linalg.cholesky(c * Pa)
+        except np.linalg.LinAlgError:
+            S = np.linalg.cholesky(c * (Pa + jitter * np.eye(na)))
+
+        Xa = np.empty((2 * na + 1, na), dtype=float)
+        Xa[0] = xa
+        for i in range(na):
+            Xa[1 + i]      = xa + S[:, i]
+            Xa[1 + i + na] = xa - S[:, i]
+
+        return Xa, Wm, Wc, n, qn
+
 
     def predict(self, t0, t1, propagate_sigma_points_fn, observer_ephem_fn=None):
         """
-        Prediction step skeleton.
+        Augmented UKF prediction.
 
         Parameters
         ----------
-        t0, t1 : float
-            Epochs (seconds or whatever you use consistently).
+        t0 : float
+            Initial epoch.
+        t1 : float OR array-like of float
+            Target epoch(s). If array-like, predictions are SEQUENTIAL:
+              (x,P) at each step becomes prior for next step.
         propagate_sigma_points_fn : callable
-            Should take (X_sigma, t0, t1) and return propagated sigma points.
-            Signature suggestion:
-                X_prop = propagate_sigma_points_fn(X_sigma, t0, t1)
-            where X_sigma is (2n+1, 6).
-        observer_ephem_fn : optional
-            Not used in predict; kept for symmetry.
+            Should take (X_sigma, t0, t1) and return propagated sigma points:
+              X_prop = propagate_sigma_points_fn(X_sigma, t0, t1)
+            where X_sigma is (Ns, 6) and X_prop is (Ns, 6).
+
+        Returns
+        -------
+        If t1 is scalar:
+            (x_pred, P_pred)
+        If t1 is array-like with K entries:
+            (X_pred, P_pred) where
+              X_pred has shape (K,6),
+              P_pred has shape (K,6,6)
 
         Notes
         -----
-        This skeleton uses a non-augmented predict: propagate sigma points then add Q(dt).
-        If you want augmented UKF, you’ll generate sigma points in augmented space and
-        inject noise inside your propagator.
+        Uses additive-noise augmented UKF:
+            X_aug sigma points -> propagate state part -> add noise part -> recombine.
+        This replaces the non-augmented "P += Q(dt)" step.
         """
-        dt = float(t1 - t0)
-        X, Wm, Wc = self._sigma_points(self.x, self.P)
-        X_prop = propagate_sigma_points_fn(X, t0, t1)
+        t1_arr = np.asarray(t1, dtype=float).ravel()
+        scalar_input = (t1_arr.size == 1)
 
-        x_pred = np.sum(Wm[:, None] * X_prop, axis=0)
-        P_pred = np.zeros((6, 6), dtype=float)
-        for i in range(X_prop.shape[0]):
-            dx = (X_prop[i] - x_pred).reshape(6, 1)
-            P_pred += Wc[i] * (dx @ dx.T)
+        x_curr = np.asarray(self.x, dtype=float).reshape(6)
+        P_curr = np.asarray(self.P, dtype=float).reshape(6, 6)
 
-        # Add process noise for this dt (in EME)
-        P_pred += self.build_Q(dt, r_eme_km=x_pred[:3], v_eme_km_s=x_pred[3:])
+        X_out = []
+        P_out = []
 
-        self.x, self.P = x_pred, self._symmetrize(P_pred)
+        t_prev = float(t0)
+
+        for t_next in t1_arr:
+            t_next = float(t_next)
+            dt = float(t_next - t_prev)
+            if dt < 0.0:
+                raise ValueError(f"predict expects non-decreasing epochs: got dt={dt} from {t_prev} to {t_next}")
+
+            # Process noise for this interval
+            Q = self.build_Q(dt, r_eme_km=x_curr[:3], v_eme_km_s=x_curr[3:])
+
+            # Augmented sigma points
+            Xa, Wm, Wc, n, qn = self._sigma_points_augmented(x_curr, P_curr, Q)
+
+            X_state = Xa[:, :n]   # (Ns,6)
+            W_noise = Xa[:, n:]   # (Ns,6)
+
+            # Propagate the state sigma points
+            X_prop = propagate_sigma_points_fn(X_state, t_prev, t_next)  # (Ns,6)
+
+            # Additive-noise injection
+            X_prop_noisy = X_prop + W_noise
+
+            # Mean and covariance
+            x_pred = np.sum(Wm[:, None] * X_prop_noisy, axis=0)
+            P_pred = np.zeros((6, 6), dtype=float)
+            for i in range(X_prop_noisy.shape[0]):
+                dx = (X_prop_noisy[i] - x_pred).reshape(6, 1)
+                P_pred += Wc[i] * (dx @ dx.T)
+
+            x_curr = x_pred
+            P_curr = self._symmetrize(P_pred)
+            t_prev = t_next
+
+            X_out.append(x_curr.copy())
+            P_out.append(P_curr.copy())
+
+        X_out = np.stack(X_out, axis=0)
+        P_out = np.stack(P_out, axis=0)
+
+        if scalar_input:
+            return X_out[0], P_out[0]
+        return X_out, P_out
+
+
+    def propagate_priors(self, t0, t_grid, propagate_many_fn):
+        """
+        Propagate priors (mean/cov) to a set of future epochs WITHOUT measurements.
+
+        This is a "distribution push-forward" using a single sigma-point set at t0:
+          1) Generate sigma points from (self.x, self.P) at t0
+          2) Propagate ALL sigma points to ALL epochs in t_grid in one call
+          3) Recombine mean/cov at each epoch
+          4) Add process noise Q(dt) for dt = (t_k - t0) in seconds
+
+        Parameters
+        ----------
+        t0 : float
+            Initial epoch (JDTDB).
+        t_grid : float OR array-like
+            Target epoch(s) in JDTDB. Must be >= t0 and non-decreasing.
+        propagate_many_fn : callable
+            Must support:
+                X_sig_t = propagate_many_fn(X_sigma, t0, t_grid)
+            where:
+                X_sigma: (Ns,6)
+            and returns:
+                - if t_grid is scalar: (Ns,6)
+                - if t_grid is length K: (K, Ns, 6)   (time-major)
+
+            This matches your NBodyPropagator.propagate_multiple_objects.
+
+        Returns
+        -------
+        If t_grid is scalar:
+            (x_pred, P_pred) with shapes (6,), (6,6)
+        If t_grid is array-like with K entries:
+            (X_pred, P_pred) with shapes (K,6), (K,6,6)
+
+        Notes
+        -----
+        - Does NOT update self.x, self.P.
+        - Uses dt_seconds = (t_k - t0) * 86400 for Q().
+        """
+        SEC_PER_DAY = 86400.0
+
+        t_arr = np.asarray(t_grid, dtype=float).ravel()
+        scalar_input = (t_arr.size == 1)
+
+        if t_arr.size == 0:
+            raise ValueError("t_grid must be non-empty")
+
+        t0 = float(t0)
+        if np.any(t_arr < t0 - 1e-15):
+            raise ValueError("t_grid must be >= t0")
+        if t_arr.size > 1 and np.any(np.diff(t_arr) < -1e-15):
+            raise ValueError("t_grid must be non-decreasing")
+
+        # Sigma points at t0 from current filter state (do NOT modify self.x/self.P)
+        X0_sigma, Wm, Wc = self._sigma_points(self.x, self.P)  # (Ns,6), (Ns,), (Ns,)
+        Ns = X0_sigma.shape[0]
+
+        # Propagate sigma points to all requested epochs in one call
+        Xsig_t = propagate_many_fn(X0_sigma, t0, t_arr)
+
+        # Normalize return shape to (K, Ns, 6)
+        if scalar_input:
+            Xsig_t = np.asarray(Xsig_t, dtype=float)
+            if Xsig_t.shape != (Ns, 6):
+                raise ValueError(f"Expected propagated sigma points (Ns,6) for scalar t_grid, got {Xsig_t.shape}")
+            Xsig_t = Xsig_t.reshape(1, Ns, 6)
+        else:
+            Xsig_t = np.asarray(Xsig_t, dtype=float)
+            if Xsig_t.shape != (t_arr.size, Ns, 6):
+                raise ValueError(
+                    f"Expected propagated sigma points (K,Ns,6) with K={t_arr.size}, Ns={Ns}, got {Xsig_t.shape}"
+                )
+
+        K = Xsig_t.shape[0]
+        X_pred = np.zeros((K, 6), dtype=float)
+        P_pred = np.zeros((K, 6, 6), dtype=float)
+
+        # Recombine at each epoch
+        for k in range(K):
+            Xk = Xsig_t[k]  # (Ns,6)
+
+            # mean
+            xk = np.sum(Wm[:, None] * Xk, axis=0)  # (6,)
+            X_pred[k] = xk
+
+            # covariance from transformed sigma points
+            Pk = np.zeros((6, 6), dtype=float)
+            for i in range(Ns):
+                dx = (Xk[i] - xk).reshape(6, 1)
+                Pk += Wc[i] * (dx @ dx.T)
+
+            # add process noise for whole interval t0 -> t_k (dt in seconds!)
+            dt_sec = float((t_arr[k] - t0) * SEC_PER_DAY)
+            if dt_sec > 0.0:
+                Pk += self.build_Q(dt_sec, r_eme_km=xk[:3], v_eme_km_s=xk[3:])
+
+            P_pred[k] = self._symmetrize(Pk)
+
+        if scalar_input:
+            return X_pred[0], P_pred[0]
+        return X_pred, P_pred
+
+
+    def _sigma_points(self, x, P, jitter=1e-12):
+        """
+        Standard scaled unscented transform sigma points.
+
+        Inputs:
+          x: (n,)
+          P: (n,n)
+
+        Returns:
+          X:  (2n+1, n)
+          Wm: (2n+1,)
+          Wc: (2n+1,)
+        """
+        x = np.asarray(x, dtype=float).reshape(-1)
+        P = np.asarray(P, dtype=float)
+        n = int(x.size)
+        if P.shape != (n, n):
+            raise ValueError(f"P must be ({n},{n}), got {P.shape}")
+
+        lam = self.alpha ** 2 * (n + self.kappa) - n
+        c = n + lam
+        if c <= 0.0:
+            raise ValueError(f"Invalid UKF scaling: n+lambda={c} <= 0. Adjust alpha/kappa.")
+
+        # weights
+        Wm = np.full(2 * n + 1, 1.0 / (2.0 * c), dtype=float)
+        Wc = np.full(2 * n + 1, 1.0 / (2.0 * c), dtype=float)
+        Wm[0] = lam / c
+        Wc[0] = lam / c + (1.0 - self.alpha ** 2 + self.beta)
+
+        # sigma points
+        P = self._symmetrize(P)
+        try:
+            S = np.linalg.cholesky(c * P)
+        except np.linalg.LinAlgError:
+            S = np.linalg.cholesky(c * (P + jitter * np.eye(n)))
+
+        X = np.empty((2 * n + 1, n), dtype=float)
+        X[0] = x
+        for i in range(n):
+            X[1 + i] = x + S[:, i]
+            X[1 + i + n] = x - S[:, i]
+        return X, Wm, Wc
+
 
     def update_angles_unitvec(self, z_rhohat, r_obs_km, R_hat):
-        """
-        Measurement update skeleton for unit LOS measurement z = rho_hat.
-
-        Parameters
-        ----------
-        z_rhohat : (3,)
-            Measured unit LOS vector in EME/J2000.
-        r_obs_km : (3,)
-            Observer position at measurement time (EME/J2000).
-        R_hat : (3,3)
-            Measurement covariance in unit-vector space (from build_R).
-
-        Notes
-        -----
-        Uses a standard UKF measurement update (non-iterated).
-        """
         z = np.asarray(z_rhohat, dtype=float).reshape(3)
         r_obs = np.asarray(r_obs_km, dtype=float).reshape(3)
         R = np.asarray(R_hat, dtype=float).reshape(3, 3)
 
         X, Wm, Wc = self._sigma_points(self.x, self.P)
 
-        # Predicted measurements for each sigma point
         Zsig = np.zeros((X.shape[0], 3), dtype=float)
         for i in range(X.shape[0]):
             Zsig[i] = self.h_los_unitvec(X[i, :3], r_obs, eps=self.eps)
 
         z_pred = np.sum(Wm[:, None] * Zsig, axis=0)
 
-        S = np.zeros((3, 3), dtype=float)   # P_zz
-        Pxz = np.zeros((6, 3), dtype=float) # P_xz
+        S = np.zeros((3, 3), dtype=float)
+        Pxz = np.zeros((6, 3), dtype=float)
         for i in range(Zsig.shape[0]):
             dz = (Zsig[i] - z_pred).reshape(3, 1)
             dx = (X[i] - self.x).reshape(6, 1)
@@ -500,41 +711,8 @@ class OD_UKF:
 
     # -----------------------------
     # Helpers
-    # -----------------------------
-
-    def _sigma_points(self, x, P):
-        """
-        Standard scaled unscented transform sigma points for dimension n=6.
-        Returns:
-          X : (2n+1, n)
-          Wm, Wc : (2n+1,)
-        """
-        x = np.asarray(x, dtype=float).reshape(6)
-        P = np.asarray(P, dtype=float).reshape(6, 6)
-        n = x.size
-
-        lam = self.alpha**2 * (n + self.kappa) - n
-        c = n + lam
-
-        # weights
-        Wm = np.full(2 * n + 1, 1.0 / (2.0 * c), dtype=float)
-        Wc = np.full(2 * n + 1, 1.0 / (2.0 * c), dtype=float)
-        Wm[0] = lam / c
-        Wc[0] = lam / c + (1.0 - self.alpha**2 + self.beta)
-
-        # sigma points
-        S = np.linalg.cholesky(self._symmetrize(c * P))
-        X = np.empty((2 * n + 1, n), dtype=float)
-        X[0] = x
-        for i in range(n):
-            X[1 + i]     = x + S[:, i]
-            X[1 + i + n] = x - S[:, i]
-        return X, Wm, Wc
-
+    # ----------------------------
     def _C_RTN2EME(self, r, v):
-        """
-        Build RTN basis vectors expressed in EME, return C_RTN->EME with columns [R, T, N].
-        """
         r = np.asarray(r, dtype=float).reshape(3)
         v = np.asarray(v, dtype=float).reshape(3)
 
@@ -574,5 +752,6 @@ class OD_UKF:
                     float(sigma_dec) * MAS_TO_RAD,
                     float(sigma_pointing) * MAS_TO_RAD)
         raise ValueError("units must be 'rad', 'arcsec', or 'mas'")
+
 
 

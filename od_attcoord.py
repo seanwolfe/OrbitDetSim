@@ -951,7 +951,7 @@ class AttitudeCoordinator:
 
     def __init__(self, cfg: Dict[str, Any]):
         self.cfg = cfg
-        opt = cfg.get("optimizer", {})
+        opt = cfg.get("optimizer_att_coord", {})
         self.kappa_sigma = float(opt.get("kappa_sigma", 1.0))
         self.n_mc = int(opt.get("n_mc", 200))
         self.n_restarts = int(opt.get("n_restarts", 1))
@@ -964,10 +964,6 @@ class AttitudeCoordinator:
         self.lambda_em_default = float(ems.get("lambda_em", 0.0))
         self.beta_zeta_default = float(ems.get("beta_zeta", 50.0))
 
-        # Optional mean-model defaults (2D quadratic target motion)
-        mean = cfg.get("mean_model", {})
-        self.v_target_default = np.array(mean.get("v_target_2d", [0.0, 0.0]), dtype=float).reshape(2,)
-        self.a_target_default = np.array(mean.get("a_target_2d", [0.0, 0.0]), dtype=float).reshape(2,)
 
     @staticmethod
     def _broadcast_time_series(x: np.ndarray, N: int, target_shape: Tuple[int, ...]) -> np.ndarray:
@@ -985,6 +981,7 @@ class AttitudeCoordinator:
 
         raise ValueError(f"Expected {target_shape} or {(N,) + target_shape}, got {x.shape}")
 
+
     @staticmethod
     def _nan_result() -> AttCoordResult:
         return AttCoordResult(
@@ -998,30 +995,27 @@ class AttitudeCoordinator:
         )
 
     def step(
-        self,
-        p_agents: np.ndarray,
-        u_curr_agents: np.ndarray,
-        p_hat: np.ndarray,
-        P_p: np.ndarray,
-        dt_grid: np.ndarray,
-        theta_h: float,
-        alpha_max: float,
-        omega_max: float,
-        *,
-        d_M: Optional[float] = None,
-        trial_seed: int = 0,
-        # mean-model (2D quadratic target) params
-        v_target: Optional[np.ndarray] = None,   # (2,)
-        a_target: Optional[np.ndarray] = None,   # (2,)
-        # EMS params
-        p_em: Optional[np.ndarray] = None,
-        R_em: Optional[float] = None,
-        alpha_s: Optional[float] = None,
-        # optimizer penalty params
-        lambda_em: Optional[float] = None,
-        beta_zeta: Optional[float] = None,
-        # coverage counting
-        coverage_point: Optional[np.ndarray] = None,  # (3,) or (N,3)
+            self,
+            p_agents: np.ndarray,
+            u_curr_agents: np.ndarray,
+            p_hat: np.ndarray,
+            P_p: np.ndarray,
+            dt_grid: np.ndarray,
+            theta_h: float,
+            alpha_max: float,
+            omega_max: float,
+            *,
+            d_M: Optional[float] = None,
+            trial_seed: int = 0,
+            # EMS params
+            p_em: Optional[np.ndarray] = None,
+            R_em: Optional[float] = None,
+            alpha_s: Optional[float] = None,
+            # optimizer penalty params
+            lambda_em: Optional[float] = None,
+            beta_zeta: Optional[float] = None,
+            # coverage counting
+            coverage_point: Optional[np.ndarray] = None,  # (3,) or (N,3)
     ) -> Tuple[AttCoordResult, AttCoordResult]:
         """
         Returns:
@@ -1057,7 +1051,7 @@ class AttitudeCoordinator:
         if p_em is None:
             p_em = self.p_em_default
         else:
-            p_em = np.asarray(p_em, dtype=float).reshape(3,)
+            p_em = np.asarray(p_em, dtype=float).reshape(3, )
 
         if R_em is None:
             R_em = self.R_em_default
@@ -1067,16 +1061,6 @@ class AttitudeCoordinator:
             lambda_em = self.lambda_em_default
         if beta_zeta is None:
             beta_zeta = self.beta_zeta_default
-
-        # mean-model defaults
-        if v_target is None:
-            v_target = self.v_target_default
-        else:
-            v_target = np.asarray(v_target, dtype=float).reshape(2,)
-        if a_target is None:
-            a_target = self.a_target_default
-        else:
-            a_target = np.asarray(a_target, dtype=float).reshape(2,)
 
         # --- time-varying inputs ---
         p_agents_ts = self._broadcast_time_series(p_agents, N, (M, 3))
@@ -1102,7 +1086,7 @@ class AttitudeCoordinator:
         for k, dt in enumerate(dt_grid):
             dt = float(dt)
             p_agents_k = p_agents_ts[k]
-            p_hat_k = p_hat_ts[k].reshape(3,)
+            p_hat_k = p_hat_ts[k].reshape(3, )
             P_p_k = P_p_ts[k]
 
             theta_s_t = float(theta_s_of_dt(dt, alpha_max, omega_max))
@@ -1162,20 +1146,19 @@ class AttitudeCoordinator:
             )
 
         # ============================================================
-        # (B) MEAN method: earliest epoch all can point to mean
-        #     Uses your function (slew + keepout enforced)
+        # (B) MEAN method: earliest epoch all can point to mean (3D)
+        #     Uses updated all_agents_can_point_to_mean(...)
         # ============================================================
         best_mean = None
 
         for k, dt in enumerate(dt_grid):
             dt = float(dt)
             p_agents_k = p_agents_ts[k]
-            p_hat_k = p_hat_ts[k].reshape(3,)
-            p_hat_2d_k = p_hat_k[:2].copy()
+            p_hat_k = p_hat_ts[k].reshape(3, )
 
             all_ok, per_ok, u_mean, theta_req, theta_s_t = all_agents_can_point_to_mean(
                 dt,
-                p_hat_2d_k, v_target, a_target,
+                p_hat_k,  # <-- 3D mean at this epoch
                 p_agents_k, u_curr_agents,
                 float(theta_h),
                 float(alpha_max), float(omega_max),
@@ -1301,32 +1284,67 @@ def keepout_safe_single(p_sc, u_boresight, theta_h, p_em, R_em, alpha_s, eps=1e-
 
 
 def all_agents_can_point_to_mean(
-    dt,
-    p_hat_2d, v_target, a_target,
-    p_agents, u_curr_agents,
-    theta_h,
-    alpha_max, omega_max,
-    p_em, R_em, alpha_s,
-    eps=1e-12
+    dt: float,
+    p_hat_t: np.ndarray,
+    p_agents: np.ndarray,
+    u_curr_agents: np.ndarray,
+    theta_h: float,
+    alpha_max: float,
+    omega_max: float,
+    p_em: np.ndarray,
+    R_em: float,
+    alpha_s: float,
+    eps: float = 1e-12,
 ):
     """
-    Returns (all_ok, per_agent_ok, u_mean_list, theta_req_list, theta_s_t)
+    Time-series friendly, 3D version.
+
+    Checks whether *all* agents can (1) slew to point at the 3D mean target
+    at this epoch and (2) satisfy the EMS keep-out constraint.
+
+    Inputs:
+      - dt: scalar seconds for this epoch (used only to compute slew limit theta_s_t)
+      - p_hat_t: (3,) 3D target mean at this epoch
+      - p_agents: (M,3) spacecraft positions at this epoch
+      - u_curr_agents: (M,3) current boresight unit vectors (at "now")
+      - theta_h: FOV half-angle (rad)
+      - alpha_max, omega_max: slew envelope parameters for theta_s_of_dt
+      - p_em: (3,) EMS center
+      - R_em: EMS radius
+      - alpha_s: EMS half-angle keepout (rad)
+      - eps: numeric epsilon for unit()
+
+    Returns:
+      (all_ok, per_agent_ok, u_mean_list, theta_req_list, theta_s_t)
+
+      - all_ok: bool, True iff all agents are OK
+      - per_agent_ok: (M,) bool array
+      - u_mean_list: (M,3) desired pointing directions to the mean
+      - theta_req_list: (M,) required slew angles (rad) from current to desired
+      - theta_s_t: scalar allowed slew (rad) for this dt
     """
+
     # Slew limit for this epoch
-    theta_s_t = float(theta_s_of_dt(dt, alpha_max, omega_max))
-    theta_s_t = np.clip(theta_s_t, 0.0, np.deg2rad(179.0))
+    theta_s_t = float(theta_s_of_dt(float(dt), float(alpha_max), float(omega_max)))
+    theta_s_t = float(np.clip(theta_s_t, 0.0, np.deg2rad(179.0)))
 
-    # Mean position at epoch (your quadratic model, 2D->3D)
-    p_hat_2d_t = p_hat_2d + v_target * dt + 0.5 * a_target * dt**2
-    p_hat_t = np.array([p_hat_2d_t[0], p_hat_2d_t[1], 0.0])
+    p_hat_t = np.asarray(p_hat_t, dtype=float).reshape(3,)
+    p_agents = np.asarray(p_agents, dtype=float)
+    u_curr_agents = np.asarray(u_curr_agents, dtype=float)
+    p_em = np.asarray(p_em, dtype=float).reshape(3,)
 
-    M = p_agents.shape[0]
+    if p_agents.ndim != 2 or p_agents.shape[1] != 3:
+        raise ValueError(f"p_agents must be (M,3), got {p_agents.shape}")
+    if u_curr_agents.shape != p_agents.shape:
+        raise ValueError(f"u_curr_agents must match p_agents shape (M,3), got {u_curr_agents.shape}")
+
+    M = int(p_agents.shape[0])
     per_ok = np.zeros(M, dtype=bool)
-    u_mean = np.zeros((M, 3))
-    theta_req = np.full(M, np.nan)
+    u_mean = np.zeros((M, 3), dtype=float)
+    theta_req = np.full(M, np.nan, dtype=float)
 
     for i in range(M):
-        # Desired pointing to mean
+        # Desired pointing to mean (3D)
         u_des = unit(p_hat_t - p_agents[i], eps=eps)
         if u_des is None:
             per_ok[i] = False
@@ -1342,8 +1360,8 @@ def all_agents_can_point_to_mean(
             per_ok[i] = False
             continue
 
-        # Keep-out constraint
-        if not keepout_safe_single(p_agents[i], u_des, theta_h, p_em, R_em, alpha_s):
+        # Keep-out constraint (EMS exclusion)
+        if not keepout_safe_single(p_agents[i], u_des, float(theta_h), p_em, float(R_em), float(alpha_s)):
             per_ok[i] = False
             continue
 

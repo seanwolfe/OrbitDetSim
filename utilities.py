@@ -1762,6 +1762,99 @@ def iod_viz(iod_data, results, pred_positions, pred_velocities, nlls_start, conf
     return
 
 
+def _cov_ellipse_2d(P2, n_std=1.0, n_pts=200):
+    """
+    Return ellipse points (x,y) for a 2x2 covariance matrix.
+    """
+    P2 = np.asarray(P2, dtype=float).reshape(2, 2)
+    # eigendecomposition
+    w, V = np.linalg.eigh(P2)
+    w = np.maximum(w, 0.0)
+    t = np.linspace(0.0, 2.0 * np.pi, n_pts)
+    circle = np.vstack([np.cos(t), np.sin(t)])  # (2,n)
+    # scale by sqrt(eigs) and rotate
+    A = V @ np.diag(np.sqrt(w)) * float(n_std)
+    pts = (A @ circle)  # (2,n)
+    return pts[0], pts[1]
+
+
+def plot_priors_positions_and_cov_2d(
+    X_pred_km,
+    P_pred_km2,
+    *,
+    planes=("xy", "xz", "yz"),
+    stride=5,
+    n_std=1.0,
+    show_path=True,
+    title_prefix="Priors",
+    equal_aspect=True,
+):
+    """
+    Visualize mean position trajectory and covariance ellipses in 2D planes.
+
+    Inputs:
+      - X_pred_km: (K,6) or (6,) from ukf.propagate_priors(...)
+      - P_pred_km2: (K,6,6) or (6,6)
+        NOTE: expects position covariance in km^2 (consistent with your UKF state units).
+              Uses the top-left 3x3 block of each P.
+
+    Plots:
+      - One figure per plane (xy, xz, yz)
+      - Mean trajectory (optional)
+      - Covariance ellipses every `stride` steps at `n_std` sigma
+    """
+    X = np.asarray(X_pred_km, dtype=float)
+    P = np.asarray(P_pred_km2, dtype=float)
+
+    if X.ndim == 1:
+        X = X.reshape(1, -1)
+    if P.ndim == 2:
+        P = P.reshape(1, 6, 6)
+
+    K = X.shape[0]
+    if X.shape[1] < 3:
+        raise ValueError(f"X_pred must have at least 3 components, got {X.shape}")
+    if P.shape != (K, 6, 6):
+        raise ValueError(f"P_pred must be (K,6,6) matching X_pred, got {P.shape}")
+
+    idx_map = {
+        "xy": (0, 1),
+        "xz": (0, 2),
+        "yz": (1, 2),
+    }
+
+    for pl in planes:
+        if pl not in idx_map:
+            raise ValueError(f"Unknown plane '{pl}'. Use one of {list(idx_map.keys())}.")
+        a, b = idx_map[pl]
+
+        fig = plt.figure()
+        ax = plt.gca()
+
+        # Mean path
+        if show_path and K > 1:
+            ax.plot(X[:, a], X[:, b])
+
+        # Ellipses
+        for k in range(0, K, max(int(stride), 1)):
+            mu = X[k, :3]
+            Ppos = P[k, :3, :3]
+            P2 = Ppos[np.ix_([a, b], [a, b])]
+
+            ex, ey = _cov_ellipse_2d(P2, n_std=float(n_std))
+            ax.plot(mu[a] + ex, mu[b] + ey)
+
+        ax.set_xlabel(f"{pl[0]} (km)")
+        ax.set_ylabel(f"{pl[1]} (km)")
+        ax.set_title(f"{title_prefix}: mean + {n_std}σ ellipses in {pl.upper()} plane (stride={stride})")
+
+        if equal_aspect:
+            ax.set_aspect("equal", adjustable="datalim")
+
+        plt.grid(True)
+    plt.show()
+
+
 def viz(object_pos, minimoon_pos, minimoon, sc_formation, ra_dec, configs):
     # asteroid position
     asteroid_pos = minimoon.orbit.loc[:, ['Synodic x', 'Synodic y', 'Synodic z']].values

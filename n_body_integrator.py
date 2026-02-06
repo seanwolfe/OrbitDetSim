@@ -2,10 +2,225 @@ import spiceypy as spice
 from scipy.integrate import solve_ivp
 import yaml
 import argparse
+import numpy as np
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
 spice.furnsh("de430.bsp")
 spice.furnsh('naif0012.tls')
+
+
+class NBodyPropagator:
+    """
+    General N-body propagator for one or many independent 6D states (km, km/s)
+    in Earth-centered EME/J2000.
+
+    Conventions:
+      - Epoch inputs: JDTDB (float)
+      - Internal time: ET seconds (SPICE)
+      - Frame: "J2000" (SPICE inertial ≈ EME/J2000)
+      - ORIGIN: Earth-centered => origin NAIF ID 399
+
+    Dynamics:
+      - Propagates the object(s) under point-mass gravity from selected bodies.
+      - Perturbing body states are pulled from SPICE at integration time.
+
+    Outputs:
+      - If t1 is scalar -> returns (6,) for propagate(), and (Ns,6) for propagate_multiple_objects()
+      - If t1 is array-like of length K -> returns (K,6) for propagate(), and (K,Ns,6) for propagate_multiple_objects()
+        (time-major)
+    """
+
+    def __init__(
+        self,
+        *,
+        spice,                   # spiceypy module (kernels already furnished)
+        config: dict,            # masses + G + KM_TO_M
+        bodies=('10', '1', '2', '399', '4', '5', '6', '7', '8', '301'),
+        frame="J2000",
+        origin="399",              # Earth-centered
+        eps=1e-12,
+        rtol=1e-10,
+        atol=1e-12,
+        method="RK45",
+    ):
+        self.spice = spice
+        self.config = config
+        self.bodies = tuple(bodies)
+        self.frame = str(frame)
+        self.origin = str(origin)
+        self.eps = float(eps)
+        self.rtol = float(rtol)
+        self.atol = float(atol)
+        self.method = str(method)
+
+        self.KM_TO_M = float(config.get("KM_TO_M", 1000.0))
+        self.G = float(config["GRAVITATIONAL_CONSTANT"])  # SI: m^3 kg^-1 s^-2
+
+        # Map NAIF IDs -> masses in kg (adapt keys if needed)
+        self.mass_map = {
+            '10':  float(config["SUN_MASS"]),
+            '1':   float(config["MERCURY_MASS"]),
+            '2':   float(config["VENUS_MASS"]),
+            '399': float(config["EARTH_MASS"]),
+            '4':   float(config["MARS_MASS"]),
+            '5':   float(config["JUPITER_MASS"]),
+            '6':   float(config["SATURN_MASS"]),
+            '7':   float(config["URANUS_MASS"]),
+            '8':   float(config["NEPTUNE_MASS"]),
+            '301': float(config["MOON_MASS"]),
+        }
+        self.masses = np.array([self.mass_map[b] for b in self.bodies], dtype=float)
+
+    # ----------------------------
+    # Time conversion (JDTDB -> ET)
+    # ----------------------------
+    def jdtdb_to_et(self, jdtdb: float) -> float:
+        return float(self.spice.unitim(float(jdtdb), "JDTDB", "ET"))
+
+    # ----------------------------
+    # Acceleration model
+    # ----------------------------
+    def _body_positions_m(self, et: float) -> np.ndarray:
+        """
+        Positions of perturbing bodies relative to Earth (origin=399), in meters.
+        Shape: (Nb,3)
+        """
+        Nb = len(self.bodies)
+        out = np.zeros((Nb, 3), dtype=float)
+        for i, bid in enumerate(self.bodies):
+            r_km, _ = self.spice.spkpos(bid, et, self.frame, "NONE", self.origin)
+            out[i] = np.asarray(r_km, dtype=float) * self.KM_TO_M
+        return out
+
+    def _accel_m_s2(self, et: float, r_obj_m: np.ndarray) -> np.ndarray:
+        """
+        Gravitational acceleration on the object in Earth-centered J2000, SI units.
+        NOTE: If self.bodies includes 399 (Earth), then Earth is at ~0 relative to origin
+              and contributes central gravity. That's usually what you want.
+        """
+        r_obj_m = np.asarray(r_obj_m, dtype=float).reshape(3,)
+        r_bodies_m = self._body_positions_m(et)
+
+        a = np.zeros(3, dtype=float)
+        for i in range(r_bodies_m.shape[0]):
+            r_vec = r_bodies_m[i] - r_obj_m
+            r_mag = np.linalg.norm(r_vec)
+            if r_mag < self.eps:
+                continue
+            a += self.G * self.masses[i] * r_vec / (r_mag**3)
+        return a
+
+    # ----------------------------
+    # Single-object propagation
+    # ----------------------------
+    def propagate(self, x0_km: np.ndarray, t0_jdtdb: float, t1_jdtdb):
+        """
+        Propagate one 6D state (km, km/s) from t0 to t1 in Earth-centered J2000.
+
+        If t1_jdtdb is scalar -> returns x1 (6,)
+        If t1_jdtdb is array-like (K,) -> returns X (K,6) evaluated at each epoch
+        """
+        x0 = np.asarray(x0_km, dtype=float).reshape(6,)
+        t1_arr = np.asarray(t1_jdtdb, dtype=float).ravel()
+        scalar = (t1_arr.size == 1)
+
+        et0 = self.jdtdb_to_et(t0_jdtdb)
+        et1s = np.array([self.jdtdb_to_et(t) for t in t1_arr], dtype=float)
+
+        if np.any(et1s < et0 - 1e-12):
+            raise ValueError("t1 epochs must be >= t0 (non-decreasing).")
+        if et1s.size > 1 and np.any(np.diff(et1s) < -1e-12):
+            raise ValueError("t1 epoch series must be monotonic non-decreasing.")
+
+        # initial in meters
+        y0 = np.hstack([x0[:3] * self.KM_TO_M, x0[3:] * self.KM_TO_M])
+
+        def dyn(et, y):
+            r = y[:3]
+            v = y[3:]
+            a = self._accel_m_s2(et, r)
+            return np.hstack([v, a])
+
+        et_end = float(et1s[-1])
+        if abs(et_end - et0) < 1e-15:
+            if scalar:
+                return x0.copy()
+            return np.broadcast_to(x0, (et1s.size, 6)).copy()
+
+        t_eval = None
+        if et1s.size > 1:
+            t_eval = et1s
+
+        sol = solve_ivp(
+            dyn,
+            (et0, et_end),
+            y0,
+            method=self.method,
+            t_eval=t_eval,
+            rtol=self.rtol,
+            atol=self.atol,
+        )
+
+        if not sol.success:
+            raise RuntimeError(f"Propagation failed: {sol.message}")
+
+        if et1s.size == 1:
+            y1 = sol.y[:, -1]
+            x1 = np.hstack([y1[:3] / self.KM_TO_M, y1[3:] / self.KM_TO_M])
+            return x1
+
+        Y = sol.y.T  # (K,6) in meters/meters/s
+        X = np.hstack([Y[:, :3] / self.KM_TO_M, Y[:, 3:] / self.KM_TO_M])
+        return X
+
+    # ----------------------------
+    # Many-object propagation (general)
+    # ----------------------------
+    def propagate_multiple_objects(
+        self,
+        X0_km: np.ndarray,
+        t0_jdtdb: float,
+        t1_jdtdb,
+    ) -> np.ndarray:
+        """
+        Propagate multiple independent objects.
+
+        Inputs:
+          - X0_km: (Ns,6) initial states in km, km/s
+          - t0_jdtdb: scalar epoch (JDTDB)
+          - t1_jdtdb: scalar epoch OR array-like of K epochs (JDTDB)
+
+        Returns:
+          - if t1_jdtdb is scalar:
+                X1: (Ns,6)
+          - if t1_jdtdb is array-like with K epochs:
+                X:  (K, Ns, 6)   (time-major)
+        """
+        X0_km = np.asarray(X0_km, dtype=float)
+        if X0_km.ndim != 2 or X0_km.shape[1] != 6:
+            raise ValueError(f"X0_km must be (Ns,6), got {X0_km.shape}")
+
+        t1_arr = np.asarray(t1_jdtdb, dtype=float).ravel()
+        scalar = (t1_arr.size == 1)
+
+        Ns = X0_km.shape[0]
+
+        if scalar:
+            t1s = float(t1_arr[0])
+            X_out = np.zeros((Ns, 6), dtype=float)
+            for i in range(Ns):
+                X_out[i] = self.propagate(X0_km[i], t0_jdtdb, t1s)
+            return X_out
+
+        K = int(t1_arr.size)
+        X_out = np.zeros((K, Ns, 6), dtype=float)  # (time, obj, state)
+        for i in range(Ns):
+            Xi = self.propagate(X0_km[i], t0_jdtdb, t1_arr)  # (K,6)
+            if Xi.shape != (K, 6):
+                raise RuntimeError(f"Expected propagate() to return (K,6), got {Xi.shape}")
+            X_out[:, i, :] = Xi
+        return X_out
+
 
 
 def integrate_n_body(object_state, epoch, end_time, time_interval, type):
