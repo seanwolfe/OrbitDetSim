@@ -777,7 +777,6 @@ def run_sim_runnumbers_MPI_getIOD(config):
     return
 
 
-
 def run_IOD(config):
     """
     MPI stage that reads MASTER_IOD.csv, runs the IOD solver per row, and writes results
@@ -1342,7 +1341,8 @@ def run_OD(config):
         # ----------------------------------------------
         # Setup
         # ---------------------------------------------
-        setup = od_setup_from_iod(config, row, util=util, sp=sp)
+        setup = od_setup_from_iod(config, row, util=util, sp=sp)  # dict containing a lot of initial data
+
         # Force visualization ON (as requested)
         viz_flag = True
         if viz_flag:
