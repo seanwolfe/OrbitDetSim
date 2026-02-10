@@ -915,9 +915,11 @@ def plot_od_scenario_2d(
 
         # target uncertainty + truth
         target_mean_xy=None,  # (2,)
+        target_mean_xy_traj=None,
         target_cov_xy=None,  # (2,2)
         d_mahal=2.0,
         true_target_xy=None,  # (2,)
+        true_target_xy_traj=None,
 
         # EMS zone (2D cross-section you provide)
         ems_center_xy=None,  # (2,)
@@ -929,6 +931,7 @@ def plot_od_scenario_2d(
         show_truth=True,
         show_ems=True,
         title=None,
+        ax=None,
 ):
     """
     Pure visualization function: does not infer any states.
@@ -936,6 +939,13 @@ def plot_od_scenario_2d(
 
     Returns (fig, ax).
     """
+    # --- NEW: allow plotting into an existing axis ---
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(7, 7))
+    else:
+        fig = ax.figure
+        ax.cla()  # clear only this subplot
+
     A = np.asarray(agents_xy, dtype=float)
     M = A.shape[0]
     ang = np.asarray(pointing_angles_rad, dtype=float).reshape(M, )
@@ -977,7 +987,6 @@ def plot_od_scenario_2d(
     bounds = [-0.5, 0.5, 1.5, 2.5, 3.5]
     norm = BoundaryNorm(bounds, cov_cmap.N)
 
-    fig, ax = plt.subplots(figsize=(8, 6))
 
     # Coverage grid
     if show_coverage:
@@ -1053,6 +1062,7 @@ def plot_od_scenario_2d(
     # Target mean + uncertainty ellipse
     unc_mean_sc = None
     ellipse_line = None
+    unc_mean_traj = None
     if show_uncertainty and (target_mean_xy is not None) and (target_cov_xy is not None):
         mu = np.asarray(target_mean_xy, dtype=float).reshape(2, )
         P = np.asarray(target_cov_xy, dtype=float).reshape(2, 2)
@@ -1060,6 +1070,9 @@ def plot_od_scenario_2d(
         unc_mean_sc = ax.scatter(mu[0], mu[1], color='tab:red', s=80,
                                  marker='x', linewidths=2,
                                  label='Target mean')
+        if target_mean_xy_traj is not None:
+            unc_mean_traj, = ax.plot(target_mean_xy_traj[:, 0], target_mean_xy_traj[:, 1], color='tab:red',
+                                    linewidth=2, label='Target predicted trajectory')
         ellipse_pts = mahalanobis_ellipse_points(mu, P, d_mahal=float(d_mahal), n=250)
         ellipse_line, = ax.plot(ellipse_pts[:, 0], ellipse_pts[:, 1],
                                 color='tab:red', lw=2,
@@ -1068,11 +1081,15 @@ def plot_od_scenario_2d(
 
     # True target position
     true_sc = None
+    true_traj = None
     if show_truth and (true_target_xy is not None):
         tr = np.asarray(true_target_xy, dtype=float).reshape(2, )
         true_sc = ax.scatter(tr[0], tr[1], s=60, facecolors='none',
                              edgecolors='green', linewidths=2,
                              label='True position')
+        if true_target_xy_traj is not None:
+            true_traj, = ax.plot(true_target_xy_traj[:, 0], true_target_xy_traj[:, 1], color='tab:green',
+                                linewidth=2, label='True trajetory')
 
     # EMS zone (2D circle)
     ems_line = None
@@ -1127,6 +1144,10 @@ def plot_od_scenario_2d(
         handles.append(true_sc)
     if ems_line is not None:
         handles.append(ems_line)
+    if unc_mean_traj is not None:
+        handles.append(unc_mean_traj)
+    if true_traj is not None:
+        handles.append(true_traj)
 
     if show_coverage:
         single_cov_patch = Patch(facecolor=cmap_colors[1], alpha=0.25, label='Single coverage')
@@ -1134,7 +1155,7 @@ def plot_od_scenario_2d(
         triple_cov_patch = Patch(facecolor=cmap_colors[3], alpha=0.25, label='Triple+ coverage')
         handles.extend([single_cov_patch, double_cov_patch, triple_cov_patch])
 
-    ax.legend(handles=handles, loc='upper right')
+    # ax.legend(handles=handles, loc='upper right')
     return fig, ax
 
 

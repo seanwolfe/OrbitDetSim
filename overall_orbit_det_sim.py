@@ -1652,7 +1652,7 @@ def run_OD(config):
             alpha_max = 1.63 * tau_max / I_max
             omega_max = 1.63 * h_max / I_max
 
-            res_kcoverage, result_mean, result_kcoverage_series, result_mean_seriies = attitude_coordination.step(
+            res_kcoverage, result_mean, result_kcoverage_series, result_mean_series = attitude_coordination.step(
                 sc_eme_trajs_kms[:, :, :3],
                 sc_pointings_eme,
                 x_ts[:, :3],
@@ -1671,8 +1671,7 @@ def run_OD(config):
             if att_coord_viz_flag:
 
                 best_epoch = res_kcoverage.chosen_dt
-                # best_idx = np.where(big_t_set == best_epoch)[0]
-                best_idx =5
+                best_idx = np.where(big_t_set == best_epoch)[0]
 
                 # Common viz params
                 theta_h_rad = util.fov_deg2_to_half_angle_rad(config["fov"])
@@ -1697,31 +1696,88 @@ def run_OD(config):
                 #################################################
 
                 # ---- EME 2D ----
-                agents_xy = sc_eme_ae_kms[:, :2]
-                pointing_angles_rad = ang_eme
+                best_idx = int(np.where(big_t_set == best_epoch)[0][0])
+                T = len(big_t_set)
 
-                target_mean_xy = ast_iod_eme[:2]
-                target_cov_xy = P_cart_eme[:2, :2]
-                true_target_xy = ast_truth_eme[:2]
+                # Choose best + 2 others (neighbors, edge-safe)
+                cands = [best_idx, max(0, best_idx - 1), min(T - 1, best_idx + 1)]
+                selected = []
+                for c in cands:
+                    if c not in selected:
+                        selected.append(c)
+                for c in range(T):
+                    if len(selected) >= 3:
+                        break
+                    if c not in selected:
+                        selected.append(c)
+                selected = selected[:3]
 
-                fig2, ax2 = util.plot_od_scenario_2d(
-                    t_label=best_epoch,
-                    agents_xy=agents_xy,
-                    pointing_angles_rad=pointing_angles_rad,
-                    theta_h_rad=theta_h_rad,
-                    ray_length=ray_length,
-                    u_curr_agents_xy=sc_pointings_eme[:, :2],
-                    boresight_line_len=0.5e6,
-                    target_mean_xy=target_mean_xy,
-                    target_cov_xy=target_cov_xy,
-                    d_mahal=3.0,
-                    true_target_xy=true_target_xy,
-                    ems_center_xy=ems_center_xy,
-                    ems_radius=ems_radius,
-                    xlim=(-5e6, 5e6), ylim=(-5e6, 5e6),
-                    agent_orbit_tracks_xy=None,
-                )
+                planes = [((0, 1), "XY"), ((0, 2), "XZ"), ((1, 2), "YZ")]
 
+                def cov2_from_cov3(P3, axes):
+                    i, j = axes
+                    return P3[np.ix_([i, j], [i, j])]
+
+                def angles_in_plane(u_cmd_xyz, axes):
+                    a, b = axes
+                    u = np.asarray(u_cmd_xyz, dtype=float)  # (M,3)
+                    u2 = u[:, [a, b]]  # (M,2)
+                    return np.arctan2(u2[:, 1], u2[:, 0])  # (M,)
+
+                for idx in selected:
+                    epoch = big_t_set[idx]
+
+                    # --- states at this epoch ---
+                    sc_xyz = np.asarray(sc_eme_trajs_kms[idx, :, :3], dtype=float)  # (M,3)
+                    ast_truth = np.asarray(ast_eme_traj_kms[idx, :3], dtype=float).reshape(3, )
+                    ast_mean = np.asarray(x_ts[idx, :3], dtype=float).reshape(3, )
+                    P3 = np.asarray(P_ts[idx, :3, :3], dtype=float).reshape(3, 3)
+
+                    # --- per-epoch optimal pointing command from opt_series ---
+                    u_cmd_xyz = np.asarray(result_kcoverage_series[idx]["u"], dtype=float)  # (M,3)
+
+                    # --- current pointing (for dotted line / slew display) ---
+                    u_curr_xyz = np.asarray(sc_pointings_eme, dtype=float)  # (M,3)
+
+                    fig, axes = plt.subplots(1, 3, figsize=(8, 14))
+                    fig.suptitle(f"2D Projections @ epoch {epoch}", y=0.99)
+
+                    for ax, (axpair, name) in zip(axes, planes):
+                        agents_2d = sc_xyz[:, list(axpair)]
+                        u_curr_2d = u_curr_xyz[:, list(axpair)]
+                        mean_2d = ast_mean[list(axpair)]
+                        truth_2d = ast_truth[list(axpair)]
+                        cov_2d = cov2_from_cov3(P3, axpair)
+
+                        mean_traj_2d = np.asarray(x_ts[:, :3], dtype=float)[:, list(axpair)]
+                        truth_traj_2d = np.asarray(ast_eme_traj_kms[:, :3], dtype=float)[:, list(axpair)]
+
+                        ems_center_2d = np.asarray(ems_center_xyz, dtype=float)[list(axpair)]
+                        ang_2d = angles_in_plane(u_cmd_xyz, axpair)
+
+                        util.plot_od_scenario_2d(
+                            t_label=f"{epoch} ({name})",
+                            agents_xy=agents_2d,
+                            pointing_angles_rad=ang_2d,
+                            theta_h_rad=theta_h_rad,
+                            ray_length=ray_length,
+                            u_curr_agents_xy=u_curr_2d,
+                            boresight_line_len=0.5e6,
+                            target_mean_xy=mean_2d,
+                            target_mean_xy_traj=mean_traj_2d,
+                            target_cov_xy=cov_2d,
+                            d_mahal=3.0,
+                            true_target_xy=truth_2d,
+                            true_target_xy_traj=truth_traj_2d,
+                            ems_center_xy=ems_center_2d,
+                            ems_radius=ems_radius,
+                            xlim=(-5e6, 5e6), ylim=(-5e6, 5e6),
+                            agent_orbit_tracks_xy=None,
+                            ax=ax,  # requires the small ax= edit in util.plot_od_scenario_2d
+                            title=None
+                        )
+
+                    plt.tight_layout()
                 #################################################
                 # 3D Visualizations
                 #################################################
