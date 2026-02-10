@@ -9,23 +9,15 @@ reaction_wheel_torque: 0.0004  # Nm
 reaction_wheel_momentum: 0.015  # Nms
 mass: 50  # kg
 length: 0.5  # m
+telescope_mass: 5  # kg
 telescope_diameter: 0.28  # m
+telescope_offset: 0.3  # m
 # sigma_ra: 981  # right ascension measurement uncertainty - mas
 # sigma_dec: 939  # declination measurement uncertainty - mas
 # sigma_pointing: 7200  # pointing uncertainty - mas
 sigma_ra: 0.
 sigma_dec: 0.
 sigma_pointing: 500
-
-# slew/actuator model (your constants)
-slew_model:
-  tau_max: 0.004
-  h_max: 0.015
-  m_m: 50
-  l_m: 0.5
-  m_t: 5
-  d_t: 0.28
-  z_0: 0.3
 
 ##################################################
 # Formation parameters
@@ -138,7 +130,7 @@ error_file_dir: 'Error_files_for_IOD'
 # epoch grid to search over
 epochs:
   dt_min: 10.0   # in seconds, first time to check
-  dt_max: 432010.0  # last time to check
+  dt_max: 864010.0  # last time to check
   n_dt: 10       # number of checks
 
 d_mahal: 3.0
@@ -163,7 +155,7 @@ ems:
 base_seed: 1765220306
 num_od_runs: 1
 od_file_dir: 'OD_results'
-od_duration_days: 10
+od_duration_days: 30
 od_max_steps: 1000
 iod_cov_topo_std: [4.4, 2.31, 1.28e+6, 3.27e-5, 2.44e-5, 1.09]  # ra, dec, rho, ra dot, dec dot, rho dot (deg, km, deg/s, km/s)
 INCLUDE_EMS_EXCLUSION: 0

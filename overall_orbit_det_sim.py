@@ -215,32 +215,32 @@ def run_sim_runnumbers_MPI_getIOD(config):
     comm.Barrier()
 
     # ---------- MASTER column schema ----------
-    helio_sc_cols = [f"HELIO_SC_{i+1}(kms)" for i in range(num_sc)]
-    epoch_sc_cols = [f"EPOCH_SC_{i+1}(jdtdb)" for i in range(num_sc)]
-    boresight_cols = [f"BORESIGHT_SC_{i+1}_GEO_SECR" for i in range(num_sc)]
+    helio_sc_cols = [f"HELIO_SC_{i + 1}(kms)" for i in range(num_sc)]
+    epoch_sc_cols = [f"EPOCH_SC_{i + 1}(jdtdb)" for i in range(num_sc)]
+    boresight_cols = [f"BORESIGHT_SC_{i + 1}_GEO_SECR" for i in range(num_sc)]
 
     # detection metadata columns (in MASTER)
     det_meta_cols = [
-        "VALUES_IDX",                 # serialized list/tuple
-        "VALUES_IDX_EMS",             # serialized list/tuple (EMS-filtered)
+        "VALUES_IDX",  # serialized list/tuple
+        "VALUES_IDX_EMS",  # serialized list/tuple (EMS-filtered)
         "TOTAL_LENGTH",
-        "SPACECRAFT_1_INI_POS(km)",   # serialized 3-vector
-        "INDEX_USED",                 # chosen index for IOD (EMS-aware toggle + fallback)
-        "OCCLUDED_BY_EMS",            # 0/1 (blank if INDEX_USED missing)
+        "SPACECRAFT_1_INI_POS(km)",  # serialized 3-vector
+        "INDEX_USED",  # chosen index for IOD (EMS-aware toggle + fallback)
+        "OCCLUDED_BY_EMS",  # 0/1 (blank if INDEX_USED missing)
     ]
 
     master_columns = (
-        [
-            "ID_AST",
-            "EPOCH_AST(jdtdb)",
-            "HELIO_AST(kms)",
-            "DETECTING_SC_ID",
-        ]
-        + det_meta_cols
-        + epoch_sc_cols
-        + helio_sc_cols
-        + boresight_cols
-        + ["IOD_DATA_SAVED_AS"]
+            [
+                "ID_AST",
+                "EPOCH_AST(jdtdb)",
+                "HELIO_AST(kms)",
+                "DETECTING_SC_ID",
+            ]
+            + det_meta_cols
+            + epoch_sc_cols
+            + helio_sc_cols
+            + boresight_cols
+            + ["IOD_DATA_SAVED_AS"]
     )
 
     # ---------- serialization helpers ----------
@@ -278,7 +278,8 @@ def run_sim_runnumbers_MPI_getIOD(config):
             if s == "" or s == "()" or s == "[]" or s.lower() == "nan":
                 return np.array([], dtype=int)
             # util.read_master often parses these already, but handle plain CSV strings too
-            parts = [p for p in s.replace("(", "").replace(")", "").replace("[", "").replace("]", "").split(",") if p.strip() != ""]
+            parts = [p for p in s.replace("(", "").replace(")", "").replace("[", "").replace("]", "").split(",") if
+                     p.strip() != ""]
             out = []
             for p in parts:
                 try:
@@ -581,7 +582,7 @@ def run_sim_runnumbers_MPI_getIOD(config):
                 y_rel = ast_geo_eme[1, :] - sc_geo_eme[1, :]
                 z_rel = ast_geo_eme[2, :] - sc_geo_eme[2, :]
                 r_xy = np.hypot(x_rel, y_rel)
-                r = np.sqrt(r_xy**2 + z_rel**2)
+                r = np.sqrt(r_xy ** 2 + z_rel ** 2)
                 eps = 1e-12
                 sin_ra = y_rel / np.maximum(r_xy, eps)
                 cos_ra = x_rel / np.maximum(r_xy, eps)
@@ -606,7 +607,7 @@ def run_sim_runnumbers_MPI_getIOD(config):
                 y_rel_p = ast_geo_eme[1, :] - sc_eme_states[1, :]
                 z_rel_p = ast_geo_eme[2, :] - sc_eme_states[2, :]
                 r_xy_p = np.hypot(x_rel_p, y_rel_p)
-                r_p = np.sqrt(r_xy_p**2 + z_rel_p**2)
+                r_p = np.sqrt(r_xy_p ** 2 + z_rel_p ** 2)
                 sin_ra_p = y_rel_p / np.maximum(r_xy_p, eps)
                 cos_ra_p = x_rel_p / np.maximum(r_xy_p, eps)
                 sin_dec_p = z_rel_p / np.maximum(r_p, eps)
@@ -743,10 +744,10 @@ def run_sim_runnumbers_MPI_getIOD(config):
             ok_csv = (save_format in ("csv", "both")) and (counts.get("csv", 0) >= (expected_rows or 0))
             ok_pq = (save_format in ("parquet", "both")) and (counts.get("parquet", 0) >= (expected_rows or 0))
             complete = (
-                (save_format == "csv" and ok_csv)
-                or (save_format == "parquet" and ok_pq)
-                or (save_format == "both" and ok_csv and ok_pq)
-                or (expected_rows == 0)
+                    (save_format == "csv" and ok_csv)
+                    or (save_format == "parquet" and ok_pq)
+                    or (save_format == "both" and ok_csv and ok_pq)
+                    or (expected_rows == 0)
             )
             if complete:
                 with open(done_marker_path(src_base), "w") as f:
@@ -884,21 +885,21 @@ def run_IOD(config):
     boresight_cols = [f"BORESIGHT_SC_{i}_GEO_SECR" for i in range(1, num_sc + 1)]
 
     detection_block = (
-        [
-            "ID_AST",
-            "EPOCH_AST(jdtdb)",
-            "HELIO_AST(kms)",
-            "DETECTING_SC_ID",
-            "VALUES_IDX",
-            "VALUES_IDX_EMS",           # <-- NEW
-            "TOTAL_LENGTH",
-            "SPACECRAFT_1_INI_POS(km)",
-            "INDEX_USED",               # <-- UPDATED (was MIN_NONNEGATIVE)
-            "OCCLUDED_BY_EMS",          # <-- NEW
-        ]
-        + epoch_sc_cols
-        + helio_sc_cols
-        + boresight_cols
+            [
+                "ID_AST",
+                "EPOCH_AST(jdtdb)",
+                "HELIO_AST(kms)",
+                "DETECTING_SC_ID",
+                "VALUES_IDX",
+                "VALUES_IDX_EMS",  # <-- NEW
+                "TOTAL_LENGTH",
+                "SPACECRAFT_1_INI_POS(km)",
+                "INDEX_USED",  # <-- UPDATED (was MIN_NONNEGATIVE)
+                "OCCLUDED_BY_EMS",  # <-- NEW
+            ]
+            + epoch_sc_cols
+            + helio_sc_cols
+            + boresight_cols
     )
 
     # Keep IOD_DATA_SAVED_AS immediately after context block
@@ -1062,8 +1063,8 @@ def run_IOD(config):
             vel_rmse = float(np.sqrt(np.mean(vel_err_sq)))
 
             try:
-                final_xyz = np.asarray(final_pos[0][-2, :], dtype=float).reshape(3,)
-                final_vxyz = np.asarray(final_vel[0][-2, :], dtype=float).reshape(3,)
+                final_xyz = np.asarray(final_pos[0][-2, :], dtype=float).reshape(3, )
+                final_vxyz = np.asarray(final_vel[0][-2, :], dtype=float).reshape(3, )
                 final_state = np.concatenate([final_xyz, final_vxyz]).tolist()
             except Exception:
                 final_state = None
@@ -1149,12 +1150,12 @@ def run_IOD(config):
             for c in missing:
                 # Heuristic: initialize string-ish columns as empty strings, else NaN
                 stringish = (
-                    ("SAVED_AS" in c)
-                    or ("(kms)" in c)
-                    or ("BORESIGHT" in c)
-                    or ("VALUES" in c)
-                    or ("_INI_POS" in c)
-                    or (c in ("SAMPLING_METHOD", "INPUT_RANGE", "IOD_RESULT_SAVED_AS"))
+                        ("SAVED_AS" in c)
+                        or ("(kms)" in c)
+                        or ("BORESIGHT" in c)
+                        or ("VALUES" in c)
+                        or ("_INI_POS" in c)
+                        or (c in ("SAMPLING_METHOD", "INPUT_RANGE", "IOD_RESULT_SAVED_AS"))
                 )
                 df[c] = "" if stringish else np.nan
 
@@ -1313,11 +1314,11 @@ def run_OD(config):
 
     # Columns we’ll add/update in MASTER (we’ll enforce a nice order on write)
     od_metrics_cols = [
-        "OD_RESULT_SAVED_AS",       # per-row OD time-series log filename
-        "OD_FINAL_TIME_JDTDB",      # final epoch reached (jdtdb)
-        "OD_N_STEPS",               # number of OD steps performed
-        "OD_LAST_POS_RMSE",         # last-step position RMSE [km] or your chosen units
-        "OD_LAST_VEL_RMSE",         # last-step velocity RMSE [km/s]
+        "OD_RESULT_SAVED_AS",  # per-row OD time-series log filename
+        "OD_FINAL_TIME_JDTDB",  # final epoch reached (jdtdb)
+        "OD_N_STEPS",  # number of OD steps performed
+        "OD_LAST_POS_RMSE",  # last-step position RMSE [km] or your chosen units
+        "OD_LAST_VEL_RMSE",  # last-step velocity RMSE [km/s]
     ]
 
     # Collect per-rank updates to MASTER rows
@@ -1344,8 +1345,8 @@ def run_OD(config):
         setup = od_setup_from_iod(config, row, util=util, sp=sp)  # dict containing a lot of initial data
 
         # Force visualization ON (as requested)
-        viz_flag = False
-        if viz_flag:
+        ini_viz_flag = False
+        if ini_viz_flag:
 
             sid = setup["sc_detecting_id"]
 
@@ -1436,7 +1437,6 @@ def run_OD(config):
                 xlim=(-5e6, 2e6), ylim=(-3e6, 3e6),
                 agent_orbit_tracks_xy=None,
             )
-
 
             #################################################
             # 3D Visualizations
@@ -1542,7 +1542,6 @@ def run_OD(config):
         # cholesky decomposition to calc sigmapoints
         epsilon = config['epsilon_ukf']  # constant to ensure positive defineteness
 
-
         # ---------------------------------------------
         # build ojects
         # -------------------------------------------
@@ -1605,6 +1604,8 @@ def run_OD(config):
             # define epochs we want to look at
             big_t_set_jdtdb = t_cur + (big_t_set / 86400.0)
             big_t_set_jdtdb = big_t_set_jdtdb[big_t_set_jdtdb <= t_end + 1e-15]
+            num_t_steps = len(big_t_set_jdtdb)
+            big_t_set = big_t_set[:num_t_steps]
 
             # perform unscented transform
             x_ts, P_ts = ukf.propagate_priors(
@@ -1617,8 +1618,12 @@ def run_OD(config):
             sc_eme_states_kms = setup["frames"]["sc_eme_ae_kms"]  # current sc pos at detection instant
             sc_eme_trajs_kms = n_body_propagator.propagate_multiple_objects(sc_eme_states_kms, t_cur, big_t_set_jdtdb)
 
+            # propagate asteroid true to each epoch
+            ast_eme_state_kms = setup["frames"]["ast_eme_ae_kms"]
+            ast_eme_traj_kms = n_body_propagator.propagate(ast_eme_state_kms, t_cur, big_t_set_jdtdb)
+
             # to visualize the possible att coord scenarios
-            viz_prop_flag = True
+            viz_prop_flag = False
             if viz_prop_flag:
                 util.plot_priors_positions_and_cov_2d(
                     x_ts,
@@ -1630,14 +1635,135 @@ def run_OD(config):
                     title_prefix="Asteroid prior + spacecraft"
                 )
 
-            # perform attitude coord. - GET THIS WORKING
-            # result_att_coord_kcoverage, result_att_coord_mean = attitude_coordination.step(sc_eme_trajs_kms[:, :, :3],)
+            # perform attitude coord.
+            # get various required inputs
+            sc_pointings_eme = setup["frames"]["sc_pointing_eme_cartesian"]  # where sc are pointing
+            theta_h_rad = util.fov_deg2_to_half_angle_rad(config["fov"])  # width of sc FOV
 
+            # these would become spacecarft properties
+            tau_max = config["reaction_wheel_torque"]
+            h_max = config["reaction_wheel_momentum"]
+            m_m = config["mass"]
+            l_m = config["length"]
+            m_t = config["telescope_mass"]
+            d_t = config["telescope_diameter"]
+            z_0 = config["telescope_offset"]
+            I_max = (1 / 6) * m_m * (l_m / 2) ** 2 + (1 / 2) * m_t * (d_t / 2) ** 2 + m_t * z_0 ** 2
+            alpha_max = 1.63 * tau_max / I_max
+            omega_max = 1.63 * h_max / I_max
+
+            res_kcoverage, result_mean, result_kcoverage_series, result_mean_seriies = attitude_coordination.step(
+                sc_eme_trajs_kms[:, :, :3],
+                sc_pointings_eme,
+                x_ts[:, :3],
+                P_ts[:, :3, :3],
+                big_t_set,
+                theta_h_rad,
+                alpha_max,
+                omega_max,
+                d_M=3,
+                coverage_point=ast_eme_traj_kms[:, :3])
+
+            # visualize att_coord result
+            # Force visualization ON (as requested)
+            att_coord_viz_flag = True
+
+            if att_coord_viz_flag:
+
+                best_epoch = res_kcoverage.chosen_dt
+                # best_idx = np.where(big_t_set == best_epoch)[0]
+                best_idx =5
+
+                # Common viz params
+                theta_h_rad = util.fov_deg2_to_half_angle_rad(config["fov"])
+                ems_center_xy = np.array(config["ems"]["p_em"][:2])
+                ems_center_xyz = np.array(config["ems"]["p_em"])
+                ems_radius = config["ems"]['R_em']
+                ray_length = 10e6
+
+                # Pull states/vectors from setup
+                sc_eme_ae_kms = np.squeeze(sc_eme_trajs_kms[best_idx, :, :3])
+                sc_pointing_eme_cartesian = res_kcoverage.u_cmd
+                ang_eme = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_eme_cartesian)
+                ast_truth_eme = np.squeeze(ast_eme_traj_kms[best_idx, :3])
+                ast_iod_eme = np.squeeze(x_ts[best_idx, :3])
+                P_cart_eme = np.squeeze(P_ts[best_idx, :3, :3])
+
+                # Ensure truth shapes are (6,) if they came back as (1,6)
+                ast_truth_eme = np.asarray(ast_truth_eme).reshape(-1)
+
+                #################################################
+                # 2D Visualizations
+                #################################################
+
+                # ---- EME 2D ----
+                agents_xy = sc_eme_ae_kms[:, :2]
+                pointing_angles_rad = ang_eme
+
+                target_mean_xy = ast_iod_eme[:2]
+                target_cov_xy = P_cart_eme[:2, :2]
+                true_target_xy = ast_truth_eme[:2]
+
+                fig2, ax2 = util.plot_od_scenario_2d(
+                    t_label=best_epoch,
+                    agents_xy=agents_xy,
+                    pointing_angles_rad=pointing_angles_rad,
+                    theta_h_rad=theta_h_rad,
+                    ray_length=ray_length,
+                    u_curr_agents_xy=sc_pointings_eme[:, :2],
+                    boresight_line_len=0.5e6,
+                    target_mean_xy=target_mean_xy,
+                    target_cov_xy=target_cov_xy,
+                    d_mahal=3.0,
+                    true_target_xy=true_target_xy,
+                    ems_center_xy=ems_center_xy,
+                    ems_radius=ems_radius,
+                    xlim=(-5e6, 5e6), ylim=(-5e6, 5e6),
+                    agent_orbit_tracks_xy=None,
+                )
+
+                #################################################
+                # 3D Visualizations
+                #################################################
+
+                # ---- EME 3D ----
+                agents_xyz = sc_eme_ae_kms
+                target_cov_xyz = P_cart_eme
+
+                fig, ax = util.plot_od_scenario_3d(
+                    t_label=best_epoch,
+                    agents_xyz=agents_xyz,
+                    u_opt_agents_xyz=sc_pointing_eme_cartesian,
+                    theta_h_rad=theta_h_rad,
+                    ray_length=ray_length,
+                    u_curr_agents_xyz=sc_pointings_eme,
+                    xlim=(-5e6, 5e6), ylim=(-5e6, 5e6), zlim=(-5e6, 5e6),
+                    Nx=120, Ny=120, Nz=70,
+                    max_points_for_scatter=800_000,
+                    target_mean_xyz=ast_iod_eme[:3],
+                    target_cov_xyz=target_cov_xyz,
+                    d_mahal=3.0,
+                    true_target_xyz=ast_truth_eme[:3],
+                    ems_center_xyz=ems_center_xyz,
+                    ems_radius=ems_radius,
+                    show_coverage=True,
+                    show_uncertainty=True,
+                    show_truth=True,
+                    show_ems=True,
+                    title="3D OD Scenario Demo (EME)"
+                )
+
+
+                # cost function visualization
+                util.plot_attcoord_costs_from_series(
+                    result_kcoverage_series,
+                    title="Dual coverage score vs objective (best per epoch)"
+                )
+
+                plt.show()
 
             # move to that epoch
-
-
-
+            #
             # -------------- Log the step -------------------------
             # Stringify vectors/matrices compactly to keep CSV readable:
             def _vec_to_str(v):
@@ -1753,7 +1879,6 @@ def run_OD(config):
 
     comm.Barrier()
     return
-
 
 
 def run_overall_OD(master, config):

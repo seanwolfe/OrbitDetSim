@@ -766,7 +766,7 @@ def theta_s_of_dt(delta_t_s, alpha_max, omega_max):
 
 
 def optimize_pointing_lbfgs_joint(
-    p_hat, P_p, p_agents, u_curr_agents,
+        p_hat, P_p, p_agents, u_curr_agents,
     theta_h, theta_s_list,
     d_M=3.0, kappa_sigma=120.0,
     n_mc=25000, seed=0,
@@ -995,54 +995,52 @@ class AttitudeCoordinator:
         )
 
     def step(
-            self,
-            p_agents: np.ndarray,
-            u_curr_agents: np.ndarray,
-            p_hat: np.ndarray,
-            P_p: np.ndarray,
-            dt_grid: np.ndarray,
-            theta_h: float,
-            alpha_max: float,
-            omega_max: float,
-            *,
-            d_M: Optional[float] = None,
-            trial_seed: int = 0,
-            # EMS params
-            p_em: Optional[np.ndarray] = None,
-            R_em: Optional[float] = None,
-            alpha_s: Optional[float] = None,
-            # optimizer penalty params
-            lambda_em: Optional[float] = None,
-            beta_zeta: Optional[float] = None,
-            # coverage counting
-            coverage_point: Optional[np.ndarray] = None,  # (3,) or (N,3)
-    ) -> Tuple[AttCoordResult, AttCoordResult]:
+        self,
+        p_agents: np.ndarray,
+        u_curr_agents: np.ndarray,
+        p_hat: np.ndarray,
+        P_p: np.ndarray,
+        dt_grid: np.ndarray,
+        theta_h: float,
+        alpha_max: float,
+        omega_max: float,
+        *,
+        d_M: Optional[float] = None,
+        trial_seed: int = 0,
+        # EMS params
+        p_em: Optional[np.ndarray] = None,
+        R_em: Optional[float] = None,
+        alpha_s: Optional[float] = None,
+        # optimizer penalty params
+        lambda_em: Optional[float] = None,
+        beta_zeta: Optional[float] = None,
+        # coverage counting
+        coverage_point: Optional[np.ndarray] = None,  # (3,) or (N,3)
+    ) -> Tuple[AttCoordResult, AttCoordResult, List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         Returns:
-            (res_opt, res_mean)
+            (res_opt_best, res_mean_best, opt_series, mean_series)
 
-        res_opt:
-          - best feasible optimizer solution across dt_grid (min cost)
+        - res_opt_best: best feasible optimizer solution across dt_grid (min cost)
+        - res_mean_best: earliest dt where all agents can point to mean (slew+keepout)
+                         If infeasible across horizon -> coverage=-1, others NaN/u=None
 
-        res_mean:
-          - earliest dt where all agents can point to mean using:
-                all_agents_can_point_to_mean(...)
-            which includes slew + keepout constraints.
-          - If infeasible across horizon -> coverage=-1, everything else NaN, u_cmd=None
+        - opt_series: list length N; per-epoch optimizer diagnostics
+        - mean_series: list length N; per-epoch mean-method diagnostics
         """
 
         # --- normalize / validate ---
         dt_grid = np.asarray(dt_grid, dtype=float).ravel()
         N = int(dt_grid.size)
         if N == 0:
-            return self._nan_result(), self._nan_result()
+            return self._nan_result(), self._nan_result(), [], []
 
         u_curr_agents = np.asarray(u_curr_agents, dtype=float)
         if u_curr_agents.ndim != 2 or u_curr_agents.shape[1] != 3:
             raise ValueError(f"u_curr_agents must be (M,3), got {u_curr_agents.shape}")
         M = int(u_curr_agents.shape[0])
         if M <= 0:
-            return self._nan_result(), self._nan_result()
+            return self._nan_result(), self._nan_result(), [], []
 
         if d_M is None:
             d_M = float(self.cfg.get("covariance", {}).get("d_mahal", 1.0))
@@ -1051,7 +1049,7 @@ class AttitudeCoordinator:
         if p_em is None:
             p_em = self.p_em_default
         else:
-            p_em = np.asarray(p_em, dtype=float).reshape(3, )
+            p_em = np.asarray(p_em, dtype=float).reshape(3,)
 
         if R_em is None:
             R_em = self.R_em_default
@@ -1079,16 +1077,18 @@ class AttitudeCoordinator:
                 raise ValueError(f"coverage_point must be (3,) or (N,3), got {cp.shape}")
 
         # ============================================================
-        # (A) OPTIMIZER result: best feasible over dt_grid (min cost)
+        # (A) OPTIMIZER per-epoch diagnostics + best selection
         # ============================================================
+        opt_series: List[Dict[str, Any]] = []
         best_opt = {"cost": np.inf}
 
         for k, dt in enumerate(dt_grid):
             dt = float(dt)
             p_agents_k = p_agents_ts[k]
-            p_hat_k = p_hat_ts[k].reshape(3, )
+            p_hat_k = p_hat_ts[k].reshape(3,)
             P_p_k = P_p_ts[k]
 
+            # Slew limit for this dt
             theta_s_t = float(theta_s_of_dt(dt, alpha_max, omega_max))
             theta_s_t = float(np.clip(theta_s_t, 0.0, np.deg2rad(179.0)))
             theta_s_list_t = np.full(M, theta_s_t)
@@ -1107,35 +1107,56 @@ class AttitudeCoordinator:
                 beta_zeta=float(beta_zeta),
             )
 
-            if u_star is None:
+            if u_star is None or not np.isfinite(float(cost_star)):
+                # infeasible / failed
+                opt_series.append(dict(
+                    k=k, dt=dt, feasible=False,
+                    u=None,
+                    cost=float("nan"),
+                    J=float("nan"),
+                    theta_req_avg_deg=float("nan"),
+                    theta_s_allowed=float(theta_s_t),
+                    coverage=-1,
+                    history=history,
+                ))
                 continue
 
+            # average slew
+            slews = np.array([angle_between(u_curr_agents[i], u_star[i]) for i in range(M)], dtype=float)
+            slew_avg_deg = float(np.rad2deg(np.nanmean(slews)))
+
+            cov_cnt = -1
+            if covpt_ts is not None:
+                cov_cnt = int(coverage_count_point(covpt_ts[k], p_agents_k, u_star, float(theta_h)))
+
             c = float(cost_star)
+            Jv = float(J_star)
+
+            row = dict(
+                k=k, dt=dt, feasible=True,
+                u=u_star,
+                cost=c,
+                J=Jv,
+                theta_req_avg_deg=slew_avg_deg,
+                theta_s_allowed=float(theta_s_t),
+                coverage=int(cov_cnt),
+                history=history,
+            )
+            opt_series.append(row)
+
+            # update best
             if c < best_opt["cost"]:
-                # Average slew relative to current
-                slew_sum = 0.0
-                for i in range(M):
-                    slew_sum += angle_between(u_curr_agents[i], u_star[i])
-                slew_avg_deg = float(np.rad2deg(slew_sum / max(M, 1)))
-
-                cov_cnt = -1
-                if covpt_ts is not None:
-                    cov_cnt = coverage_count_point(covpt_ts[k], p_agents_k, u_star, float(theta_h))
-
                 best_opt = dict(
-                    cost=c,
-                    dt=dt,
-                    u=u_star,
-                    J=float(J_star),
+                    cost=c, dt=dt, u=u_star, J=Jv,
                     theta_req_avg_deg=slew_avg_deg,
                     coverage=int(cov_cnt),
                     history=history,
                 )
 
         if not np.isfinite(best_opt.get("cost", np.inf)):
-            res_opt = self._nan_result()
+            res_opt_best = self._nan_result()
         else:
-            res_opt = AttCoordResult(
+            res_opt_best = AttCoordResult(
                 u_cmd=best_opt["u"],
                 chosen_dt=float(best_opt["dt"]),
                 cost=float(best_opt["cost"]),
@@ -1146,48 +1167,61 @@ class AttitudeCoordinator:
             )
 
         # ============================================================
-        # (B) MEAN method: earliest epoch all can point to mean (3D)
-        #     Uses updated all_agents_can_point_to_mean(...)
+        # (B) MEAN per-epoch diagnostics + earliest-feasible selection
         # ============================================================
+        mean_series: List[Dict[str, Any]] = []
         best_mean = None
 
         for k, dt in enumerate(dt_grid):
             dt = float(dt)
             p_agents_k = p_agents_ts[k]
-            p_hat_k = p_hat_ts[k].reshape(3, )
+            p_hat_k = p_hat_ts[k].reshape(3,)
 
             all_ok, per_ok, u_mean, theta_req, theta_s_t = all_agents_can_point_to_mean(
                 dt,
-                p_hat_k,  # <-- 3D mean at this epoch
+                p_hat_k,
                 p_agents_k, u_curr_agents,
                 float(theta_h),
                 float(alpha_max), float(omega_max),
                 p_em, float(R_em), float(alpha_s),
             )
 
-            if all_ok:
-                # theta_req is per-agent required slew (rad). Average it.
-                slew_avg_deg = float(np.rad2deg(np.nanmean(theta_req)))
-
-                cov_cnt = -1
-                if covpt_ts is not None:
-                    cov_cnt = coverage_count_point(covpt_ts[k], p_agents_k, u_mean, float(theta_h))
-
-                best_mean = dict(
-                    dt=dt,
-                    u=u_mean,
-                    theta_req_avg_deg=slew_avg_deg,
-                    coverage=int(cov_cnt),
+            if not all_ok:
+                mean_series.append(dict(
+                    k=k, dt=dt, feasible=False,
+                    u=None,
+                    theta_req_avg_deg=float("nan"),
+                    theta_s_allowed=float(theta_s_t),
+                    coverage=-1,
                     per_agent_ok=per_ok,
                     theta_required=theta_req,
-                    theta_s_allowed=float(theta_s_t),
-                )
-                break  # earliest feasible
+                ))
+                continue
+
+            slew_avg_deg = float(np.rad2deg(np.nanmean(theta_req)))
+
+            cov_cnt = -1
+            if covpt_ts is not None:
+                cov_cnt = int(coverage_count_point(covpt_ts[k], p_agents_k, u_mean, float(theta_h)))
+
+            row = dict(
+                k=k, dt=dt, feasible=True,
+                u=u_mean,
+                theta_req_avg_deg=slew_avg_deg,
+                theta_s_allowed=float(theta_s_t),
+                coverage=int(cov_cnt),
+                per_agent_ok=per_ok,
+                theta_required=theta_req,
+            )
+            mean_series.append(row)
+
+            if best_mean is None:
+                best_mean = row  # earliest feasible
 
         if best_mean is None:
-            res_mean = self._nan_result()
+            res_mean_best = self._nan_result()
         else:
-            res_mean = AttCoordResult(
+            res_mean_best = AttCoordResult(
                 u_cmd=best_mean["u"],
                 chosen_dt=float(best_mean["dt"]),
                 cost=float("nan"),
@@ -1202,7 +1236,7 @@ class AttitudeCoordinator:
                 },
             )
 
-        return res_opt, res_mean
+        return res_opt_best, res_mean_best, opt_series, mean_series
 
 
 def unit(v: np.ndarray, eps: float = 1e-12) -> Optional[np.ndarray]:

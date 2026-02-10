@@ -940,6 +940,7 @@ def plot_od_scenario_2d(
     M = A.shape[0]
     ang = np.asarray(pointing_angles_rad, dtype=float).reshape(M, )
 
+
     # Determine plot bounds if not provided
     if xlim is None or ylim is None:
         # basic fallback using agent positions and optional target mean/truth/ems
@@ -1042,7 +1043,7 @@ def plot_od_scenario_2d(
                 u_axis_proxy = ln
 
             # Compute slew between current u and optimized u (same convention)
-            u_opt = np.array([np.sin(ang[i]), np.cos(ang[i])], dtype=float)
+            u_opt = np.array([np.cos(ang[i]), np.sin(ang[i])], dtype=float)
             dot = float(np.clip(np.dot(u, u_opt), -1.0, 1.0))
             slew_deg = float(np.degrees(np.arccos(dot)))
 
@@ -5386,6 +5387,64 @@ def fov_deg2_to_half_angle_rad(FOV_deg2):
     return np.arccos(
         1.0 - (FOV_deg2 / (180.0 / np.pi) ** 2) / (2.0 * np.pi)
     )
+
+
+def plot_attcoord_costs_from_series(result_kcoverage_series, *, title="Attitude coordination costs"):
+    """
+    Plot J_t and objective/cost across all tested epochs.
+
+    Expects result_kcoverage_series: list[dict] where each dict has:
+      - dt (float)
+      - feasible (bool)
+      - J (float)  # dual coverage score
+      - cost (float)  # objective = -J + penalty (per your optimizer)
+    Infeasible rows may have J/cost = NaN and feasible=False.
+    """
+    if result_kcoverage_series is None or len(result_kcoverage_series) == 0:
+        print("No k-coverage series data to plot.")
+        return None, None
+
+    dts = np.array([row.get("dt", np.nan) for row in result_kcoverage_series], dtype=float)
+    feasible = np.array([bool(row.get("feasible", False)) for row in result_kcoverage_series], dtype=bool)
+
+    J_vals = np.array([row.get("J", np.nan) for row in result_kcoverage_series], dtype=float)
+    cost_vals = np.array([row.get("cost", np.nan) for row in result_kcoverage_series], dtype=float)
+
+    # Best epoch = min cost among feasible
+    best_idx = None
+    if np.any(feasible):
+        idxs = np.where(feasible)[0]
+        best_idx = idxs[np.nanargmin(cost_vals[idxs])]
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+
+    line1, = ax.plot(dts, J_vals, marker="o", linestyle="-", label=r"$J_t$")
+    line2, = ax.plot(dts, -cost_vals, marker="x", linestyle="--", label="-(objective)")
+
+    # Mark infeasible epochs
+    if np.any(~feasible):
+        ax.scatter(dts[~feasible], np.zeros(np.sum(~feasible)), marker="v", label="infeasible")
+
+    # Mark best
+    if best_idx is not None:
+        ax.axvline(dts[best_idx], linestyle=":", linewidth=2, label=f"best dt={dts[best_idx]:.2f}s")
+
+    ax.set_xlabel(r"Epoch time $\Delta t_s$ [s]")
+    ax.set_ylabel(r"$J_t$ and -(objective)")
+    ax.set_title(title)
+    ax.grid(alpha=0.3)
+    ax.legend(loc="best")
+
+    # Reasonable y-limits (ignore NaNs)
+    y_all = np.concatenate([J_vals[np.isfinite(J_vals)], (-cost_vals)[np.isfinite(cost_vals)]])
+    if y_all.size > 0:
+        ymin, ymax = float(np.min(y_all)), float(np.max(y_all))
+        pad = 0.05 * (ymax - ymin if ymax > ymin else 1.0)
+        ax.set_ylim(ymin - pad, ymax + pad)
+
+    fig.tight_layout()
+
+    return fig, ax
 
 
 def count_files_in_folder(folder_path):
