@@ -130,22 +130,22 @@ error_file_dir: 'Error_files_for_IOD'
 # epoch grid to search over
 epochs:
   dt_min: 10.0   # in seconds, first time to check
-  dt_max: 864010.0  # last time to check
-  n_dt: 10       # number of checks
+  dt_max: 36010.0  # last time to check
+  n_dt: 3       # number of checks
 
 d_mahal: 3.0
 
 optimizer_att_coord:
-  kappa_sigma: 115.0
+  kappa_sigma: 150.0
   n_mc: 20000
   n_restarts: 1
 
 ems:
   p_em: [0.0, 0.0, 0.0]
-  R_em: 0.5e+6
-  alpha_s_deg: 5
+  R_em: 0.1e+6
+  alpha_s_deg: 2
   lambda_em: 1.0
-  beta_zeta: 1500.0
+  beta_zeta: 115.0
 
 
 

@@ -20,6 +20,7 @@ import glob
 import datetime as dt
 import matplotlib.pyplot as plt
 from od_attcoord import AttitudeCoordinator
+import math
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
 sp.furnsh("de430.bsp")
@@ -1345,7 +1346,7 @@ def run_OD(config):
         setup = od_setup_from_iod(config, row, util=util, sp=sp)  # dict containing a lot of initial data
 
         # Force visualization ON (as requested)
-        ini_viz_flag = False
+        ini_viz_flag = True
         if ini_viz_flag:
 
             sid = setup["sc_detecting_id"]
@@ -1400,20 +1401,20 @@ def run_OD(config):
             target_cov_xy = _pick_cov(P_cart_secr, sid, block=(slice(0, 2), slice(0, 2)))
             true_target_xy = ast_truth_secr[:2]
 
-            fig, ax = util.plot_od_scenario_2d(
-                agents_xy=agents_xy,
-                pointing_angles_rad=pointing_angles_rad,
-                theta_h_rad=theta_h_rad,
-                ray_length=ray_length,
-                target_mean_xy=target_mean_xy,
-                target_cov_xy=target_cov_xy,
-                d_mahal=2.0,
-                true_target_xy=true_target_xy,
-                ems_center_xy=ems_center_xy,
-                ems_radius=ems_radius,
-                xlim=(-5e6, 2e6), ylim=(-3e6, 3e6),
-                agent_orbit_tracks_xy=None,
-            )
+            # fig, ax = util.plot_od_scenario_2d(
+            #     agents_xy=agents_xy,
+            #     pointing_angles_rad=pointing_angles_rad,
+            #     theta_h_rad=theta_h_rad,
+            #     ray_length=ray_length,
+            #     target_mean_xy=target_mean_xy,
+            #     target_cov_xy=target_cov_xy,
+            #     d_mahal=3.0,
+            #     true_target_xy=true_target_xy,
+            #     ems_center_xy=ems_center_xy,
+            #     ems_radius=ems_radius,
+            #     xlim=(-5e6, 2e6), ylim=(-3e6, 3e6),
+            #     agent_orbit_tracks_xy=None,
+            # )
 
             # ---- EME 2D ----
             agents_xy = sc_eme_ae_kms[:, :2]
@@ -1423,20 +1424,20 @@ def run_OD(config):
             target_cov_xy = _pick_cov(P_cart_eme, sid, block=(slice(0, 2), slice(0, 2)))
             true_target_xy = ast_truth_eme[:2]
 
-            fig2, ax2 = util.plot_od_scenario_2d(
-                agents_xy=agents_xy,
-                pointing_angles_rad=pointing_angles_rad,
-                theta_h_rad=theta_h_rad,
-                ray_length=ray_length,
-                target_mean_xy=target_mean_xy,
-                target_cov_xy=target_cov_xy,
-                d_mahal=2.0,
-                true_target_xy=true_target_xy,
-                ems_center_xy=ems_center_xy,
-                ems_radius=ems_radius,
-                xlim=(-5e6, 2e6), ylim=(-3e6, 3e6),
-                agent_orbit_tracks_xy=None,
-            )
+            # fig2, ax2 = util.plot_od_scenario_2d(
+            #     agents_xy=agents_xy,
+            #     pointing_angles_rad=pointing_angles_rad,
+            #     theta_h_rad=theta_h_rad,
+            #     ray_length=ray_length,
+            #     target_mean_xy=target_mean_xy,
+            #     target_cov_xy=target_cov_xy,
+            #     d_mahal=2.0,
+            #     true_target_xy=true_target_xy,
+            #     ems_center_xy=ems_center_xy,
+            #     ems_radius=ems_radius,
+            #     xlim=(-5e6, 2e6), ylim=(-3e6, 3e6),
+            #     agent_orbit_tracks_xy=None,
+            # )
 
             #################################################
             # 3D Visualizations
@@ -1446,32 +1447,32 @@ def run_OD(config):
             agents_xyz = sc_secr_se_kms[:, :3]
             target_cov_xyz = _pick_cov(P_cart_secr, sid, block=(slice(0, 3), slice(0, 3)))
 
-            fig, ax = util.plot_od_scenario_3d(
-                agents_xyz=agents_xyz,
-                u_opt_agents_xyz=sc_pointing_secr,
-                theta_h_rad=theta_h_rad,
-                ray_length=ray_length,
-                xlim=(-5e6, 2e6), ylim=(-3e6, 3e6), zlim=(-3e6, 3e6),
-                Nx=120, Ny=120, Nz=70,
-                max_points_for_scatter=800_000,
-                target_mean_xyz=ast_iod_secr[:3],
-                target_cov_xyz=target_cov_xyz,
-                d_mahal=2.0,
-                true_target_xyz=ast_truth_secr[:3],
-                ems_center_xyz=ems_center_xyz,
-                ems_radius=ems_radius,
-                show_coverage=True,
-                show_uncertainty=True,
-                show_truth=True,
-                show_ems=True,
-                title="3D OD Scenario Demo (SECR)"
-            )
+            # fig, ax = util.plot_od_scenario_3d(
+            #     agents_xyz=agents_xyz,
+            #     u_opt_agents_xyz=sc_pointing_secr,
+            #     theta_h_rad=theta_h_rad,
+            #     ray_length=ray_length,
+            #     xlim=(-5e6, 2e6), ylim=(-3e6, 3e6), zlim=(-3e6, 3e6),
+            #     Nx=120, Ny=120, Nz=70,
+            #     max_points_for_scatter=800_000,
+            #     target_mean_xyz=ast_iod_secr[:3],
+            #     target_cov_xyz=target_cov_xyz,
+            #     d_mahal=2.0,
+            #     true_target_xyz=ast_truth_secr[:3],
+            #     ems_center_xyz=ems_center_xyz,
+            #     ems_radius=ems_radius,
+            #     show_coverage=True,
+            #     show_uncertainty=True,
+            #     show_truth=True,
+            #     show_ems=True,
+            #     title="3D OD Scenario Demo (SECR)"
+            # )
 
             # ---- EME 3D ----
             agents_xyz = sc_eme_ae_kms[:, :3]
             target_cov_xyz = _pick_cov(P_cart_eme, sid, block=(slice(0, 3), slice(0, 3)))
 
-            fig, ax = util.plot_od_scenario_3d(
+            fig, ax = util.plot_od_scenario_3d_new(
                 agents_xyz=agents_xyz,
                 u_opt_agents_xyz=sc_pointing_eme,
                 theta_h_rad=theta_h_rad,
@@ -1481,7 +1482,7 @@ def run_OD(config):
                 max_points_for_scatter=800_000,
                 target_mean_xyz=ast_iod_eme[:3],
                 target_cov_xyz=target_cov_xyz,
-                d_mahal=2.0,
+                d_mahal=3.0,
                 true_target_xyz=ast_truth_eme[:3],
                 ems_center_xyz=ems_center_xyz,
                 ems_radius=ems_radius,
@@ -1492,7 +1493,6 @@ def run_OD(config):
                 title="3D OD Scenario Demo (EME)"
             )
 
-            plt.show()
 
         # Prepare per-row OD log (unique filename, no overwrite)
         base = f"{uid}__OD_{config['dynamics']}_{config['orbit']}_{config['observer']}_{config['optimizer']}"
@@ -1696,88 +1696,110 @@ def run_OD(config):
                 #################################################
 
                 # ---- EME 2D ----
+
                 best_idx = int(np.where(big_t_set == best_epoch)[0][0])
                 T = len(big_t_set)
 
-                # Choose best + 2 others (neighbors, edge-safe)
-                cands = [best_idx, max(0, best_idx - 1), min(T - 1, best_idx + 1)]
-                selected = []
-                for c in cands:
-                    if c not in selected:
-                        selected.append(c)
-                for c in range(T):
-                    if len(selected) >= 3:
-                        break
-                    if c not in selected:
-                        selected.append(c)
-                selected = selected[:3]
+                two_d_pot = False
+                if two_d_pot:
+                    def is_valid(idx):
+                        J = result_kcoverage_series[idx]["J"]
+                        return not (J is None or (isinstance(J, float) and math.isnan(J)))
 
-                planes = [((0, 1), "XY"), ((0, 2), "XZ"), ((1, 2), "YZ")]
+                    # Start with preferred candidates
+                    cands = [best_idx, max(0, best_idx - 1), min(T - 1, best_idx + 1)]
 
-                def cov2_from_cov3(P3, axes):
-                    i, j = axes
-                    return P3[np.ix_([i, j], [i, j])]
+                    selected = []
 
-                def angles_in_plane(u_cmd_xyz, axes):
-                    a, b = axes
-                    u = np.asarray(u_cmd_xyz, dtype=float)  # (M,3)
-                    u2 = u[:, [a, b]]  # (M,2)
-                    return np.arctan2(u2[:, 1], u2[:, 0])  # (M,)
+                    # First pass: try preferred ones if valid
+                    for c in cands:
+                        if c not in selected and is_valid(c):
+                            selected.append(c)
 
-                for idx in selected:
-                    epoch = big_t_set[idx]
+                    # Second pass: scan whole timeline to fill up to 3 valid ones
+                    if len(selected) < 3:
+                        for c in range(T):
+                            if len(selected) >= 3:
+                                break
+                            if c not in selected and is_valid(c):
+                                selected.append(c)
 
-                    # --- states at this epoch ---
-                    sc_xyz = np.asarray(sc_eme_trajs_kms[idx, :, :3], dtype=float)  # (M,3)
-                    ast_truth = np.asarray(ast_eme_traj_kms[idx, :3], dtype=float).reshape(3, )
-                    ast_mean = np.asarray(x_ts[idx, :3], dtype=float).reshape(3, )
-                    P3 = np.asarray(P_ts[idx, :3, :3], dtype=float).reshape(3, 3)
+                    # Final safety: if somehow still short (very pathological case),
+                    # allow invalid ones just so plotting doesn't crash
+                    if len(selected) < 3:
+                        for c in range(T):
+                            if len(selected) >= 3:
+                                break
+                            if c not in selected:
+                                selected.append(c)
 
-                    # --- per-epoch optimal pointing command from opt_series ---
-                    u_cmd_xyz = np.asarray(result_kcoverage_series[idx]["u"], dtype=float)  # (M,3)
+                    planes = [((0, 1), "XY"), ((0, 2), "XZ"), ((1, 2), "YZ")]
 
-                    # --- current pointing (for dotted line / slew display) ---
-                    u_curr_xyz = np.asarray(sc_pointings_eme, dtype=float)  # (M,3)
+                    def cov2_from_cov3(P3, axes):
+                        i, j = axes
+                        return P3[np.ix_([i, j], [i, j])]
 
-                    fig, axes = plt.subplots(1, 3, figsize=(8, 14))
-                    fig.suptitle(f"2D Projections @ epoch {epoch}", y=0.99)
+                    def angles_in_plane(u_cmd_xyz, axes):
+                        a, b = axes
+                        u = np.asarray(u_cmd_xyz, dtype=float)  # (M,3)
+                        u2 = u[:, [a, b]]  # (M,2)
+                        return np.arctan2(u2[:, 1], u2[:, 0])  # (M,)
 
-                    for ax, (axpair, name) in zip(axes, planes):
-                        agents_2d = sc_xyz[:, list(axpair)]
-                        u_curr_2d = u_curr_xyz[:, list(axpair)]
-                        mean_2d = ast_mean[list(axpair)]
-                        truth_2d = ast_truth[list(axpair)]
-                        cov_2d = cov2_from_cov3(P3, axpair)
+                    for idx in selected:
+                        epoch = big_t_set[idx]
 
-                        mean_traj_2d = np.asarray(x_ts[:, :3], dtype=float)[:, list(axpair)]
-                        truth_traj_2d = np.asarray(ast_eme_traj_kms[:, :3], dtype=float)[:, list(axpair)]
+                        # --- states at this epoch ---
+                        sc_xyz = np.asarray(sc_eme_trajs_kms[idx, :, :3], dtype=float)  # (M,3)
+                        ast_truth = np.asarray(ast_eme_traj_kms[idx, :3], dtype=float).reshape(3, )
+                        ast_mean = np.asarray(x_ts[idx, :3], dtype=float).reshape(3, )
+                        P3 = np.asarray(P_ts[idx, :3, :3], dtype=float).reshape(3, 3)
 
-                        ems_center_2d = np.asarray(ems_center_xyz, dtype=float)[list(axpair)]
-                        ang_2d = angles_in_plane(u_cmd_xyz, axpair)
+                        # --- per-epoch optimal pointing command from opt_series ---
+                        u_cmd_xyz = np.asarray(result_kcoverage_series[idx]["u"], dtype=float)  # (M,3)
 
-                        util.plot_od_scenario_2d(
-                            t_label=f"{epoch} ({name})",
-                            agents_xy=agents_2d,
-                            pointing_angles_rad=ang_2d,
-                            theta_h_rad=theta_h_rad,
-                            ray_length=ray_length,
-                            u_curr_agents_xy=u_curr_2d,
-                            boresight_line_len=0.5e6,
-                            target_mean_xy=mean_2d,
-                            target_mean_xy_traj=mean_traj_2d,
-                            target_cov_xy=cov_2d,
-                            d_mahal=3.0,
-                            true_target_xy=truth_2d,
-                            true_target_xy_traj=truth_traj_2d,
-                            ems_center_xy=ems_center_2d,
-                            ems_radius=ems_radius,
-                            xlim=(-5e6, 5e6), ylim=(-5e6, 5e6),
-                            agent_orbit_tracks_xy=None,
-                            ax=ax,  # requires the small ax= edit in util.plot_od_scenario_2d
-                            title=None
-                        )
 
-                    plt.tight_layout()
+                        # --- current pointing (for dotted line / slew display) ---
+                        u_curr_xyz = np.asarray(sc_pointings_eme, dtype=float)  # (M,3)
+
+                        fig, axes = plt.subplots(1, 3, figsize=(8, 14))
+                        fig.suptitle(f"2D Projections @ epoch {epoch}", y=0.99)
+
+                        for ax, (axpair, name) in zip(axes, planes):
+                            agents_2d = sc_xyz[:, list(axpair)]
+                            u_curr_2d = u_curr_xyz[:, list(axpair)]
+                            mean_2d = ast_mean[list(axpair)]
+                            truth_2d = ast_truth[list(axpair)]
+                            cov_2d = cov2_from_cov3(P3, axpair)
+
+                            mean_traj_2d = np.asarray(x_ts[:, :3], dtype=float)[:, list(axpair)]
+                            truth_traj_2d = np.asarray(ast_eme_traj_kms[:, :3], dtype=float)[:, list(axpair)]
+
+                            ems_center_2d = np.asarray(ems_center_xyz, dtype=float)[list(axpair)]
+                            ang_2d = angles_in_plane(u_cmd_xyz, axpair)
+
+                            util.plot_od_scenario_2d(
+                                t_label=f"{epoch} ({name})",
+                                agents_xy=agents_2d,
+                                pointing_angles_rad=ang_2d,
+                                theta_h_rad=theta_h_rad,
+                                ray_length=ray_length,
+                                u_curr_agents_xy=u_curr_2d,
+                                boresight_line_len=0.5e6,
+                                target_mean_xy=mean_2d,
+                                target_mean_xy_traj=mean_traj_2d,
+                                target_cov_xy=cov_2d,
+                                d_mahal=3.0,
+                                true_target_xy=truth_2d,
+                                true_target_xy_traj=truth_traj_2d,
+                                ems_center_xy=ems_center_2d,
+                                ems_radius=ems_radius,
+                                xlim=(-5e6, 5e6), ylim=(-5e6, 5e6),
+                                agent_orbit_tracks_xy=None,
+                                ax=ax,  # requires the small ax= edit in util.plot_od_scenario_2d
+                                title=None
+                            )
+
+                        plt.tight_layout()
                 #################################################
                 # 3D Visualizations
                 #################################################
@@ -1786,20 +1808,25 @@ def run_OD(config):
                 agents_xyz = sc_eme_ae_kms
                 target_cov_xyz = P_cart_eme
 
-                fig, ax = util.plot_od_scenario_3d(
+                fig, ax = util.plot_od_scenario_3d_new(
                     t_label=best_epoch,
                     agents_xyz=agents_xyz,
                     u_opt_agents_xyz=sc_pointing_eme_cartesian,
                     theta_h_rad=theta_h_rad,
                     ray_length=ray_length,
                     u_curr_agents_xyz=sc_pointings_eme,
+                    boresight_line_len=0.5e6,
+                    u_init_agents_xyz=res_kcoverage.extra["history"][0]["u"],
+                    init_boresight_line_len=8e6,
                     xlim=(-5e6, 5e6), ylim=(-5e6, 5e6), zlim=(-5e6, 5e6),
-                    Nx=120, Ny=120, Nz=70,
+                    Nx=300, Ny=300, Nz=300,
                     max_points_for_scatter=800_000,
                     target_mean_xyz=ast_iod_eme[:3],
                     target_cov_xyz=target_cov_xyz,
                     d_mahal=3.0,
                     true_target_xyz=ast_truth_eme[:3],
+                    target_mean_traj_xyz=x_ts[:, :3],
+                    true_target_traj_xyz=ast_eme_traj_kms[:, :3],
                     ems_center_xyz=ems_center_xyz,
                     ems_radius=ems_radius,
                     show_coverage=True,
@@ -1818,57 +1845,58 @@ def run_OD(config):
 
                 plt.show()
 
+            break
             # move to that epoch
             #
             # -------------- Log the step -------------------------
             # Stringify vectors/matrices compactly to keep CSV readable:
-            def _vec_to_str(v):
-                if v is None:
-                    return ""
-                try:
-                    arr = np.asarray(v).ravel()
-                    return ",".join(f"{float(x):.9g}" for x in arr)
-                except Exception:
-                    return str(v)
-
-            def _mat_trace(m):
-                if m is None:
-                    return np.nan
-                try:
-                    a = np.asarray(m)
-                    return float(np.trace(a))
-                except Exception:
-                    return np.nan
-
-            log_writer.writerow([
-                step_idx,
-                f"{t_cur:.9f}",
-                _vec_to_str(x_est),
-                _mat_trace(P_est),
-                _vec_to_str(x_true),
-                att_cmd,
-                f"{last_pos_rmse:.9g}" if np.isfinite(last_pos_rmse) else "",
-                f"{last_vel_rmse:.9g}" if np.isfinite(last_vel_rmse) else "",
-            ])
+            # def _vec_to_str(v):
+            #     if v is None:
+            #         return ""
+            #     try:
+            #         arr = np.asarray(v).ravel()
+            #         return ",".join(f"{float(x):.9g}" for x in arr)
+            #     except Exception:
+            #         return str(v)
+            #
+            # def _mat_trace(m):
+            #     if m is None:
+            #         return np.nan
+            #     try:
+            #         a = np.asarray(m)
+            #         return float(np.trace(a))
+            #     except Exception:
+            #         return np.nan
+            #
+            # log_writer.writerow([
+            #     step_idx,
+            #     f"{t_cur:.9f}",
+            #     _vec_to_str(x_est),
+            #     _mat_trace(P_est),
+            #     _vec_to_str(x_true),
+            #     att_cmd,
+            #     f"{last_pos_rmse:.9g}" if np.isfinite(last_pos_rmse) else "",
+            #     f"{last_vel_rmse:.9g}" if np.isfinite(last_vel_rmse) else "",
+            # ])
 
             # -------------- Update time/state for next loop ------
-            t_cur += dt_day
-            step_idx += 1
+            # t_cur += dt_day
+            # step_idx += 1
 
         # At this point, the OD row is complete; prepare MASTER update
-        upd = {
-            "_row_index": int(m_idx),
-            "OD_RESULT_SAVED_AS": od_log_name,
-            "OD_FINAL_TIME_JDTDB": float(t_cur - dt_day),  # last time step we wrote
-            "OD_N_STEPS": int(step_idx),
-            "OD_LAST_POS_RMSE": float(last_pos_rmse) if np.isfinite(last_pos_rmse) else np.nan,
-            "OD_LAST_VEL_RMSE": float(last_vel_rmse) if np.isfinite(last_vel_rmse) else np.nan,
-        }
-        updates.append(upd)
-        processed += 1
-
+        # upd = {
+        #     "_row_index": int(m_idx),
+        #     "OD_RESULT_SAVED_AS": od_log_name,
+        #     "OD_FINAL_TIME_JDTDB": float(t_cur - dt_day),  # last time step we wrote
+        #     "OD_N_STEPS": int(step_idx),
+        #     "OD_LAST_POS_RMSE": float(last_pos_rmse) if np.isfinite(last_pos_rmse) else np.nan,
+        #     "OD_LAST_VEL_RMSE": float(last_vel_rmse) if np.isfinite(last_vel_rmse) else np.nan,
+        # }
+        # updates.append(upd)
+        # processed += 1
+        #
         # tidy
-        gc.collect()
+        # gc.collect()
 
     # ===== Gather updates → rank 0 writes MASTER (ordered) → broadcast committed UIDs → write .done =====
     gathered = comm.gather(updates, root=0)
