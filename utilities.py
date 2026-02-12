@@ -17,6 +17,8 @@ from scipy.integrate import odeint
 from matplotlib.patches import Patch
 from matplotlib.lines import Line2D
 from matplotlib.colors import ListedColormap, BoundaryNorm
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
 spice.furnsh("de430.bsp")
@@ -220,6 +222,101 @@ def sphere_mesh(center, radius, n_u=60, n_v=30):
     return X, Y, Z
 
 
+def plot_theta_phi_over_history(history, M, *, deg=True, title=None):
+    """
+    Plot theta (solid) and phi (dashed) vs iteration index for each agent.
+
+    - One figure
+    - One color per agent
+    - Solid line = theta_i
+    - Dashed line = phi_i
+    - Handles mixed history entries:
+        * original mode: entry["x"] is length 2*M
+        * fixed mode: entry["x"] may contain NaNs for fixed agent, and entry may include:
+            - entry["idx_fix"] and entry["use_fixed_agent"]
+            - entry["x_free"] containing only free agents in order of increasing id (common)
+    Assumption for fixed mode:
+        free agents are all agents except idx_fix, ordered ascending.
+    """
+
+    # build per-agent time series (lists, then arrays)
+    thetas = [[] for _ in range(M)]
+    phis   = [[] for _ in range(M)]
+
+    for t, entry in enumerate(history):
+        use_fixed = bool(entry.get("use_fixed_agent", False))
+        idx_fix = entry.get("idx_fix", None)
+
+        x = np.asarray(entry.get("x", []), dtype=float).ravel()
+        x_free = entry.get("x_free", None)
+        if x_free is not None:
+            x_free = np.asarray(x_free, dtype=float).ravel()
+
+        if (not use_fixed) or (idx_fix is None):
+            # original mode: expect full x length 2*M
+            if x.size < 2*M:
+                raise ValueError(f"history[{t}] has x of size {x.size}, expected >= {2*M}")
+            for i in range(M):
+                thetas[i].append(float(x[2*i]))
+                phis[i].append(float(x[2*i + 1]))
+            continue
+
+        # fixed mode
+        if not (0 <= int(idx_fix) < M):
+            raise ValueError(f"history[{t}] idx_fix out of range: {idx_fix}")
+        idx_fix = int(idx_fix)
+
+        # try to read theta/phi from full x if present and not NaN
+        for i in range(M):
+            th = np.nan
+            ph = np.nan
+            if x.size >= 2*M:
+                th = float(x[2*i])
+                ph = float(x[2*i + 1])
+            thetas[i].append(th)
+            phis[i].append(ph)
+
+        # if x had NaNs for fixed-mode, fill from x_free for free agents
+        if x_free is not None:
+            free_idx = [i for i in range(M) if i != idx_fix]  # assumed ordering
+            if x_free.size != 2*len(free_idx):
+                # if it doesn't match, we still keep whatever was in x
+                continue
+
+            for k, i in enumerate(free_idx):
+                thetas[i][-1] = float(x_free[2*k])
+                phis[i][-1]   = float(x_free[2*k + 1])
+
+        # if fixed agent is NaN in x, keep as NaN (or you can hold it constant if you want)
+
+    # convert to arrays
+    thetas = [np.asarray(v, dtype=float) for v in thetas]
+    phis   = [np.asarray(v, dtype=float) for v in phis]
+
+    # radians -> degrees if requested
+    if deg:
+        thetas = [np.rad2deg(v) for v in thetas]
+        phis   = [np.rad2deg(v) for v in phis]
+        ylab = "Angle (deg)"
+    else:
+        ylab = "Angle (rad)"
+
+    # plot
+    plt.figure(figsize=(10, 5.5))
+    for i in range(M):
+        plt.plot(thetas[i], linestyle='-',  linewidth=2.0, label=f"θ A{i}")
+        plt.plot(phis[i],   linestyle='--', linewidth=2.0, label=f"φ A{i}")
+
+    plt.xlabel("History step")
+    plt.ylabel(ylab)
+    plt.title(title if title is not None else "Theta (solid) and Phi (dashed) over history")
+    plt.grid(alpha=0.3)
+    plt.legend(ncol=2, fontsize=9)
+    plt.tight_layout()
+    return thetas, phis
+
+
+
 # -------------------------
 # Main plotting function (3D)
 # -------------------------
@@ -238,7 +335,7 @@ def plot_od_scenario_3d_new(
         u_curr_agents_xyz=None,   # (M,3)
         boresight_line_len=3.0,
 
-        # NEW: optimizer initial pointing vectors (solid long black lines)
+        # optimizer initial pointing vectors (solid long black lines)
         u_init_agents_xyz=None,   # (M,3)
         init_boresight_line_len=None,   # scalar; defaults to ray_length if None
 
@@ -256,7 +353,7 @@ def plot_od_scenario_3d_new(
         d_mahal=2.0,
         true_target_xyz=None,      # (3,)
 
-        # NEW: trajectories (full history / window) to plot as lines
+        # trajectories (full history / window) to plot as lines
         target_mean_traj_xyz=None,   # (K,3)
         true_target_traj_xyz=None,   # (K,3)
 
@@ -269,35 +366,45 @@ def plot_od_scenario_3d_new(
         show_uncertainty=True,
         show_truth=True,
         show_ems=True,
+        show_fov_cones=True,
         title=None,
 
-        # NEW: declutter + styling knobs
+        # declutter + styling knobs
         label_fontsize=9,
-        label_offset_px=10,         # screen-space offsets for 3D labels
+        label_offset_px=10,
         slew_label_offset_px=16,
-        fill_alpha=0.10,            # ~10% fill
-        sparse_wire=True,           # draw only two orthogonal "wires" (circles)
-        fov_n_rays=8,               # fewer rays
-        fov_n_circle=48,            # fewer points around circle
+        fill_alpha=0.10,
+        sparse_wire=True,
+        fov_n_rays=8,
+        fov_n_circle=48,
         coverage_dot_size=1.0,
         coverage_dot_alpha=0.75,
 
-        # NEW: initial pointing style
+        # initial pointing style
         init_boresight_lw=1.5,
         init_boresight_alpha=0.95,
+
+        # ------------------------------------------------------------
+        # NEW: slew history boresight visualization (color progression)
+        # ------------------------------------------------------------
+        # Provide either:
+        #   - dict[int, array_like(K,3)]  mapping spacecraft id -> boresight unit vectors over time
+        #   - list[tuple[int, array_like(K,3)]]  [(sc_id, U_hist), ...]
+        slew_history=None,
+        slew_history_line_len=None,      # defaults to boresight_line_len
+        slew_history_lw=1.8,
+        slew_history_alpha=0.85,
+        slew_history_cmap="viridis",     # any matplotlib cmap name
+        slew_history_every=1,            # plot every Nth history sample
+        slew_history_colorbar=True,
+        slew_history_colorbar_label="Slew history step",
+        slew_history_norm_mode="per_agent",  # "per_agent" or "global"
 ):
     """
     Pure 3D visualization: everything is passed in (positions, vectors, cov, tracks).
     Returns (fig, ax).
-
-    Changes vs prior version:
-      - added u_init_agents_xyz: solid long black initial optimizer vectors
-      - decluttered labels (agent + slew) using screen-space offsets
-      - EMS sphere + uncertainty ellipsoid: light filled surface + sparse wires (two orthogonal circles)
-      - optional mean/true trajectories (lines) + current instant markers kept
-      - coverage: only double + 3+ (no single)
-      - FOV cone: fewer rays by default
     """
+
 
     def _as_3(x):
         if x is None:
@@ -305,21 +412,11 @@ def plot_od_scenario_3d_new(
         return np.asarray(x, dtype=float).reshape(3,)
 
     def _annotate3d(ax_, text, xyz, *, dx=0, dy=0, fontsize=9, color="black"):
-        """
-        Place a readable label near a 3D point using a screen-space offset (pixels).
-        This avoids stacking/overlap much better than raw ax.text in data coords.
-        """
         x, y, z = map(float, xyz)
         x2, y2, _ = proj3d.proj_transform(x, y, z, ax_.get_proj())
         ax_.annotate(
-            text,
-            xy=(x2, y2),
-            xytext=(dx, dy),
-            textcoords="offset points",
-            ha="left",
-            va="bottom",
-            fontsize=fontsize,
-            color=color,
+            text, xy=(x2, y2), xytext=(dx, dy), textcoords="offset points",
+            ha="left", va="bottom", fontsize=fontsize, color=color,
         )
 
     def _sphere_surface(ax_, c, R, *, alpha=0.10, n_u=26, n_v=13, color="orange", label=None):
@@ -329,34 +426,21 @@ def plot_od_scenario_3d_new(
         X = c[0] + R*np.cos(uu)*np.sin(vv)
         Y = c[1] + R*np.sin(uu)*np.sin(vv)
         Z = c[2] + R*np.cos(vv)
-        surf = ax_.plot_surface(X, Y, Z, rstride=1, cstride=1, linewidth=0, alpha=alpha, color=color)
+        ax_.plot_surface(X, Y, Z, rstride=1, cstride=1, linewidth=0, alpha=alpha, color=color)
         if label is not None:
             proxy = plt.Line2D([0], [0], linestyle="none", marker="s", color=color, alpha=alpha, label=label)
             ax_.add_artist(ax_.legend(handles=[proxy], loc="upper right"))
-        return surf
 
     def _plot_two_orth_circles(ax_, c, A3x3, *, n=240, color="orange", lw=1.0, alpha=0.6, label=None):
-        """
-        Draw two orthogonal 'wires' of an ellipsoid-like surface.
-
-        Points are generated as:
-          p(t) = c + A @ q(t)
-        where q(t) is a unit circle in two orthogonal planes.
-        """
         t = np.linspace(0, 2*np.pi, n)
         q_xy = np.stack([np.cos(t), np.sin(t), 0*t], axis=1)
         q_xz = np.stack([np.cos(t), 0*t, np.sin(t)], axis=1)
-
         P1 = c.reshape(1, 3) + (q_xy @ A3x3.T)
         P2 = c.reshape(1, 3) + (q_xz @ A3x3.T)
-
         ax_.plot(P1[:, 0], P1[:, 1], P1[:, 2], color=color, lw=lw, alpha=alpha, label=label)
         ax_.plot(P2[:, 0], P2[:, 1], P2[:, 2], color=color, lw=lw, alpha=alpha)
 
     def _ellipsoid_surface(ax_, mu, P, d, *, alpha=0.10, n_u=26, n_v=13, color="tab:red"):
-        """
-        Light filled ellipsoid surface for (x-mu)^T P^{-1} (x-mu) = d^2.
-        """
         w, V = np.linalg.eigh(P)
         w = np.clip(w, 0.0, None)
         Aell = (V * (np.sqrt(w) * float(d))) @ V.T  # 3x3
@@ -367,14 +451,20 @@ def plot_od_scenario_3d_new(
         qx = np.cos(uu) * np.sin(vv)
         qy = np.sin(uu) * np.sin(vv)
         qz = np.cos(vv)
-        Q = np.stack([qx, qy, qz], axis=-1)  # (n_v,n_u,3)
+        Q = np.stack([qx, qy, qz], axis=-1)
 
         X = mu[0] + (Aell[0, 0]*Q[..., 0] + Aell[0, 1]*Q[..., 1] + Aell[0, 2]*Q[..., 2])
         Y = mu[1] + (Aell[1, 0]*Q[..., 0] + Aell[1, 1]*Q[..., 1] + Aell[1, 2]*Q[..., 2])
         Z = mu[2] + (Aell[2, 0]*Q[..., 0] + Aell[2, 1]*Q[..., 1] + Aell[2, 2]*Q[..., 2])
 
         ax_.plot_surface(X, Y, Z, rstride=1, cstride=1, linewidth=0, alpha=alpha, color=color)
-        return Aell  # for sparse wires
+        return Aell
+
+    def _normalize_rows(U, eps=1e-12):
+        U = np.asarray(U, dtype=float)
+        n = np.linalg.norm(U, axis=1, keepdims=True)
+        n = np.maximum(n, eps)
+        return U / n
 
     # ---- inputs ----
     A = np.asarray(agents_xyz, dtype=float)
@@ -412,37 +502,102 @@ def plot_od_scenario_3d_new(
         zall = np.concatenate([np.asarray(v).ravel() for v in zs])
 
         pad = 2.0
-        if xlim is None:
-            xlim = (float(np.min(xall) - pad), float(np.max(xall) + pad))
-        if ylim is None:
-            ylim = (float(np.min(yall) - pad), float(np.max(yall) + pad))
-        if zlim is None:
-            zlim = (float(np.min(zall) - pad), float(np.max(zall) + pad))
+        if xlim is None: xlim = (float(np.min(xall) - pad), float(np.max(xall) + pad))
+        if ylim is None: ylim = (float(np.min(yall) - pad), float(np.max(yall) + pad))
+        if zlim is None: zlim = (float(np.min(zall) - pad), float(np.max(zall) + pad))
 
     fig = plt.figure(figsize=(9, 7))
     ax = fig.add_subplot(111, projection="3d")
 
+    # ---------------------------------------------------------------------
+    # NEW: Slew history boresight lines w/ color progression + optional cbar
+    # ---------------------------------------------------------------------
+    if slew_history is not None:
+        # normalize input to dict[int, (K,3)]
+        if isinstance(slew_history, dict):
+            hist_map = dict(slew_history)
+        else:
+            # assume iterable of (id, hist)
+            hist_map = {int(k): v for (k, v) in slew_history}
+
+        Lhist = float(boresight_line_len) if (slew_history_line_len is None) else float(slew_history_line_len)
+        cmap = cm.get_cmap(slew_history_cmap)
+
+        # decide normalization mode
+        if slew_history_norm_mode not in ("per_agent", "global"):
+            raise ValueError("slew_history_norm_mode must be 'per_agent' or 'global'")
+
+        if slew_history_norm_mode == "global":
+            # global max steps across provided agents (after decimation)
+            maxK = 0
+            for sc_id, Uh in hist_map.items():
+                Uh = np.asarray(Uh, dtype=float)
+                if Uh.ndim != 2 or Uh.shape[1] != 3:
+                    raise ValueError(f"slew_history[{sc_id}] must be (K,3)")
+                K = Uh.shape[0]
+                Kd = (K + (slew_history_every - 1)) // max(int(slew_history_every), 1)
+                maxK = max(maxK, Kd)
+            norm_global = mcolors.Normalize(vmin=0, vmax=max(0, maxK - 1))
+
+        # plot each requested agent history
+        for sc_id, Uh in hist_map.items():
+            sc_id = int(sc_id)
+            if not (0 <= sc_id < M):
+                # silently skip invalid IDs (or raise if you prefer)
+                continue
+
+            Uh = np.asarray(Uh, dtype=float)
+            if Uh.ndim != 2 or Uh.shape[1] != 3:
+                raise ValueError(f"slew_history[{sc_id}] must be (K,3)")
+
+            # decimate
+            step = max(int(slew_history_every), 1)
+            Uh = Uh[::step]
+            if Uh.shape[0] == 0:
+                continue
+
+            Uh = _normalize_rows(Uh)
+
+            if slew_history_norm_mode == "per_agent":
+                norm = mcolors.Normalize(vmin=0, vmax=max(0, Uh.shape[0] - 1))
+            else:
+                norm = norm_global
+
+            # draw segments/lines from spacecraft position
+            p0 = A[sc_id]
+            for k in range(Uh.shape[0]):
+                col = cmap(norm(k))
+                pend = p0 + Uh[k] * Lhist
+                ax.plot([p0[0], pend[0]], [p0[1], pend[1]], [p0[2], pend[2]],
+                        color=col, lw=float(slew_history_lw), alpha=float(slew_history_alpha),
+                        label=f"Slew history A{sc_id}" if (k == 0) else None)
+
+        # one colorbar for the whole figure (optional)
+        if bool(slew_history_colorbar):
+            sm = cm.ScalarMappable(
+                norm=(norm_global if slew_history_norm_mode == "global"
+                      else mcolors.Normalize(vmin=0, vmax=1)),
+                cmap=cmap
+            )
+            sm.set_array([])
+
+            cbar = fig.colorbar(sm, ax=ax, pad=0.02, fraction=0.04)
+            cbar.set_label(str(slew_history_colorbar_label))
+
+            if slew_history_norm_mode == "per_agent":
+                # explain that color is "early -> late" per agent
+                cbar.set_ticks([0.0, 1.0])
+                cbar.set_ticklabels(["early", "late"])
+
     # ---- coverage point cloud (ONLY double + 3+) ----
     if show_coverage:
-        # If uncertainty is available, build the sampling box from the ellipsoid extents
-        # (axis-aligned cuboid that bounds the ellipsoid).
         if (target_mean_xyz is not None) and (target_cov_xyz is not None):
-            mu = np.asarray(target_mean_xyz, dtype=float).reshape(3, )
+            mu = np.asarray(target_mean_xyz, dtype=float).reshape(3,)
             P = np.asarray(target_cov_xyz, dtype=float).reshape(3, 3)
-
-            # eigen-decomp of covariance
             w, V = np.linalg.eigh(P)
             w = np.clip(w, 0.0, None)
-
-            # A such that x = mu + A @ q, ||q||=1 represents the d_mahal ellipsoid
-            # (matches your ellipsoid drawing)
-            Aell = (V * (np.sqrt(w) * float(d_mahal))) @ V.T  # 3x3
-
-            # axis-aligned bounding box half-widths = sum_j |A[i,j]|
-            # because max over unit ball of |(A q)_i| is the L2 row norm,
-            # but |A| row-sum is a safe (conservative) bound that’s cheap + robust.
-            # If you prefer tighter: use row L2 norm instead (see note below).
-            half = np.sum(np.abs(Aell), axis=1)  # (3,)
+            Aell = (V * (np.sqrt(w) * float(d_mahal))) @ V.T
+            half = np.sum(np.abs(Aell), axis=1)
 
             xlim_cov = (float(mu[0] - half[0]), float(mu[0] + half[0]))
             ylim_cov = (float(mu[1] - half[1]), float(mu[1] + half[1]))
@@ -451,13 +606,10 @@ def plot_od_scenario_3d_new(
             xg = np.linspace(xlim_cov[0], xlim_cov[1], int(Nx))
             yg = np.linspace(ylim_cov[0], ylim_cov[1], int(Ny))
             zg = np.linspace(zlim_cov[0], zlim_cov[1], int(Nz))
-
         else:
-            # fallback to provided/global limits if covariance not provided
-            Nx_i, Ny_i, Nz_i = int(Nx), int(Ny), int(Nz)
-            xg = np.linspace(xlim[0], xlim[1], Nx_i)
-            yg = np.linspace(ylim[0], ylim[1], Ny_i)
-            zg = np.linspace(zlim[0], zlim[1], Nz_i)
+            xg = np.linspace(xlim[0], xlim[1], int(Nx))
+            yg = np.linspace(ylim[0], ylim[1], int(Ny))
+            zg = np.linspace(zlim[0], zlim[1], int(Nz))
 
         XX, YY, ZZ = np.meshgrid(xg, yg, zg, indexing="xy")
         grid = np.stack([XX.ravel(), YY.ravel(), ZZ.ravel()], axis=1)
@@ -473,7 +625,6 @@ def plot_od_scenario_3d_new(
         if np.any(mask):
             Pcov = grid[mask]
             Ccov = cov[mask]
-
             m2 = (Ccov == 2)
             m3 = (Ccov >= 3)
 
@@ -512,13 +663,12 @@ def plot_od_scenario_3d_new(
         ax.plot(Tt[:, 0], Tt[:, 1], Tt[:, 2], lw=1.6, alpha=0.8, color="green",
                 label="True trajectory")
 
-    # ---- NEW: plot optimizer initial pointing as long solid black lines ----
+    # ---- initial optimizer pointing (solid black lines) ----
     if u_init_agents_xyz is not None:
         Ui = np.asarray(u_init_agents_xyz, dtype=float)
         if Ui.shape != (M, 3):
             raise ValueError("u_init_agents_xyz must be (M,3) matching agents")
         Ui = _normalize_rows(Ui)
-
         Linit = float(ray_length) if (init_boresight_line_len is None) else float(init_boresight_line_len)
 
         for i in range(M):
@@ -528,18 +678,17 @@ def plot_od_scenario_3d_new(
                     alpha=float(init_boresight_alpha),
                     label="Initial optimizer pointing" if i == 0 else None)
 
-    # ---- FOV cones + agent markers + decluttered labels ----
-    for i in range(M):
-        plot_fov_cone(ax, A[i], Uopt[i], theta_h_rad, float(ray_length),
-                      n_rays=int(fov_n_rays), n_circle=int(fov_n_circle),
-                      alpha=0.75, lw=1.0, color="tab:blue",
-                      label="Agent FOV" if i == 0 else None)
+    # ---- FOV cones + agent markers + labels ----
+    if show_fov_cones:
+        for i in range(M):
+            plot_fov_cone(ax, A[i], Uopt[i], theta_h_rad, float(ray_length),
+                          n_rays=int(fov_n_rays), n_circle=int(fov_n_circle),
+                          alpha=0.75, lw=1.0, color="tab:blue",
+                          label="Agent FOV" if i == 0 else None)
 
-        ax.scatter(A[i, 0], A[i, 1], A[i, 2],
-                   s=40, color="tab:blue",
-                   label="Agent position" if i == 0 else None)
+            ax.scatter(A[i, 0], A[i, 1], A[i, 2], s=40, color="tab:blue",
+                       label="Agent position" if i == 0 else None)
 
-    # ---- dotted current boresight + decluttered slew labels ----
     if u_curr_agents_xyz is not None:
         Uc = np.asarray(u_curr_agents_xyz, dtype=float)
         if Uc.shape != (M, 3):
@@ -560,32 +709,29 @@ def plot_od_scenario_3d_new(
             _annotate3d(ax, f"{slew_deg:.1f}°", p_end, dx=dx, dy=dy,
                         fontsize=label_fontsize, color="black")
 
-    # ---- agent labels after projection is defined (screen-space offsets) ----
     for i in range(M):
         dx = int(label_offset_px * (1 if (i % 2 == 0) else -1))
         dy = int(label_offset_px * (1 if ((i // 2) % 2 == 0) else -1))
         _annotate3d(ax, f"A{i}", A[i], dx=dx, dy=dy, fontsize=label_fontsize, color="tab:blue")
 
-    # ---- target mean + uncertainty (fill + sparse wire) ----
+    # ---- uncertainty ellipsoid ----
     if show_uncertainty and (target_mean_xyz is not None) and (target_cov_xyz is not None):
         mu = np.asarray(target_mean_xyz, dtype=float).reshape(3,)
         P = np.asarray(target_cov_xyz, dtype=float).reshape(3, 3)
-
         ax.scatter(mu[0], mu[1], mu[2], marker="x", s=50, linewidths=2,
                    label="Target mean (current)", color="tab:red")
-
         Aell = _ellipsoid_surface(ax, mu, P, float(d_mahal), alpha=float(fill_alpha), color="tab:red")
         if sparse_wire:
             _plot_two_orth_circles(ax, mu, Aell, color="tab:red", lw=1.1, alpha=0.65,
                                    label="Uncertainty (2 wires)")
 
-    # ---- true target current marker ----
+    # ---- true marker ----
     if show_truth and (true_target_xyz is not None):
         tr = np.asarray(true_target_xyz, dtype=float).reshape(3,)
         ax.scatter(tr[0], tr[1], tr[2], s=40, color="green", marker="o",
                    label="True position (current)")
 
-    # ---- EMS sphere (fill + sparse wire) ----
+    # ---- EMS sphere ----
     if show_ems and (ems_center_xyz is not None) and (ems_radius is not None) and (float(ems_radius) > 0):
         c = np.asarray(ems_center_xyz, dtype=float).reshape(3,)
         R = float(ems_radius)
@@ -601,7 +747,6 @@ def plot_od_scenario_3d_new(
             ax.plot_wireframe(Xs, Ys, Zs, rstride=2, cstride=2, linewidth=0.7, alpha=0.35,
                               label="EMS sphere", color="orange")
 
-    # ---- labels, limits, title ----
     ax.set_xlim(xlim); ax.set_ylim(ylim); ax.set_zlim(zlim)
     ax.set_xlabel("x"); ax.set_ylabel("y"); ax.set_zlabel("z")
 
@@ -611,9 +756,9 @@ def plot_od_scenario_3d_new(
 
     ax.grid(alpha=0.25)
     set_axes_equal_3d(ax)
-
-    ax.legend(loc="upper right")
+    # ax.legend(loc="upper right")
     return fig, ax
+
 
 
 

@@ -19,7 +19,7 @@ import gc
 import glob
 import datetime as dt
 import matplotlib.pyplot as plt
-from od_attcoord import AttitudeCoordinator
+from od_attcoord_edited import AttitudeCoordinator, compute_J_grid_theta_phi_single_free
 import math
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
@@ -1662,6 +1662,9 @@ def run_OD(config):
                 alpha_max,
                 omega_max,
                 d_M=3,
+                use_fixed_agent=True,
+                fixed_agent_idx=int(setup["sc_detecting_id"]),
+                fixed_agent_u=sc_pointings_eme[int(setup["sc_detecting_id"]), :],
                 coverage_point=ast_eme_traj_kms[:, :3])
 
             # visualize att_coord result
@@ -1808,6 +1811,46 @@ def run_OD(config):
                 agents_xyz = sc_eme_ae_kms
                 target_cov_xyz = P_cart_eme
 
+                def build_slew_history_from_opt_series(opt_series, ids, *, key_u="u", normalize=True):
+                    """
+                    opt_series: list[dict] where each dict has key 'u' = (M,3) boresight array for that step/restart
+                    ids: list of spacecraft indices to extract, e.g. [0,1]
+                    Returns: dict[int, (K,3)] mapping sc_id -> history boresight vectors over time (K=len(opt_series))
+                    """
+                    ids = [int(i) for i in ids]
+                    out = {i: [] for i in ids}
+
+                    for row_idx, row in enumerate(opt_series):
+                        if key_u not in row:
+                            raise KeyError(f"Row {row_idx} missing key '{key_u}'")
+                        U = np.asarray(row[key_u], dtype=float)
+
+                        if U.ndim != 2 or U.shape[1] != 3:
+                            raise ValueError(f"Row {row_idx} '{key_u}' must be (M,3), got {U.shape}")
+
+                        M = U.shape[0]
+                        for i in ids:
+                            if not (0 <= i < M):
+                                raise IndexError(f"Row {row_idx}: id {i} out of range for M={M}")
+                            out[i].append(U[i].copy())
+
+                    # stack + optional normalize
+                    for i in ids:
+                        Ui = np.asarray(out[i], dtype=float)  # (K,3)
+                        if Ui.size == 0:
+                            Ui = Ui.reshape(0, 3)
+
+                        if normalize and Ui.shape[0] > 0:
+                            n = np.linalg.norm(Ui, axis=1, keepdims=True)
+                            n = np.maximum(n, 1e-12)
+                            Ui = Ui / n
+
+                        out[i] = Ui
+
+                    return out
+                ids = [0, 1, 2]
+                slew_history = build_slew_history_from_opt_series(res_kcoverage.extra["history"], ids)
+
                 fig, ax = util.plot_od_scenario_3d_new(
                     t_label=best_epoch,
                     agents_xyz=agents_xyz,
@@ -1816,7 +1859,7 @@ def run_OD(config):
                     ray_length=ray_length,
                     u_curr_agents_xyz=sc_pointings_eme,
                     boresight_line_len=0.5e6,
-                    u_init_agents_xyz=res_kcoverage.extra["history"][0]["u"],
+                    u_init_agents_xyz=None,
                     init_boresight_line_len=8e6,
                     xlim=(-5e6, 5e6), ylim=(-5e6, 5e6), zlim=(-5e6, 5e6),
                     Nx=300, Ny=300, Nz=300,
@@ -1833,7 +1876,10 @@ def run_OD(config):
                     show_uncertainty=True,
                     show_truth=True,
                     show_ems=True,
-                    title="3D OD Scenario Demo (EME)"
+                    show_fov_cones=True,
+                    title="3D OD Scenario Demo (EME)",
+                    slew_history=slew_history,
+                    slew_history_line_len=5e6
                 )
 
 
@@ -1842,6 +1888,115 @@ def run_OD(config):
                     result_kcoverage_series,
                     title="Dual coverage score vs objective (best per epoch)"
                 )
+
+
+                # theta and phi progression over optimization
+                thetas, phis = util.plot_theta_phi_over_history(res_kcoverage.extra["history"],
+                                                                int(config["num_spacecraft"]),
+                                                                deg=True)
+
+
+                # map of cost vs. optimization - works for m=2 and fixed
+                # --- NEW: theta/phi grid for ONE free agent (fixed-mode, M=2) --
+                viz_cost_map = False
+                if viz_cost_map:
+
+                    # pick which agent is fixed and which is free
+                    idx_fix = int(setup["sc_detecting_id"])
+                    idx_free = 1 - idx_fix
+
+                    # fixed boresight (use whatever you are holding fixed in the optimizer)
+                    u_fix = sc_pointings_eme[idx_fix]  # or your stored detection LOS unit vector
+
+                    TH_free_deg, PH_free_deg, J_grid = compute_J_grid_theta_phi_single_free(
+                        ast_iod_eme[:3], target_cov_xyz, agents_xyz, sc_pointings_eme, theta_h_rad,
+                        idx_fix=idx_fix,
+                        u_fix=u_fix,
+                        idx_free=idx_free,
+                        theta_range_rad=(-0.5 * np.pi, 0.5 * np.pi),
+                        phi_range_rad=(0.0, 2 * np.pi),
+                        d_M=3.0, kappa_sigma=config['optimizer_att_coord']['kappa_sigma'],
+                        n_mc=20000,
+                        n_grid_theta=100,
+                        n_grid_phi=140,
+                    )
+
+                    # 3D surface: theta_free vs phi_free vs J
+                    fig3d = plt.figure(figsize=(9, 6))
+                    ax3d = fig3d.add_subplot(111, projection="3d")
+                    ax3d.plot_surface(
+                        TH_free_deg, PH_free_deg, J_grid,
+                        rstride=1, cstride=1, linewidth=0.2, alpha=0.9
+                    )
+                    ax3d.set_xlabel(rf'$\theta_{{{idx_free}}}$ (deg)')
+                    ax3d.set_ylabel(rf'$\phi_{{{idx_free}}}$ (deg)')
+                    ax3d.set_zlabel(r'$J_t$')
+                    ax3d.set_title(rf'$J_t(\theta,\phi)$ for free agent {idx_free} (fixed agent {idx_fix})')
+                    plt.tight_layout()
+
+                    # contour plot
+                    plt.figure(figsize=(7, 5.5))
+                    cs = plt.contourf(TH_free_deg, PH_free_deg, J_grid, levels=35)
+                    plt.colorbar(cs, label=r'$J_t$')
+                    plt.xlabel(rf'$\theta_{{{idx_free}}}$ (deg)')
+                    plt.ylabel(rf'$\phi_{{{idx_free}}}$ (deg)')
+                    plt.title(rf'$J_t(\theta,\phi)$ for free agent {idx_free} (fixed agent {idx_fix})')
+                    plt.grid(alpha=0.3)
+
+                    # ---- overlay optimizer paths from history (theta, phi) for the free agent ----
+                    restart_indices = sorted({entry["restart"] for entry in res_kcoverage.extra["history"]})
+
+                    # colors = ['white', 'yellow', 'cyan', 'magenta', 'green', 'orange']
+                    markers = ['o', 's', '^', 'D', 'x', '+']
+
+                    for k, r in enumerate(restart_indices):
+                        path_entries = [entry for entry in res_kcoverage.extra["history"] if entry["restart"] == r]
+                        if not path_entries:
+                            continue
+
+                        theta_path_deg = []
+                        phi_path_deg = []
+
+                        for entry in path_entries:
+                            # In fixed-mode you likely store x_free for the reduced vector,
+                            # but some rows also store full x with NaNs for fixed agent.
+                            if entry.get("use_fixed_agent", False) and ("x_free" in entry) and (
+                                    entry.get("idx_fix", None) is not None):
+                                # x_free packs only the non-fixed agents in order of free_idx.
+                                # For M=2 there is exactly one free agent, so:
+                                xk = np.asarray(entry["x_free"], dtype=float).ravel()
+                                th = xk[0]
+                                ph = xk[1]
+                            else:
+                                # fallback: original/full x: [th0,ph0, th1,ph1, th2,ph2, ...]
+                                xk = np.asarray(entry["x"], dtype=float).ravel()
+                                th = xk[2 * idx_free]
+                                ph = xk[2 * idx_free + 1]
+
+                            theta_path_deg.append(np.rad2deg(th))
+                            phi_path_deg.append(np.rad2deg(ph))
+
+                        theta_path_deg = np.asarray(theta_path_deg)
+                        phi_path_deg = np.asarray(phi_path_deg)
+
+                        col = colors[k % len(colors)]
+                        m = markers[k % len(markers)]
+
+                        label = f"Trial {r}"
+                        if r == 0:
+                            label += " (warm start)"
+
+                        plt.plot(
+                            theta_path_deg, phi_path_deg,
+                            linestyle='-',
+                            marker=m,
+                            color=col,
+                            lw=1.5,
+                            ms=5,
+                            label=label
+                        )
+
+                    plt.legend(loc='upper right')
 
                 plt.show()
 

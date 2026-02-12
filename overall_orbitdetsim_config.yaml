@@ -136,15 +136,15 @@ epochs:
 d_mahal: 3.0
 
 optimizer_att_coord:
-  kappa_sigma: 150.0
+  kappa_sigma: 1500.0
   n_mc: 20000
   n_restarts: 1
 
 ems:
   p_em: [0.0, 0.0, 0.0]
-  R_em: 0.1e+6
-  alpha_s_deg: 2
-  lambda_em: 1.0
+  R_em: 0.5e+6
+  alpha_s_deg: 1
+  lambda_em: 0.5
   beta_zeta: 115.0
 
 

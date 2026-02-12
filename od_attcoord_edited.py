@@ -98,7 +98,7 @@ def k2_tilde(y_samples, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma)
 
     if M ==3:
         k2 = C[0] * C[1] * one_minus_C[2] + C[0] * C[2] * one_minus_C[1] + C[1] * C[2] * one_minus_C[0]
-        k1 = 0.01 * (C[0] * one_minus_C[1] * one_minus_C[2] + C[2] * one_minus_C[0] * one_minus_C[1] + C[1] * one_minus_C[0] * one_minus_C[2])
+        k1 = 0.5 * (C[0] * one_minus_C[1] * one_minus_C[2] + C[2] * one_minus_C[0] * one_minus_C[1] + C[1] * one_minus_C[0] * one_minus_C[2])
         return k1 + k2
 
     if M == 4:
@@ -516,7 +516,8 @@ def init_theta_phi_boundary_projection(
     """
 
     rng = np.random.default_rng(seed=seed)
-    jitter_values = np.deg2rad([0.0, 1.0, -1.0])  # small theta jitter, in radians
+    # jitter_values = np.deg2rad([0.0, 1.0, -1.0])  # small theta jitter, in radians
+    jitter_values = np.deg2rad([0.0, 0.0, -0.0])  # small theta jitter, in radians
     p_hat = np.asarray(p_hat, dtype=float)
     p_agents = np.asarray(p_agents, dtype=float)
     u_curr_agents = np.asarray(u_curr_agents, dtype=float)
@@ -564,6 +565,7 @@ def init_theta_phi_boundary_projection(
         u = cos(theta)*u_curr + sin(theta)*(cos(phi)*e1 + sin(phi)*e2)
         All vectors assumed unit, theta in [0, pi].
         """
+        phi = float(phi) % (2 * np.pi)
         return (
             np.cos(theta) * u_curr
             + np.sin(theta) * (np.cos(phi) * e1 + np.sin(phi) * e2)
@@ -611,7 +613,8 @@ def init_theta_phi_boundary_projection(
 
         # Spherical-like angles
         theta_i = np.arctan2(s, a)      # [0, pi]
-        phi_i = np.arctan2(b2, b1)      # (-pi, pi]
+        phi_i = float(np.arctan2(b2, b1))
+        phi_i = phi_i % (2 * np.pi)  # [0, 2pi)
 
         # Clamp theta to slew interval
         theta_i = np.clip(theta_i, theta_lower[i], theta_upper[i])
@@ -638,7 +641,8 @@ def init_theta_phi_boundary_projection(
                 theta_i = theta_star[i]  # revert
 
             x0[2 * i] = theta_i
-            x0[2 * i + 1] = phi_star[i]
+            x0[2*i+1] = float(phi_star[i] % (2*np.pi))
+
         return x0
 
     # --------------------------------------------------
@@ -771,7 +775,8 @@ def init_theta_phi_boundary_projection(
         s = np.sqrt(b1**2 + b2**2)
 
         theta_i = np.arctan2(s, a)
-        phi_i = np.arctan2(b2, b1)
+        phi_i = float(np.arctan2(b2, b1))
+        phi_i = phi_i % (2 * np.pi)  # [0, 2pi)
 
         # Ensure theta within bounds (small numeric repair if needed)
         theta_i = np.clip(theta_i, theta_lower[i], theta_upper[i])
@@ -943,7 +948,7 @@ def optimize_pointing_lbfgs_joint(
     if not use_fixed:
         for i in range(M):
             bounds.append((theta_lower[i], theta_upper[i]))  # theta_i
-            bounds.append((0.0, 2*np.pi))                    # phi_i
+            bounds.append((0.0, 2*np.pi - 1e-12))                    # phi_i
     else:
         for i in free_idx:
             bounds.append((theta_lower[int(i)], theta_upper[int(i)]))  # theta_i
@@ -1610,4 +1615,97 @@ def all_agents_can_point_to_mean(
         per_ok[i] = True
 
     return bool(np.all(per_ok)), per_ok, u_mean, theta_req, theta_s_t
+
+
+def compute_J_grid_theta_phi_single_free(
+    p_hat, P_p, p_agents, u_curr_agents,
+    theta_h,
+    *,
+    idx_fix: int,
+    u_fix,                      # (3,) fixed boresight for idx_fix (already in same frame)
+    idx_free: int | None = None, # if None, inferred as the other agent when M=2
+    theta_range_rad=None,        # tuple (lo, hi); if None -> (theta_lower_free, theta_upper_free) OR (-pi/2, pi/2)
+    phi_range_rad=(0.0, 2*np.pi),
+    d_M=3.0, kappa_sigma=100.0,
+    n_mc=20000, n_grid_theta=61, n_grid_phi=121,
+    seed=0,
+    use_cached_y=True,
+):
+    """
+    Grid over (theta, phi) for ONE free agent, with the other agent fixed.
+
+    Designed for fixed-mode attitude coordination (e.g., M=2).
+    Uses u_from_cap(u_curr_free, theta, phi) for the free agent, and u_fix for idx_fix.
+
+    Returns:
+      TH_deg  : (n_grid_theta, n_grid_phi) meshgrid of theta in degrees
+      PH_deg  : (n_grid_theta, n_grid_phi) meshgrid of phi in degrees
+      J_grid  : (n_grid_theta, n_grid_phi) J values
+    """
+    rng = np.random.default_rng(seed)
+
+    p_agents = np.asarray(p_agents, dtype=float)
+    u_curr_agents = np.asarray(u_curr_agents, dtype=float)
+
+    M = int(p_agents.shape[0])
+    if M < 2:
+        raise ValueError("Need at least 2 agents")
+    if not (0 <= idx_fix < M):
+        raise ValueError("idx_fix out of range")
+
+    if idx_free is None:
+        if M != 2:
+            raise ValueError("idx_free must be provided when M != 2")
+        idx_free = 1 - int(idx_fix)
+    if idx_free == idx_fix:
+        raise ValueError("idx_free must differ from idx_fix")
+    if not (0 <= idx_free < M):
+        raise ValueError("idx_free out of range")
+
+    # normalize u_fix
+    u_fix = np.asarray(u_fix, dtype=float).reshape(3,)
+    u_fix = u_fix / max(np.linalg.norm(u_fix), 1e-12)
+
+    # MC cache
+    if use_cached_y:
+        y_cached = make_cached_y(P_p, d_M, n_mc, seed=seed + 123)
+    else:
+        y_cached = None
+
+    # theta range
+    if theta_range_rad is None:
+        # If you have per-agent theta bounds in your coordinator, pass them in explicitly.
+        # Otherwise, a generic sweep:
+        theta_range_rad = (-0.5*np.pi, 0.5*np.pi)
+
+    th_lo, th_hi = map(float, theta_range_rad)
+    ph_lo, ph_hi = map(float, phi_range_rad)
+
+    th_vals = np.linspace(th_lo, th_hi, int(n_grid_theta))
+    ph_vals = np.linspace(ph_lo, ph_hi, int(n_grid_phi))
+
+    J_grid = np.zeros((th_vals.size, ph_vals.size), dtype=float)
+
+    # full u_agents container
+    u_agents = np.zeros_like(u_curr_agents, dtype=float)
+    u_agents[idx_fix] = u_fix
+
+    u_curr_free = u_curr_agents[idx_free]
+    u_curr_free = np.asarray(u_curr_free, dtype=float).reshape(3,)
+    u_curr_free = u_curr_free / max(np.linalg.norm(u_curr_free), 1e-12)
+
+    for a, th in enumerate(th_vals):
+        for b, ph in enumerate(ph_vals):
+            u_agents[idx_free] = u_from_cap(u_curr_free, float(th), float(ph))
+
+            J_val = J_t_dual_coverage(
+                p_hat, P_p, p_agents, u_agents,
+                theta_h, d_M=d_M, kappa_sigma=kappa_sigma,
+                n_mc=n_mc, y_samples_cached=y_cached
+            )
+            J_grid[a, b] = float(J_val)
+
+    TH, PH = np.meshgrid(th_vals, ph_vals, indexing="ij")
+    return np.rad2deg(TH), np.rad2deg(PH), J_grid
+
 
