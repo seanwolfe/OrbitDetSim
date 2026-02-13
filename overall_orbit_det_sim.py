@@ -1341,7 +1341,7 @@ def run_OD(config):
         # try:
 
         # ----------------------------------------------
-        # Setup
+        # Setup from iod
         # ---------------------------------------------
         setup = od_setup_from_iod(config, row, util=util, sp=sp)  # dict containing a lot of initial data
 
@@ -1567,6 +1567,16 @@ def run_OD(config):
         # attitude coordinator
         attitude_coordination = AttitudeCoordinator(config)
 
+        # asteroid
+        minimoon = Asteroid(row['ID_AST'], row['INDEX_USED'], config, current_state_eme=setup['frames']['ast_eme_ae_kms'])
+
+        # spacecraft
+
+
+        # formation
+
+
+
         # ----------------------------------------------------------
         # Time loop
         # ----------------------------------------------------------
@@ -1623,7 +1633,7 @@ def run_OD(config):
             ast_eme_traj_kms = n_body_propagator.propagate(ast_eme_state_kms, t_cur, big_t_set_jdtdb)
 
             # to visualize the possible att coord scenarios
-            viz_prop_flag = False
+            viz_prop_flag = True
             if viz_prop_flag:
                 util.plot_priors_positions_and_cov_2d(
                     x_ts,
