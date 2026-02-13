@@ -978,33 +978,33 @@ def run_IOD(config):
                 import astropy.units as u
 
                 # Fixed parameters you provided
-                m_2 = 0.1
+                m_2 = config['m2']
                 m_12 = (1.0 - m_2) / 2.0
 
                 parameters = {
-                    "NUMBER_OF_OBSERVATIONS": 16,
-                    "TIME_DELTA": 0.6 * u.day,
-                    "TOTAL_POINTS": 250,
-                    "SAMPLING_METHOD": "uniform",
+                    "NUMBER_OF_OBSERVATIONS": config["NUMBER_OF_OBSERVATIONS"],
+                    "TIME_DELTA": config['TIME_DELTA'] * u.day,
+                    "TOTAL_POINTS": config['TOTAL_POINTS'],
+                    "SAMPLING_METHOD": config['SAMPLING_METHOD'],
                     "LAYER_RATIOS": [(0.0, m_12), (m_12, m_12 + m_2), (m_12 + m_2, 1.0)],
-                    "INPUT_RANGE": (-1, 1),
-                    "HIDDEN_DIMENSION": 250,
-                    "PHYSICS_WEIGHT": 1e3,
-                    "LAMBDA_DIST": 1e-2,
-                    "WEIGHT_SCALE_FACTOR": 1e-2,
-                    "NUMBER_OF_ITERATIONS": 2,
-                    "TEMPERATURE": 1e8,
-                    "X_TOLERANCE": 1e-15,
-                    "F_TOLERANCE": 1e-15,
-                    "MAX_FUNCTION_EVAL": 1000,
-                    "MAX_ITERATiONS": 1000,
-                    "G_TOLERANCE": 1e-15,
-                    "MIN_RHO": 0.0006684587122,
-                    "MAX_RHO": 0.06684587122,
-                    "MIN_RHO_DOT": -0.05033557046,
-                    "MAX_RHO_DOT": 0.05033557046,
-                    "DELTA_RHO": 6.68459e-8,
-                    "DELTA_RHO_DOT": 0.00167785234,
+                    "INPUT_RANGE": config['INPUT_RANGE'],
+                    "HIDDEN_DIMENSION": config['HIDDEN_DIMENSION'],
+                    "PHYSICS_WEIGHT": config['PHYSICS_WEIGHT'],
+                    "LAMBDA_DIST": config['LAMBDA_DIST'],
+                    "WEIGHT_SCALE_FACTOR": config['WEIGHT_SCALE_FACTOR'],
+                    "NUMBER_OF_ITERATIONS": config['NUMBER_OF_ITERATIONS'],
+                    "TEMPERATURE": config['TEMPERATURE'],
+                    "X_TOLERANCE": config['X_TOLERANCE'],
+                    "F_TOLERANCE": config['F_TOLERANCE'],
+                    "MAX_FUNCTION_EVAL": config['MAX_FUNCTION_EVAL'],
+                    "MAX_ITERATiONS": config['MAX_ITERATiONS'],
+                    "G_TOLERANCE": config['G_TOLERANCE'],
+                    "MIN_RHO": config['MIN_RHO'],
+                    "MAX_RHO": config['MAX_RHO'],
+                    "MIN_RHO_DOT": config['MIN_RHO_DOT'],
+                    "MAX_RHO_DOT": config['MAX_RHO_DOT'],
+                    "DELTA_RHO": config['DELTA_RHO'],
+                    "DELTA_RHO_DOT": config['DELTA_RHO_DOT'],
                 }
 
                 if viz_flag:
@@ -1356,7 +1356,7 @@ def run_OD(config):
             ems_center_xy = np.array(config["ems"]["p_em"][:2])
             ems_center_xyz = np.array(config["ems"]["p_em"])
             ems_radius = config["ems"]['R_em']
-            ray_length = 5e6
+            ray_length = config['ray_length']
 
             # Helpers: handle (M,6,6) vs (6,6)
             def _pick_cov(P, sid, block=(slice(0, 2), slice(0, 2))):
@@ -1477,12 +1477,12 @@ def run_OD(config):
                 u_opt_agents_xyz=sc_pointing_eme,
                 theta_h_rad=theta_h_rad,
                 ray_length=ray_length,
-                xlim=(-5e6, 2e6), ylim=(-3e6, 3e6), zlim=(-3e6, 3e6),
-                Nx=120, Ny=120, Nz=70,
-                max_points_for_scatter=800_000,
+                xlim=config['three_d_prop']['xlim'], ylim=config['three_d_prop']['ylim'], zlim=config['three_d_prop']['zlim'],
+                Nx=config['three_d_prop']['Nx'], Ny=config['three_d_prop']['Ny'], Nz=config['three_d_prop']['Nz'],
+                max_points_for_scatter=config['three_d_prop']['max_points'],
                 target_mean_xyz=ast_iod_eme[:3],
                 target_cov_xyz=target_cov_xyz,
-                d_mahal=3.0,
+                d_mahal=config['d_mahal'],
                 true_target_xyz=ast_truth_eme[:3],
                 ems_center_xyz=ems_center_xyz,
                 ems_radius=ems_radius,
@@ -1629,8 +1629,8 @@ def run_OD(config):
                     x_ts,
                     P_ts,
                     sc_trajs_km=sc_eme_trajs_kms,  # (K,M,6) or (K,M,3)
-                    stride=1,
-                    n_std=3.0,
+                    stride=config['two_d_prop']['stride'],
+                    n_std=config['two_d_prop']['stride'],
                     planes=("xy", "xz", "yz"),
                     title_prefix="Asteroid prior + spacecraft"
                 )
@@ -1661,7 +1661,7 @@ def run_OD(config):
                 theta_h_rad,
                 alpha_max,
                 omega_max,
-                d_M=3,
+                d_M=config['d_mahal'],
                 use_fixed_agent=True,
                 fixed_agent_idx=int(setup["sc_detecting_id"]),
                 fixed_agent_u=sc_pointings_eme[int(setup["sc_detecting_id"]), :],
@@ -1681,7 +1681,6 @@ def run_OD(config):
                 ems_center_xy = np.array(config["ems"]["p_em"][:2])
                 ems_center_xyz = np.array(config["ems"]["p_em"])
                 ems_radius = config["ems"]['R_em']
-                ray_length = 10e6
 
                 # Pull states/vectors from setup
                 sc_eme_ae_kms = np.squeeze(sc_eme_trajs_kms[best_idx, :, :3])
@@ -1785,18 +1784,18 @@ def run_OD(config):
                                 agents_xy=agents_2d,
                                 pointing_angles_rad=ang_2d,
                                 theta_h_rad=theta_h_rad,
-                                ray_length=ray_length,
+                                ray_length=ray_length * 2,
                                 u_curr_agents_xy=u_curr_2d,
-                                boresight_line_len=0.5e6,
+                                boresight_line_len=ray_length * 0.1,
                                 target_mean_xy=mean_2d,
                                 target_mean_xy_traj=mean_traj_2d,
                                 target_cov_xy=cov_2d,
-                                d_mahal=3.0,
+                                d_mahal=config['d_mahal'],
                                 true_target_xy=truth_2d,
                                 true_target_xy_traj=truth_traj_2d,
                                 ems_center_xy=ems_center_2d,
                                 ems_radius=ems_radius,
-                                xlim=(-5e6, 5e6), ylim=(-5e6, 5e6),
+                                xlim=config['two_d_prop']['xlim'], ylim=config['two_d_prop']['ylim'],
                                 agent_orbit_tracks_xy=None,
                                 ax=ax,  # requires the small ax= edit in util.plot_od_scenario_2d
                                 title=None
@@ -1848,7 +1847,11 @@ def run_OD(config):
                         out[i] = Ui
 
                     return out
-                ids = [0, 1, 2]
+
+                ids = config['three_d_prop'].get('history_ids')
+                if ids is None:
+                    ids = list(range(config['num_spacecraft']))
+
                 slew_history = build_slew_history_from_opt_series(res_kcoverage.extra["history"], ids)
 
                 fig, ax = util.plot_od_scenario_3d_new(
@@ -1858,15 +1861,15 @@ def run_OD(config):
                     theta_h_rad=theta_h_rad,
                     ray_length=ray_length,
                     u_curr_agents_xyz=sc_pointings_eme,
-                    boresight_line_len=0.5e6,
+                    boresight_line_len=ray_length * 0.1,
                     u_init_agents_xyz=None,
-                    init_boresight_line_len=8e6,
-                    xlim=(-5e6, 5e6), ylim=(-5e6, 5e6), zlim=(-5e6, 5e6),
-                    Nx=300, Ny=300, Nz=300,
-                    max_points_for_scatter=800_000,
+                    init_boresight_line_len=ray_length * 1.5,
+                    xlim=config['three_d_prop']['xlim'], ylim=config['three_d_prop']['ylim'], zlim=config['three_d_prop']['zlim'],
+                    Nx=config['three_d_prop']['Nx'], Ny=config['three_d_prop']['Ny'], Nz=config['three_d_prop']['Nz'],
+                    max_points_for_scatter=config['three_d_prop']['max_points'],
                     target_mean_xyz=ast_iod_eme[:3],
                     target_cov_xyz=target_cov_xyz,
-                    d_mahal=3.0,
+                    d_mahal=config['d_mahal'],
                     true_target_xyz=ast_truth_eme[:3],
                     target_mean_traj_xyz=x_ts[:, :3],
                     true_target_traj_xyz=ast_eme_traj_kms[:, :3],
@@ -1879,7 +1882,7 @@ def run_OD(config):
                     show_fov_cones=True,
                     title="3D OD Scenario Demo (EME)",
                     slew_history=slew_history,
-                    slew_history_line_len=5e6
+                    slew_history_line_len=ray_length
                 )
 
 
@@ -1915,10 +1918,11 @@ def run_OD(config):
                         idx_free=idx_free,
                         theta_range_rad=(-0.5 * np.pi, 0.5 * np.pi),
                         phi_range_rad=(0.0, 2 * np.pi),
-                        d_M=3.0, kappa_sigma=config['optimizer_att_coord']['kappa_sigma'],
-                        n_mc=20000,
-                        n_grid_theta=100,
-                        n_grid_phi=140,
+                        d_M=config['d_mahal'], kappa_sigma=config['optimizer_att_coord']['kappa_sigma'],
+                        lambda_k1=config['optimizer_att_coord']['lambda_k1'],
+                        n_mc=config['opt_map']['n_mc'],
+                        n_grid_theta=config['opt_map']['n_grid_theta'],
+                        n_grid_phi=config['opt_map']['n_grid_phi'],
                     )
 
                     # 3D surface: theta_free vs phi_free vs J
@@ -1926,7 +1930,8 @@ def run_OD(config):
                     ax3d = fig3d.add_subplot(111, projection="3d")
                     ax3d.plot_surface(
                         TH_free_deg, PH_free_deg, J_grid,
-                        rstride=1, cstride=1, linewidth=0.2, alpha=0.9
+                        rstride=config['opt_map']['rstride'], cstride=config['opt_map']['cstride'],
+                        linewidth=config['opt_map']['linewidth_3d'], alpha=config['opt_map']['alpha']
                     )
                     ax3d.set_xlabel(rf'$\theta_{{{idx_free}}}$ (deg)')
                     ax3d.set_ylabel(rf'$\phi_{{{idx_free}}}$ (deg)')
@@ -1936,7 +1941,7 @@ def run_OD(config):
 
                     # contour plot
                     plt.figure(figsize=(7, 5.5))
-                    cs = plt.contourf(TH_free_deg, PH_free_deg, J_grid, levels=35)
+                    cs = plt.contourf(TH_free_deg, PH_free_deg, J_grid, levels=config['opt_map']['levels'])
                     plt.colorbar(cs, label=r'$J_t$')
                     plt.xlabel(rf'$\theta_{{{idx_free}}}$ (deg)')
                     plt.ylabel(rf'$\phi_{{{idx_free}}}$ (deg)')
@@ -1946,7 +1951,7 @@ def run_OD(config):
                     # ---- overlay optimizer paths from history (theta, phi) for the free agent ----
                     restart_indices = sorted({entry["restart"] for entry in res_kcoverage.extra["history"]})
 
-                    # colors = ['white', 'yellow', 'cyan', 'magenta', 'green', 'orange']
+                    colors = ['white', 'yellow', 'cyan', 'magenta', 'green', 'orange']
                     markers = ['o', 's', '^', 'D', 'x', '+']
 
                     for k, r in enumerate(restart_indices):
@@ -1991,8 +1996,8 @@ def run_OD(config):
                             linestyle='-',
                             marker=m,
                             color=col,
-                            lw=1.5,
-                            ms=5,
+                            lw=config['opt_map']['linewidth_2d'],
+                            ms=config['opt_map']['marker_size'],
                             label=label
                         )
 

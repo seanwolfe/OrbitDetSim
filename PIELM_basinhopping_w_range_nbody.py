@@ -325,7 +325,7 @@ def run(data, config, parameters):
     ini_vel = data[4][0, :]  # km/s
 
     # Set up epochs
-    num_points = 1000
+    num_points = config['error']['num_points']
     epochs = np.linspace(data[2][0], data[2][-1], num_points)  # still astropy Time objects
 
     # Initial epoch is just the first time
@@ -1034,7 +1034,7 @@ def solve(epochs_nd_norm_reshaped_tensor, y_obs, obs_indices, observer_positions
     initial_obs_epoch = colloc_epochs[obs_indices][0]
     final_obs_epoch = colloc_epochs[obs_indices][-1]
 
-    num_points = 1000
+    num_points = configuration['error']['num_points']
     test_epochs = np.linspace(initial_obs_epoch, final_obs_epoch, num_points)
 
     # Combine, ensuring the start and end colloc epochs are at the edges

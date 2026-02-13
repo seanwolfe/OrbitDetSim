@@ -81,7 +81,7 @@ def c_tilde_i(y_samples, Lp, p_hat, p_i, u_i, cos_theta_h, kappa_sigma):
     return sigmoid(z)
 
 
-def k2_tilde(y_samples, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma):
+def k2_tilde(y_samples, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma, lambda_k1):
     """Eq. (k2ty) continuous dual coverage."""
     M = len(p_agents)
     N = y_samples.shape[0]
@@ -92,13 +92,13 @@ def k2_tilde(y_samples, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma)
 
     if M == 2:
         # Algebraic identity: k2 = C0 * C1 for M=2
-        return C[0] * C[1] + 0.01 * (C[0] + C[1])
+        return C[0] * C[1] + lambda_k1 * (C[0] + C[1])
 
     one_minus_C = 1.0 - C
 
     if M ==3:
         k2 = C[0] * C[1] * one_minus_C[2] + C[0] * C[2] * one_minus_C[1] + C[1] * C[2] * one_minus_C[0]
-        k1 = 0.5 * (C[0] * one_minus_C[1] * one_minus_C[2] + C[2] * one_minus_C[0] * one_minus_C[1] + C[1] * one_minus_C[0] * one_minus_C[2])
+        k1 = lambda_k1 * (C[0] * one_minus_C[1] * one_minus_C[2] + C[2] * one_minus_C[0] * one_minus_C[1] + C[1] * one_minus_C[0] * one_minus_C[2])
         return k1 + k2
 
     if M == 4:
@@ -113,7 +113,7 @@ def k2_tilde(y_samples, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma)
         )
 
         # k1: exactly one detects
-        k1 = 0.01 * (
+        k1 = lambda_k1 * (
                 C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] +
                 C[1] * one_minus_C[0] * one_minus_C[2] * one_minus_C[3] +
                 C[2] * one_minus_C[0] * one_minus_C[1] * one_minus_C[3] +
@@ -145,7 +145,7 @@ def k2_tilde(y_samples, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma)
         )
 
         # k1: exactly one detects
-        k1 = 0.01 * (
+        k1 = lambda_k1 * (
                 C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] +
                 C[1] * one_minus_C[0] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] +
                 C[2] * one_minus_C[0] * one_minus_C[1] * one_minus_C[3] * one_minus_C[4] +
@@ -179,7 +179,7 @@ def k2_tilde(y_samples, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma)
         )
 
         # k1: exactly one detects
-        k1 = 0.01 * (
+        k1 = lambda_k1 * (
                 C[0] * one_minus_C[1] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] * one_minus_C[5] +
                 C[1] * one_minus_C[0] * one_minus_C[2] * one_minus_C[3] * one_minus_C[4] * one_minus_C[5] +
                 C[2] * one_minus_C[0] * one_minus_C[1] * one_minus_C[3] * one_minus_C[4] * one_minus_C[5] +
@@ -205,7 +205,7 @@ def k2_tilde(y_samples, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma)
 def J_t_dual_coverage(
     p_hat, P_p, p_agents, u_agents,
     theta_h, d_M=3.0, kappa_sigma=100.0,
-    n_mc=20000, seed=None, y_samples_cached=None
+    n_mc=20000, seed=None, y_samples_cached=None, lambda_k1=0.5
 ):
     """
     Eq. (Jty1) Monte-Carlo estimate.
@@ -224,7 +224,7 @@ def J_t_dual_coverage(
     w = np.exp(-0.5 * y2)
 
     cos_theta_h = np.cos(theta_h)
-    k2 = k2_tilde(y, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma)
+    k2 = k2_tilde(y, Lp, p_hat, p_agents, u_agents, cos_theta_h, kappa_sigma, lambda_k1)
 
     V_ball = (4.0/3.0) * np.pi * d_M**3
     integral_est = V_ball * np.mean(w * k2)
@@ -388,6 +388,7 @@ def objective_joint_free(
     theta_h: float,
     d_M: float,
     kappa_sigma: float,
+    lambda_k1: float,
     y_cached: np.ndarray,
     *,
     free_idx: np.ndarray,
@@ -407,7 +408,7 @@ def objective_joint_free(
 
     J = J_t_dual_coverage(
         p_hat, P_p, p_agents, u_agents,
-        theta_h, d_M=d_M, kappa_sigma=kappa_sigma,
+        theta_h, d_M=d_M, kappa_sigma=kappa_sigma, lambda_k1=lambda_k1,
         n_mc=y_cached.shape[0], y_samples_cached=y_cached
     )
     obj = -J
@@ -434,7 +435,7 @@ def make_cached_y(P_p, d_M, n_mc, seed):
 
 def objective_joint(x, p_hat, P_p, p_agents, u_curr_agents,
                     theta_lower, theta_upper,
-                    theta_h, d_M, kappa_sigma,
+                    theta_h, d_M, kappa_sigma, lambda_k1,
                     y_cached,
                     p_em=None, R_em=0.0,
                     alpha_s=0.0, lambda_em=0.0,
@@ -452,7 +453,7 @@ def objective_joint(x, p_hat, P_p, p_agents, u_curr_agents,
     # Base objective: maximize J_t, so minimize -J_t
     J = J_t_dual_coverage(
         p_hat, P_p, p_agents, u_agents,
-        theta_h, d_M=d_M, kappa_sigma=kappa_sigma,
+        theta_h, d_M=d_M, kappa_sigma=kappa_sigma, lambda_k1=lambda_k1,
         n_mc=y_cached.shape[0], y_samples_cached=y_cached
     )
     obj = -J
@@ -482,43 +483,40 @@ def init_theta_phi_boundary_projection(
     theta_h,
     d_M,
     kappa_sigma,
+    lambda_k1,
     y_cached,
     p_em,
     R_em,
     alpha_s,
     seed,
+    jitter,
     eps=1e-10,
+    n_boundary_candidates=2,
 ):
     """
     3D warm-start initializer with EMS keep-out via boundary projection.
 
-    Steps:
-      1) Compute mean-pointing boresights u_star[i] (respecting slew limits).
-      2) If all u_star are EMS-safe (with theta_h, R_em, alpha_s), return
-         a jittered version of the mean-based angles (original behaviour).
-      3) Otherwise, for each spacecraft:
-           - If u_star[i] is safe  -> keep as single candidate.
-           - If u_star[i] is unsafe:
-               * Project u_star[i] onto the EMS exclusion boundary circle
-                 (angle(u, v_em) = theta_h + alpha_em + alpha_s),
-                 getting up to two candidate directions u_b1, u_b2,
-                 subject to slew limits and keep-out.
-      4) Enumerate all combinations of per-spacecraft candidates, evaluate
-         J_t_dual_coverage, and select the one with minimal cost.
-      5) Convert the resulting boresights back to (theta_i, phi_i).
-      6) Apply a small theta jitter where it remains EMS-safe and
-         within slew bounds.
+    NEW behavior:
+      - When a spacecraft violates EMS keep-out and we generate boundary candidates,
+        we FIRST keep only those candidates whose *central ray* intersects the
+        target uncertainty ellipsoid (Mahalanobis d_M level set).
+      - If NONE of the candidates intersect, we fall back to using ALL candidates.
 
-    Returns
-    -------
-    x0 : np.ndarray, shape (2*M,)
-        Stacked [theta_0, phi_0, theta_1, phi_1, ..., theta_{M-1}, phi_{M-1}].
+    Notes:
+      - "Intersects uncertainty ellipsoid" here means the ray
+            x(t) = p_i + t*u,  t >= 0
+        has at least one solution to
+            (x - p_hat)^T P_p^{-1} (x - p_hat) = d_M^2
+        (i.e., discriminant >= 0 and some root t >= 0).
+      - This is a fast geometric filter (heuristic). It does not account for the
+        full cone half-angle theta_h; it checks the boresight ray only.
     """
 
     rng = np.random.default_rng(seed=seed)
-    # jitter_values = np.deg2rad([0.0, 1.0, -1.0])  # small theta jitter, in radians
-    jitter_values = np.deg2rad([0.0, 0.0, -0.0])  # small theta jitter, in radians
-    p_hat = np.asarray(p_hat, dtype=float)
+    jitter_values = np.deg2rad(jitter)
+
+    p_hat = np.asarray(p_hat, dtype=float).reshape(3,)
+    P_p = np.asarray(P_p, dtype=float).reshape(3, 3)
     p_agents = np.asarray(p_agents, dtype=float)
     u_curr_agents = np.asarray(u_curr_agents, dtype=float)
     theta_lower = np.asarray(theta_lower, dtype=float)
@@ -528,6 +526,52 @@ def init_theta_phi_boundary_projection(
     x0 = np.zeros(2 * M, dtype=float)
     n_mc = y_cached.shape[0]
 
+    # Precompute inverse covariance (stable)
+    try:
+        P_inv = np.linalg.inv(P_p)
+    except np.linalg.LinAlgError:
+        P_inv = np.linalg.pinv(P_p)
+
+    # --------------------------------------------------
+    # Helper: ray-ellipsoid intersection (boresight ray)
+    # --------------------------------------------------
+    def ray_intersects_ellipsoid(p0, u, mu, P_inv, d, eps=1e-12):
+        """
+        Returns True if exists t >= 0 such that:
+          (p0 + t u - mu)^T P_inv (p0 + t u - mu) = d^2
+        """
+        p0 = np.asarray(p0, dtype=float).reshape(3,)
+        u = np.asarray(u, dtype=float).reshape(3,)
+        mu = np.asarray(mu, dtype=float).reshape(3,)
+
+        nu = np.linalg.norm(u)
+        if nu < eps:
+            return False
+        u = u / nu
+
+        w = p0 - mu
+
+        a = float(u.T @ P_inv @ u)
+        b = float(2.0 * (u.T @ P_inv @ w))
+        c = float(w.T @ P_inv @ w - (float(d) ** 2))
+
+        if abs(a) < eps:
+            # Degenerate (shouldn't happen if P_inv is PD and u nonzero), treat as linear
+            if abs(b) < eps:
+                return False
+            t = -c / b
+            return t >= 0.0
+
+        disc = b*b - 4.0*a*c
+        if disc < 0.0:
+            return False
+
+        sdisc = float(np.sqrt(max(disc, 0.0)))
+        t1 = (-b - sdisc) / (2.0*a)
+        t2 = (-b + sdisc) / (2.0*a)
+
+        return (t1 >= 0.0) or (t2 >= 0.0)
+
     # --------------------------------------------------
     # Helper: single-ray keep-out check for spacecraft i
     # --------------------------------------------------
@@ -535,7 +579,6 @@ def init_theta_phi_boundary_projection(
         r_vec = p_em - p_i
         r_norm = np.linalg.norm(r_vec)
         if r_norm < R_em + eps:
-            # Spacecraft effectively inside EMS sphere -> treat as violation
             return False
 
         v_em = r_vec / r_norm
@@ -552,8 +595,8 @@ def init_theta_phi_boundary_projection(
     # Helper: config-wise keep-out
     # --------------------------------------------------
     def config_keepout_safe(p_agents, u_array, theta_h, p_em, R_em, alpha_s):
-        for i in range(p_agents.shape[0]):
-            if not keepout_safe_single(p_agents[i], u_array[i], theta_h, p_em, R_em, alpha_s):
+        for ii in range(p_agents.shape[0]):
+            if not keepout_safe_single(p_agents[ii], u_array[ii], theta_h, p_em, R_em, alpha_s):
                 return False
         return True
 
@@ -561,10 +604,6 @@ def init_theta_phi_boundary_projection(
     # Helper: local parameterization u(theta, phi)
     # --------------------------------------------------
     def u_from_theta_phi(theta, phi, u_curr, e1, e2):
-        """
-        u = cos(theta)*u_curr + sin(theta)*(cos(phi)*e1 + sin(phi)*e2)
-        All vectors assumed unit, theta in [0, pi].
-        """
         phi = float(phi) % (2 * np.pi)
         return (
             np.cos(theta) * u_curr
@@ -574,54 +613,43 @@ def init_theta_phi_boundary_projection(
     # --------------------------------------------------
     # Precompute local bases and mean-pointing directions u_star[i]
     # --------------------------------------------------
-    u_curr_norm = np.zeros_like(u_curr_agents)
-    e1_list = np.zeros_like(u_curr_agents)
-    e2_list = np.zeros_like(u_curr_agents)
-    theta_star = np.zeros(M)
-    phi_star = np.zeros(M)
-    u_star = np.zeros_like(u_curr_agents)
+    u_curr_norm = np.zeros_like(u_curr_agents, dtype=float)
+    e1_list = np.zeros_like(u_curr_agents, dtype=float)
+    e2_list = np.zeros_like(u_curr_agents, dtype=float)
+    theta_star = np.zeros(M, dtype=float)
+    phi_star = np.zeros(M, dtype=float)
+    u_star = np.zeros_like(u_curr_agents, dtype=float)
 
     for i in range(M):
         p_i = p_agents[i]
         u_curr = u_curr_agents[i]
         n_u = np.linalg.norm(u_curr)
         if n_u < eps:
-            # degenerate, pick arbitrary unit vector
-            u_curr = np.array([0.0, 0.0, 1.0])
+            u_curr = np.array([0.0, 0.0, 1.0], dtype=float)
             n_u = 1.0
-        u_curr /= n_u
+        u_curr = u_curr / n_u
         u_curr_norm[i] = u_curr
 
-        # Desired mean direction
         d_vec = p_hat - p_i
         dist = np.linalg.norm(d_vec)
-        if dist < eps:
-            v_des = u_curr
-        else:
-            v_des = d_vec / dist
+        v_des = u_curr if dist < eps else (d_vec / dist)
 
-        # Local basis around u_curr
         e1, e2 = orthonormal_basis_from_u(u_curr)
         e1_list[i] = e1
         e2_list[i] = e2
 
-        # Decompose v_des in {u_curr, e1, e2}
-        a = np.dot(v_des, u_curr)
-        b1 = np.dot(v_des, e1)
-        b2 = np.dot(v_des, e2)
-        s = np.sqrt(b1**2 + b2**2)
+        a = float(np.dot(v_des, u_curr))
+        b1 = float(np.dot(v_des, e1))
+        b2 = float(np.dot(v_des, e2))
+        s = float(np.sqrt(b1*b1 + b2*b2))
 
-        # Spherical-like angles
-        theta_i = np.arctan2(s, a)      # [0, pi]
-        phi_i = float(np.arctan2(b2, b1))
-        phi_i = phi_i % (2 * np.pi)  # [0, 2pi)
+        theta_i = float(np.arctan2(s, a))
+        phi_i = float(np.arctan2(b2, b1)) % (2 * np.pi)
 
-        # Clamp theta to slew interval
-        theta_i = np.clip(theta_i, theta_lower[i], theta_upper[i])
+        theta_i = float(np.clip(theta_i, theta_lower[i], theta_upper[i]))
 
         theta_star[i] = theta_i
         phi_star[i] = phi_i
-
         u_star[i] = u_from_theta_phi(theta_i, phi_i, u_curr, e1, e2)
 
     # --------------------------------------------------
@@ -629,106 +657,97 @@ def init_theta_phi_boundary_projection(
     # --------------------------------------------------
     if config_keepout_safe(p_agents, u_star, theta_h, p_em, R_em, alpha_s):
         for i in range(M):
-            jitter = rng.choice(jitter_values)
-            theta_i = theta_star[i] + jitter
-            # keep phi as-is
-            # ensure slew bounds
-            theta_i = np.clip(theta_i, theta_lower[i], theta_upper[i])
+            jitter = float(rng.choice(jitter_values))
+            theta_i = float(np.clip(theta_star[i] + jitter, theta_lower[i], theta_upper[i]))
 
-            # rebuild u and re-check keep-out; if violated, drop jitter
             u_i = u_from_theta_phi(theta_i, phi_star[i], u_curr_norm[i], e1_list[i], e2_list[i])
             if not keepout_safe_single(p_agents[i], u_i, theta_h, p_em, R_em, alpha_s):
-                theta_i = theta_star[i]  # revert
+                theta_i = float(theta_star[i])
 
             x0[2 * i] = theta_i
-            x0[2*i+1] = float(phi_star[i] % (2*np.pi))
-
+            x0[2 * i + 1] = float(phi_star[i] % (2 * np.pi))
         return x0
 
     # --------------------------------------------------
-    # Step 2: Mean-based config not safe -> boundary projection per spacecraft
+    # Step 2: Mean-based config not safe -> candidates per spacecraft
     # --------------------------------------------------
     candidate_u_list = []
+    N = int(max(1, n_boundary_candidates))
 
     for i in range(M):
         p_i = p_agents[i]
         u_curr = u_curr_norm[i]
         u_i_star = u_star[i]
 
-        # Direction to EMS center
+        # EMS geometry
         r_vec = p_em - p_i
         r_norm = np.linalg.norm(r_vec)
         if r_norm < R_em + eps:
-            # pathological: spacecraft basically inside EMS
-            # fallback: just keep u_star
             candidate_u_list.append([u_i_star])
             continue
 
         v_em = r_vec / r_norm
         ratio = np.clip(R_em / r_norm, -1.0, 1.0)
         alpha_em = np.arcsin(ratio)
-        gamma_bound = theta_h + alpha_em + alpha_s
+        gamma_bound = float(theta_h + alpha_em + alpha_s)
 
-        # If gamma_bound is nonsensical (>= pi), just keep u_star
         if gamma_bound >= np.pi - 1e-6:
             candidate_u_list.append([u_i_star])
             continue
 
-        # Check whether u_star is actually safe; if so, just keep it
+        # If u_star is safe, keep it (single candidate)
         if keepout_safe_single(p_i, u_i_star, theta_h, p_em, R_em, alpha_s):
             candidate_u_list.append([u_i_star])
             continue
 
+        # Unsafe: boundary ring candidates (evenly spaced)
+        cos_gb = float(np.cos(gamma_bound))
+        sin_gb = float(np.sin(gamma_bound))
 
-        # Otherwise, project u_star onto boundary circle: angle(u, v_em) = gamma_bound
-        # Decompose u_star into parallel and perpendicular wrt v_em
-        c = np.dot(u_i_star, v_em)
-        v_parallel = c * v_em
-        v_perp = u_i_star - v_parallel
-        n_perp = np.linalg.norm(v_perp)
+        e1_em, e2_em = orthonormal_basis_from_u(v_em)
 
+        # Phase-align to u_star's perpendicular component
+        c = float(np.dot(u_i_star, v_em))
+        v_perp = u_i_star - c * v_em
+        n_perp = float(np.linalg.norm(v_perp))
         if n_perp < eps:
-            # u_star is nearly colinear with v_em; choose an arbitrary perp direction
-            e1_em, e2_em = orthonormal_basis_from_u(v_em)
-            v_perp_hat = e1_em
+            psi0 = 0.0
         else:
             v_perp_hat = v_perp / n_perp
+            a1 = float(np.dot(v_perp_hat, e1_em))
+            a2 = float(np.dot(v_perp_hat, e2_em))
+            psi0 = float(np.arctan2(a2, a1))
 
-        cos_gb = np.cos(gamma_bound)
-        sin_gb = np.sin(gamma_bound)
+        # 1) generate all candidates (slew-feasible)
+        all_dirs = []
+        for k in range(N):
+            psi = psi0 + 2.0 * np.pi * (k / N)
+            u_b = cos_gb * v_em + sin_gb * (np.cos(psi) * e1_em + np.sin(psi) * e2_em)
+            u_b = u_b / max(np.linalg.norm(u_b), eps)
 
-        # Two symmetric boundary directions on the circle
-        u_b1 = cos_gb * v_em + sin_gb * v_perp_hat
-        u_b2 = cos_gb * v_em - sin_gb * v_perp_hat
-
-        # Normalize for safety
-        u_b1 /= max(np.linalg.norm(u_b1), eps)
-        u_b2 /= max(np.linalg.norm(u_b2), eps)
-
-        candidate_dirs = []
-
-        # Check slew feasibility + keep-out for each boundary candidate
-        for u_b in (u_b1, u_b2):
+            # slew feasibility
             cos_theta = np.clip(np.dot(u_b, u_curr), -1.0, 1.0)
-            theta_b = np.arccos(cos_theta)
-
+            theta_b = float(np.arccos(cos_theta))
             if theta_b < theta_lower[i] - 1e-6 or theta_b > theta_upper[i] + 1e-6:
-                continue  # outside slew envelope
+                continue
 
-            # if not keepout_safe_single(p_i, u_b, theta_h, p_em, R_em, alpha_s):
-            #     continue  # should be rare, but guard anyway
+            all_dirs.append(u_b)
 
-            candidate_dirs.append(u_b)
-
-        if len(candidate_dirs) == 0:
-            # Fallback if both boundary projections fail: use u_star anyway
+        if len(all_dirs) == 0:
             candidate_u_list.append([u_i_star])
-        else:
-            # Use the boundary candidates (1 or 2) for this spacecraft
-            candidate_u_list.append(candidate_dirs)
+            continue
+
+        # 2) prefer candidates whose boresight ray intersects the uncertainty ellipsoid
+        hit_dirs = []
+        for u_b in all_dirs:
+            if ray_intersects_ellipsoid(p_i, u_b, p_hat, P_inv, d_M, eps=1e-12):
+                hit_dirs.append(u_b)
+
+        # If we have any "hits", use only those; otherwise use all
+        candidate_u_list.append(hit_dirs if (len(hit_dirs) > 0) else all_dirs)
 
     # --------------------------------------------------
-    # Step 3: Enumerate all combinations of candidate_u_list and pick best J_t
+    # Step 3: Enumerate combinations and pick best J_t
     # --------------------------------------------------
     best_J = -np.inf
     best_u = None
@@ -736,9 +755,9 @@ def init_theta_phi_boundary_projection(
     index_ranges = [range(len(cands)) for cands in candidate_u_list]
 
     for choice in itertools.product(*index_ranges):
-        u_trial = np.zeros_like(u_curr_agents)
-        for i, idx in enumerate(choice):
-            u_trial[i] = candidate_u_list[i][idx]
+        u_trial = np.zeros_like(u_curr_agents, dtype=float)
+        for ii, idx in enumerate(choice):
+            u_trial[ii] = candidate_u_list[ii][idx]
 
         J_val = J_t_dual_coverage(
             p_hat,
@@ -748,16 +767,16 @@ def init_theta_phi_boundary_projection(
             theta_h,
             d_M=d_M,
             kappa_sigma=kappa_sigma,
+            lambda_k1=lambda_k1,
             n_mc=n_mc,
             y_samples_cached=y_cached,
         )
 
         if J_val > best_J:
-            best_J = J_val
+            best_J = float(J_val)
             best_u = u_trial.copy()
 
     if best_u is None:
-        # Total fallback (should be extremely rare): revert to mean-based u_star
         best_u = u_star.copy()
 
     # --------------------------------------------------
@@ -769,30 +788,28 @@ def init_theta_phi_boundary_projection(
         e2 = e2_list[i]
         u_i = best_u[i]
 
-        a = np.dot(u_i, u_curr)
-        b1 = np.dot(u_i, e1)
-        b2 = np.dot(u_i, e2)
-        s = np.sqrt(b1**2 + b2**2)
+        a = float(np.dot(u_i, u_curr))
+        b1 = float(np.dot(u_i, e1))
+        b2 = float(np.dot(u_i, e2))
+        s = float(np.sqrt(b1*b1 + b2*b2))
 
-        theta_i = np.arctan2(s, a)
-        phi_i = float(np.arctan2(b2, b1))
-        phi_i = phi_i % (2 * np.pi)  # [0, 2pi)
+        theta_i = float(np.arctan2(s, a))
+        phi_i = float(np.arctan2(b2, b1)) % (2 * np.pi)
 
-        # Ensure theta within bounds (small numeric repair if needed)
-        theta_i = np.clip(theta_i, theta_lower[i], theta_upper[i])
+        theta_i = float(np.clip(theta_i, theta_lower[i], theta_upper[i]))
 
-        # Optional: apply jitter in theta while preserving keep-out
-        jitter = rng.choice(jitter_values)
-        theta_j = np.clip(theta_i + jitter, theta_lower[i], theta_upper[i])
+        jitter = float(rng.choice(jitter_values))
+        theta_j = float(np.clip(theta_i + jitter, theta_lower[i], theta_upper[i]))
         u_j = u_from_theta_phi(theta_j, phi_i, u_curr, e1, e2)
 
         if keepout_safe_single(p_agents[i], u_j, theta_h, p_em, R_em, alpha_s):
-            theta_i = theta_j  # accept jitter
+            theta_i = theta_j
 
         x0[2 * i] = theta_i
         x0[2 * i + 1] = phi_i
 
     return x0
+
 
 
 def estimate_theta_bounds_from_ellipsoid(p_hat, P_p, p_agents, u_curr_agents,
@@ -883,13 +900,19 @@ def theta_s_of_dt(delta_t_s, alpha_max, omega_max):
 
 def optimize_pointing_lbfgs_joint(
         p_hat, P_p, p_agents, u_curr_agents,
-        theta_h, theta_s_list,
-        d_M=3.0, kappa_sigma=120.0,
+        theta_h, theta_s_list, jitter,
+        d_M=3.0, kappa_sigma=120.0, lambda_k1=0.5,
         n_mc=25000, seed=0,
         n_restarts=3,
         p_em=None, R_em=0.0,
         alpha_s=0.0, lambda_em=0.0,
         beta_zeta=50.0,
+        nshell=400,
+        num_candidates=2,
+        restart_noise_scale=0.05,
+        maxiter=60,
+        ftol=1e-10,
+        display=False,
         *,
         use_fixed_agent: bool = False,
         idx_fix: Optional[int] = None,
@@ -913,7 +936,7 @@ def optimize_pointing_lbfgs_joint(
     # --- θ-bounds from ellipsoid + slew ---
     theta_min_ell, theta_max_ell = estimate_theta_bounds_from_ellipsoid(
         p_hat, P_p, p_agents, u_curr_agents, d_M,
-        n_shell=400, seed=seed+999
+        n_shell=nshell, seed=seed+999
     )
 
     theta_upper = np.minimum(theta_max_ell, theta_s_list)
@@ -989,7 +1012,7 @@ def optimize_pointing_lbfgs_joint(
 
         J_val = J_t_dual_coverage(
             p_hat, P_p, p_agents, u,
-            theta_h, d_M=d_M, kappa_sigma=kappa_sigma,
+            theta_h, d_M=d_M, kappa_sigma=kappa_sigma, lambda_k1=lambda_k1,
             n_mc=y_cached.shape[0], y_samples_cached=y_cached
         )
 
@@ -1012,8 +1035,8 @@ def optimize_pointing_lbfgs_joint(
     x0_full = init_theta_phi_boundary_projection(
         p_hat, P_p, p_agents, u_curr_agents,
         theta_lower, theta_upper, theta_h,
-        d_M, kappa_sigma, y_cached, p_em,
-        R_em, alpha_s, seed
+        d_M, kappa_sigma, lambda_k1, y_cached, p_em,
+        R_em, alpha_s, seed, jitter, n_boundary_candidates=num_candidates
     )
 
     if not use_fixed:
@@ -1029,7 +1052,7 @@ def optimize_pointing_lbfgs_joint(
         if r == 0:
             x0 = x0_mean.copy()
         else:
-            noise = rng.normal(scale=0.05, size=x0_mean.size)
+            noise = rng.normal(scale=restart_noise_scale, size=x0_mean.size)
             x0 = x0_mean + noise
 
             if not use_fixed:
@@ -1048,7 +1071,7 @@ def optimize_pointing_lbfgs_joint(
             f = lambda z: objective_joint(
                 z, p_hat, P_p, p_agents, u_curr_agents,
                 theta_lower, theta_upper,
-                theta_h, d_M, kappa_sigma, y_cached,
+                theta_h, d_M, kappa_sigma, lambda_k1, y_cached,
                 p_em=p_em, R_em=R_em,
                 alpha_s=alpha_s, lambda_em=lambda_em,
                 beta_zeta=beta_zeta
@@ -1057,7 +1080,7 @@ def optimize_pointing_lbfgs_joint(
             f = lambda z: objective_joint_free(
                 z, p_hat, P_p, p_agents, u_curr_agents,
                 theta_lower, theta_upper,
-                theta_h, d_M, kappa_sigma, y_cached,
+                theta_h, d_M, kappa_sigma, lambda_k1, y_cached,
                 free_idx=free_idx, idx_fix=int(idx_fix), u_fix=u_fix,
                 p_em=p_em, R_em=R_em,
                 alpha_s=alpha_s, lambda_em=lambda_em,
@@ -1071,7 +1094,7 @@ def optimize_pointing_lbfgs_joint(
             f, x0, method="L-BFGS-B",
             bounds=bounds,
             callback=cb,
-            options=dict(maxiter=60, ftol=1e-10, disp=False)
+            options=dict(maxiter=maxiter, ftol=ftol, disp=display)
         )
         x_star = res.x
         f_star = res.fun
@@ -1102,7 +1125,7 @@ def optimize_pointing_lbfgs_joint(
 
     J_best = J_t_dual_coverage(
         p_hat, P_p, p_agents, u_best,
-        theta_h, d_M=d_M, kappa_sigma=kappa_sigma,
+        theta_h, d_M=d_M, kappa_sigma=kappa_sigma, lambda_k1=lambda_k1,
         n_mc=y_cached.shape[0], y_samples_cached=y_cached
     )
 
@@ -1148,8 +1171,15 @@ class AttitudeCoordinator:
         self.cfg = cfg
         opt = cfg.get("optimizer_att_coord", {})
         self.kappa_sigma = float(opt.get("kappa_sigma", 1.0))
+        self.lambda_k1 = float(opt.get("lambda_k1", 1.0))
         self.n_mc = int(opt.get("n_mc", 200))
         self.n_restarts = int(opt.get("n_restarts", 1))
+        self.jitter = opt.get("jitter", [1.0, -1.0, 0.0])
+        self.restart_noise = opt.get("restart_noise", 0.05)
+        self.nshell=int(opt.get("nshell", 400))
+        self.max_iterations=int(opt.get("max_iterations", 100))
+        self.ftolerance=float(opt.get("ftol", 1e-10))
+        self.display=bool(opt.get("display", False))
 
         # Optional EMS / keepout config defaults
         ems = cfg.get("ems", {})
@@ -1158,6 +1188,7 @@ class AttitudeCoordinator:
         self.alpha_s_default = np.deg2rad(float(ems.get("alpha_s_deg", 0.0)))
         self.lambda_em_default = float(ems.get("lambda_em", 0.0))
         self.beta_zeta_default = float(ems.get("beta_zeta", 50.0))
+
 
 
     @staticmethod
@@ -1305,9 +1336,10 @@ class AttitudeCoordinator:
 
             u_star, ang_star, J_star, history, cost_star = optimize_pointing_lbfgs_joint(
                 p_hat_k, P_p_k, p_agents_k, u_curr_agents,
-                float(theta_h), theta_s_list_t,
+                float(theta_h), theta_s_list_t, self.jitter,
                 d_M=float(d_M),
                 kappa_sigma=float(self.kappa_sigma),
+                lambda_k1=float(self.lambda_k1),
                 n_mc=int(self.n_mc),
                 seed=int(trial_seed),
                 n_restarts=int(self.n_restarts),
@@ -1315,6 +1347,11 @@ class AttitudeCoordinator:
                 alpha_s=float(alpha_s),
                 lambda_em=float(lambda_em),
                 beta_zeta=float(beta_zeta),
+                restart_noise_scale=float(self.restart_noise),
+                nshell=int(self.nshell),
+                maxiter=int(self.max_iterations),
+                ftol=float(self.ftolerance),
+                display=bool(self.display),
                 use_fixed_agent=bool(use_fixed_agent),
                 idx_fix=(None if not use_fixed_agent else fixed_agent_idx),
                 u_fix=(None if not use_fixed_agent else fixed_agent_u),
@@ -1626,7 +1663,7 @@ def compute_J_grid_theta_phi_single_free(
     idx_free: int | None = None, # if None, inferred as the other agent when M=2
     theta_range_rad=None,        # tuple (lo, hi); if None -> (theta_lower_free, theta_upper_free) OR (-pi/2, pi/2)
     phi_range_rad=(0.0, 2*np.pi),
-    d_M=3.0, kappa_sigma=100.0,
+    d_M=3.0, kappa_sigma=100.0, lambda_k1 = 0.5,
     n_mc=20000, n_grid_theta=61, n_grid_phi=121,
     seed=0,
     use_cached_y=True,
@@ -1701,7 +1738,7 @@ def compute_J_grid_theta_phi_single_free(
             J_val = J_t_dual_coverage(
                 p_hat, P_p, p_agents, u_agents,
                 theta_h, d_M=d_M, kappa_sigma=kappa_sigma,
-                n_mc=n_mc, y_samples_cached=y_cached
+                n_mc=n_mc, y_samples_cached=y_cached, lambda_k1=lambda_k1
             )
             J_grid[a, b] = float(J_val)
 
