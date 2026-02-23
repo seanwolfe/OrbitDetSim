@@ -4,12 +4,12 @@ import numpy as np
 class Spacecraft:
 
 
-    def __init__(self, ini_pos, ini_pos_index, configs):
+    def __init__(self, ini_pos, ini_pos_index, configs, current_state_eme=None, current_spacecraftepoch=None, current_boresight=None):
         self.ini_position = ini_pos  # initial position of the spacecraft in the quasi-halo orbit
         self.ini_pos_index = ini_pos_index  # initial position index in the quasi-halo orbit csv
         self.velocity = None
         self.position = None
-        self.boresight = np.array([-1, 0, 0])
+        self.boresight = np.array([-1, 0, 0]) if current_boresight is None else current_boresight
         self.pixel_scale = configs['pixel_scale']
         self.fov = configs['fov']
         self.number_of_pixels = configs['number_of_pixels']
@@ -23,6 +23,8 @@ class Spacecraft:
         self.sigma_pointing = configs['sigma_pointing']
         self.matched_trajectory = None  # this contains an array of the trajectory of the sc that has same length as the asteroid traj in question
         self.matched_trajectory_full = None
+        self.curr_state_eme = current_state_eme
+        self.curr_sc_epoch = current_spacecraftepoch
         return
 
 

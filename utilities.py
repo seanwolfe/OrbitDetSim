@@ -405,8 +405,6 @@ def plot_od_scenario_3d_new(
     Returns (fig, ax).
     """
 
-    print(type(xlim))
-
     def _as_3(x):
         if x is None:
             return None

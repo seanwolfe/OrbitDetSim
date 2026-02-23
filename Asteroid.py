@@ -4,7 +4,7 @@ import numpy as np
 
 class Asteroid:
 
-    def __init__(self, id, ini_index, configs, current_state_eme=None):
+    def __init__(self, id, ini_index, configs, current_state_eme=None, current_epoch=None):
         self.id = id
         file_path = configs['minimoon_files_folder'] + id + '.csv'
         self.orbit = pd.read_csv(file_path, sep=' ', header=0, names=configs['minimoon_column_names'])
@@ -21,6 +21,7 @@ class Asteroid:
                                   self.orbit['Synodic z'].iloc[ini_index]])
         self.velocity = None
         self.curr_state_eme = current_state_eme
+        self.curr_epoch = current_epoch
 
         return
 

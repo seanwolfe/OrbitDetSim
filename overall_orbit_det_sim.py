@@ -1568,12 +1568,34 @@ def run_OD(config):
         attitude_coordination = AttitudeCoordinator(config)
 
         # asteroid
-        minimoon = Asteroid(row['ID_AST'], row['INDEX_USED'], config, current_state_eme=setup['frames']['ast_eme_ae_kms'])
+        minimoon = Asteroid(row['ID_AST'], row['INDEX_USED'], config,
+                            current_state_eme=setup['frames']['ast_eme_ae_kms'],
+                            current_epoch=setup['epochs']['ae_jdtdb'])
 
-        # spacecraft
+       # formation
+        formation = Formation(config)
+        formation.recall_formation(int(row['INDEX_USED']), config)
+        formation.match_spacecraft_trajectory_full(int(row['TOTAL_LENGTH']), config)
 
+        # set s/c current states
+        for zdx, sc in enumerate(formation.spacecraft):
+            sc.boresight = setup["frames"]["sc_pointing_eme_cartesian"][zdx, :]
+            sc.curr_state_eme = setup["frames"]["sc_eme_ae_kms"][zdx, :]
 
-        # formation
+            col = f"EPOCH_SC_{zdx + 1}(jdtdb)"
+            if col not in row.index:
+                raise KeyError(
+                    f"Missing '{col}' in row. Available EPOCH_SC_* cols: "
+                    f"{[c for c in row.index if str(c).startswith('EPOCH_SC_')]}"
+                )
+
+            epoch_val = row[col]
+
+            # robustly coerce (handles numpy scalars / strings / object dtypes)
+            if pd.isna(epoch_val):
+                raise ValueError(f"'{col}' is NaN for spacecraft {zdx + 1}")
+
+            sc.curr_sc_epoch = float(epoch_val)
 
 
 
@@ -1633,7 +1655,7 @@ def run_OD(config):
             ast_eme_traj_kms = n_body_propagator.propagate(ast_eme_state_kms, t_cur, big_t_set_jdtdb)
 
             # to visualize the possible att coord scenarios
-            viz_prop_flag = True
+            viz_prop_flag = False
             if viz_prop_flag:
                 util.plot_priors_positions_and_cov_2d(
                     x_ts,
