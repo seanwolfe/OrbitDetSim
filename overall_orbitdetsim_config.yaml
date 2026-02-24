@@ -18,6 +18,10 @@ telescope_offset: 0.3  # m
 sigma_ra: 0.
 sigma_dec: 0.
 sigma_pointing: 500
+number_of_frames: 16  # the number of measurements expected from detection technique
+time_between_frames: 31.25 # the time between consecutive frames from detection technique, in seconds
+patch_time: 1.6  # time for detection algo to process one patch
+patch_size: [224, 224]  # height x length in pixels
 
 ##################################################
 # Formation parameters
@@ -86,8 +90,6 @@ IOD_data_columns_geo_and_phys: ["EPOCH(JDTDB)", "GEO_X(KM)", "GEO_Y(KM)", "GEO_Z
 index_columns: ["run_number", "object_id", "spacecraft_number"]
 asteroid_mass: 1.0e+5
 spacecraft_mass: 1.0e+2
-number_of_frames: 16  # the number of measurements expected from detection technique
-time_between_frames: 31.25 # the time between consecutive frames from detection technique, in seconds
 run_number: 2  # only file names with this run number identified will be processed for (multi-job mpi on cluster, othewise need to use utilities.get_all_files instead in orbit_det_sim.py)
 
 

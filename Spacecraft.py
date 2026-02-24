@@ -18,6 +18,8 @@ class Spacecraft:
         self.mass = configs['mass']
         self.length = configs['length']
         self.telescope_diameter = configs['telescope_diameter']
+        self.telescope_mass = configs['telescope_mass']
+        self.telescope_offset = configs['telescope_offset']
         self.sigma_ra = configs['sigma_ra']
         self.sigma_dec = configs['sigma_dec']
         self.sigma_pointing = configs['sigma_pointing']

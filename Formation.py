@@ -9,6 +9,7 @@ class Formation:
         self.num_spacecraft = configs['num_spacecraft']
         self.sim_steps = None  # this comes from the asteroid trajectory
         self.spacecraft = None
+        self.currently_detecting = None
         self.initial_formation(configs)
 
     def initial_formation(self, configs):
@@ -257,6 +258,148 @@ class Formation:
         self.spacecraft = [Spacecraft(ini_pos, scs_start[k], config) for k, ini_pos in enumerate(scs_ini_pos)]
 
         return
+
+    def get_spacecraft_states(self, sc_ids=None):
+        """
+        Return spacecraft states in EME frame.
+
+        Parameters
+        ----------
+        sc_ids : None, int, sequence of int, or boolean array
+            - None: return all spacecraft states
+            - int: return state of one spacecraft (shape: (6,))
+            - sequence of int: return selected spacecraft states (N,6)
+            - boolean array: mask over spacecraft list
+
+        Returns
+        -------
+        np.ndarray
+            Spacecraft state(s) in EME frame.
+        """
+        all_sc = self.spacecraft
+
+        # Stack all states once
+        states = np.vstack([sc.curr_state_eme for sc in all_sc])  # (M,6)
+
+        if sc_ids is None:
+            return states
+
+        # Single spacecraft
+        if isinstance(sc_ids, int):
+            return states[sc_ids]
+
+        # List / tuple / ndarray / boolean mask
+        return states[sc_ids]
+
+    def get_spacecraft_pointings(self, sc_ids=None):
+        """
+        Return spacecraft boresight vectors.
+
+        Parameters
+        ----------
+        sc_ids : None, int, sequence of int, or boolean array
+            - None: return all boresights (M,3)
+            - int: return one boresight (3,)
+            - sequence / mask: return selected boresights (N,3)
+
+        Returns
+        -------
+        np.ndarray
+            Spacecraft boresight vector(s).
+        """
+        # Stack once: (M,3)
+        boresights = np.vstack([sc.boresight for sc in self.spacecraft])
+
+        if sc_ids is None:
+            return boresights
+
+        if isinstance(sc_ids, int):
+            return boresights[sc_ids]
+
+        return boresights[sc_ids]
+
+    def set_spacecraft_states(self, states_eme, sc_ids=None, *, set_epochs_from_row=None):
+        """
+        Set curr_state_eme for spacecraft (optionally a subset).
+
+        Parameters
+        ----------
+        states_eme : np.ndarray
+            If sc_ids is None: shape (M,6)
+            If sc_ids is not None: shape (N,6) matching selected spacecraft count
+        sc_ids : None, int, sequence of int, or boolean mask
+            Which spacecraft to set.
+        set_epochs_from_row : pandas.Series or None
+            If provided, also sets sc.curr_sc_epoch from row["EPOCH_SC_i(jdtdb)"].
+        """
+        all_sc = self.spacecraft
+        M = len(all_sc)
+
+        if sc_ids is None:
+            ids = np.arange(M)
+        elif isinstance(sc_ids, int):
+            ids = np.array([sc_ids], dtype=int)
+            states_eme = np.atleast_2d(states_eme)
+        else:
+            ids = np.asarray(sc_ids)
+            states_eme = np.asarray(states_eme)
+
+        if states_eme.shape != (len(ids), 6):
+            raise ValueError(f"states_eme must have shape ({len(ids)}, 6), got {states_eme.shape}")
+
+        for j, sc_idx in enumerate(ids):
+            sc = all_sc[int(sc_idx)]
+            sc.curr_state_eme = states_eme[j, :]
+
+            if set_epochs_from_row is not None:
+                col = f"EPOCH_SC_{int(sc_idx) + 1}(jdtdb)"
+                if col not in set_epochs_from_row.index:
+                    raise KeyError(
+                        f"Missing '{col}' in row. Available EPOCH_SC_* cols: "
+                        f"{[c for c in set_epochs_from_row.index if str(c).startswith('EPOCH_SC_')]}"
+                    )
+
+                epoch_val = set_epochs_from_row[col]
+                if pd.isna(epoch_val):
+                    raise ValueError(f"'{col}' is NaN for spacecraft {int(sc_idx) + 1}")
+
+                sc.curr_sc_epoch = float(epoch_val)
+
+    def set_spacecraft_pointings(self, boresights_eme, sc_ids=None, *, normalize=True):
+        """
+        Set spacecraft boresight vectors.
+
+        Parameters
+        ----------
+        boresights_eme : np.ndarray
+            If sc_ids is None: shape (M,3)
+            If sc_ids is not None: shape (N,3)
+        sc_ids : None, int, sequence of int, or boolean mask
+            Which spacecraft to set.
+        normalize : bool
+            If True, normalize boresights to unit vectors.
+        """
+        all_sc = self.spacecraft
+        M = len(all_sc)
+
+        if sc_ids is None:
+            ids = np.arange(M)
+        elif isinstance(sc_ids, int):
+            ids = np.array([sc_ids], dtype=int)
+            boresights_eme = np.atleast_2d(boresights_eme)
+        else:
+            ids = np.asarray(sc_ids)
+            boresights_eme = np.asarray(boresights_eme)
+
+        if boresights_eme.shape != (len(ids), 3):
+            raise ValueError(f"boresights_eme must have shape ({len(ids)}, 3), got {boresights_eme.shape}")
+
+        if normalize:
+            norms = np.linalg.norm(boresights_eme, axis=1, keepdims=True)
+            boresights_eme = boresights_eme / np.clip(norms, 1e-12, None)
+
+        for j, sc_idx in enumerate(ids):
+            all_sc[int(sc_idx)].boresight = boresights_eme[j, :]
 
 
 
