@@ -156,8 +156,8 @@ error:
 # epoch grid to search over
 epochs:
   dt_min: 10.0   # in seconds, first time to check
-  dt_max: 36010.0  # last time to check
-  n_dt: 3       # number of checks
+  dt_max: 8000.0  # last time to check
+  n_dt: 100       # number of checks
 
 d_mahal: 3.0
 

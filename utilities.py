@@ -2341,6 +2341,7 @@ def plot_priors_positions_and_cov_2d(
     P_pred_km2,
     *,
     sc_trajs_km=None,
+    sc_trajs_km2=None,          # <-- NEW: second spacecraft set
     sc_mark_every=1,
     planes=("xy", "xz", "yz"),
     stride=5,
@@ -2357,17 +2358,22 @@ def plot_priors_positions_and_cov_2d(
     Inputs:
       - X_pred_km: (K,6) or (6,) from ukf.propagate_priors(...)
       - P_pred_km2: (K,6,6) or (6,6) position covariance is top-left 3x3 (km^2)
-      - sc_trajs_km: optional spacecraft trajectories:
+
+      - sc_trajs_km: optional spacecraft trajectories (SET 1):
           * (K,M,6) or (K,M,3) or (M,6) or (M,3)
             - If (M,*) assumed static at one epoch (K=1)
             - If (K,M,*) time-varying; uses first 3 components as position
+
+      - sc_trajs_km2: optional second spacecraft trajectories (SET 2), same shape rules as sc_trajs_km.
+          Plotted with the SAME corresponding color as set 1, but with triangle markers.
+
       - sc_mark_every: plot markers for s/c every this many steps (for clarity)
 
     Plots:
       - One figure per plane (xy, xz, yz)
       - Mean asteroid trajectory (optional)
       - Covariance ellipses every `stride` steps at `n_std` sigma
-      - Spacecraft trajectories (optional)
+      - Spacecraft trajectories (optional) including a second set with matching colors
     """
     X = np.asarray(X_pred_km, dtype=float)
     P = np.asarray(P_pred_km2, dtype=float)
@@ -2383,25 +2389,40 @@ def plot_priors_positions_and_cov_2d(
     if P.shape != (K, 6, 6):
         raise ValueError(f"P_pred must be (K,6,6) matching X_pred, got {P.shape}")
 
-    # Normalize spacecraft trajectories to (K, M, 3) or None
-    sc_pos = None
-    if sc_trajs_km is not None:
-        sc = np.asarray(sc_trajs_km, dtype=float)
+    def _normalize_sc_trajs(sc_trajs, K_expected, name="sc_trajs_km"):
+        """Normalize spacecraft trajectories to (K, M, 3) or None."""
+        if sc_trajs is None:
+            return None
+
+        sc = np.asarray(sc_trajs, dtype=float)
 
         if sc.ndim == 2:
             # (M,3) or (M,6) -> treat as static (K=1)
             if sc.shape[1] not in (3, 6):
-                raise ValueError(f"sc_trajs_km (2D) must be (M,3) or (M,6), got {sc.shape}")
-            sc_pos = sc[:, :3].reshape(1, sc.shape[0], 3)
-        elif sc.ndim == 3:
+                raise ValueError(f"{name} (2D) must be (M,3) or (M,6), got {sc.shape}")
+            return sc[:, :3].reshape(1, sc.shape[0], 3)
+
+        if sc.ndim == 3:
             # (K,M,3) or (K,M,6)
             if sc.shape[2] not in (3, 6):
-                raise ValueError(f"sc_trajs_km (3D) must be (K,M,3) or (K,M,6), got {sc.shape}")
-            if sc.shape[0] != K:
-                raise ValueError(f"sc_trajs_km K mismatch: got {sc.shape[0]}, expected {K}")
-            sc_pos = sc[:, :, :3]
-        else:
-            raise ValueError(f"sc_trajs_km must be 2D or 3D array, got ndim={sc.ndim}")
+                raise ValueError(f"{name} (3D) must be (K,M,3) or (K,M,6), got {sc.shape}")
+            if sc.shape[0] != K_expected:
+                raise ValueError(f"{name} K mismatch: got {sc.shape[0]}, expected {K_expected}")
+            return sc[:, :, :3]
+
+        raise ValueError(f"{name} must be 2D or 3D array, got ndim={sc.ndim}")
+
+    # Normalize spacecraft trajectories
+    sc_pos1 = _normalize_sc_trajs(sc_trajs_km, K, name="sc_trajs_km")
+    sc_pos2 = _normalize_sc_trajs(sc_trajs_km2, K, name="sc_trajs_km2")
+
+    # If both provided, enforce same number of spacecraft M (so "corresponding color" is well-defined)
+    if sc_pos1 is not None and sc_pos2 is not None:
+        if sc_pos1.shape[1] != sc_pos2.shape[1]:
+            raise ValueError(
+                f"sc_trajs_km and sc_trajs_km2 must have same M. "
+                f"Got M1={sc_pos1.shape[1]} vs M2={sc_pos2.shape[1]}."
+            )
 
     idx_map = {"xy": (0, 1), "xz": (0, 2), "yz": (1, 2)}
 
@@ -2413,19 +2434,60 @@ def plot_priors_positions_and_cov_2d(
         plt.figure()
         ax = plt.gca()
 
-        # Spacecraft trajectories
-        if show_sc_paths and sc_pos is not None:
-            Ksc, Msc, _ = sc_pos.shape
-            # If spacecraft traj only has K=1 but asteroid has K>1, plot just the initial positions
-            if Ksc == 1 and K > 1:
-                xs = sc_pos[0, :, a]
-                ys = sc_pos[0, :, b]
-                ax.plot(xs, ys, marker="o", linestyle="None")
+        # Spacecraft trajectories (set 1 + set 2 with matching colors)
+        if show_sc_paths and (sc_pos1 is not None or sc_pos2 is not None):
+            mark_every = max(int(sc_mark_every), 1)
+
+            # Determine M across whichever is present
+            if sc_pos1 is not None:
+                K1, M, _ = sc_pos1.shape
             else:
-                mark_every = max(int(sc_mark_every), 1)
-                for m in range(Msc):
-                    ax.plot(sc_pos[:, m, a], sc_pos[:, m, b])
-                    ax.plot(sc_pos[::mark_every, m, a], sc_pos[::mark_every, m, b], marker="o", linestyle="None")
+                K2, M, _ = sc_pos2.shape
+
+            for m in range(M):
+                color_m = None
+
+                # --- Set 1: default markers (circles) ---
+                if sc_pos1 is not None:
+                    K1, _, _ = sc_pos1.shape
+                    if K1 == 1 and K > 1:
+                        xs = sc_pos1[0, m, a]
+                        ys = sc_pos1[0, m, b]
+                        line1 = ax.plot([xs], [ys], marker="o", linestyle="None")[0]
+                    else:
+                        line1 = ax.plot(sc_pos1[:, m, a], sc_pos1[:, m, b])[0]
+                        ax.plot(
+                            sc_pos1[::mark_every, m, a],
+                            sc_pos1[::mark_every, m, b],
+                            marker="o",
+                            linestyle="None",
+                            color=line1.get_color(),
+                        )
+                    color_m = line1.get_color()
+
+                # --- Set 2: same color, triangle markers ---
+                if sc_pos2 is not None:
+                    K2, _, _ = sc_pos2.shape
+                    if K2 == 1 and K > 1:
+                        xs = sc_pos2[0, m, a]
+                        ys = sc_pos2[0, m, b]
+                        ax.plot([xs], [ys], marker="^", linestyle="None", color=color_m)
+                    else:
+                        line2 = ax.plot(
+                            sc_pos2[:, m, a],
+                            sc_pos2[:, m, b],
+                            color=color_m,
+                        )[0]
+                        # If set 1 wasn't present, color_m comes from set 2 line
+                        if color_m is None:
+                            color_m = line2.get_color()
+                        ax.plot(
+                            sc_pos2[::mark_every, m, a],
+                            sc_pos2[::mark_every, m, b],
+                            marker="^",
+                            linestyle="None",
+                            color=color_m,
+                        )
 
         # Asteroid mean path
         if show_path and K > 1:
@@ -2448,6 +2510,7 @@ def plot_priors_positions_and_cov_2d(
             ax.set_aspect("equal", adjustable="datalim")
 
         ax.grid(True)
+
     plt.show()
 
 
@@ -5104,6 +5167,439 @@ def geo_secr_to_geo_eclip_generic(obj, earth, eps=1e-12, layout="auto",
     return out_int
 
 
+def geo_eclip_to_geo_secr_generic(obj, earth, eps=1e-12, layout="auto",
+                                 obj_hint=None, earth_hint=None):
+    """
+    Convert geocentric ECLIPJ2000 position(s) or state(s) to SECR (Earth-centered rotating).
+
+    STRICT RULES:
+    - obj dim = 3 → earth may be 3 or 6 (earth velocity ignored)
+    - obj dim = 6 → earth MUST be 6 (otherwise ValueError)
+
+    HINT SYSTEM (new, explicit structure):
+      You can now explicitly define the axis order using tokens:
+        - 'batch'   : M axis (multiple objects / spacecraft)
+        - 'time'    : N axis (time series)
+        - 'position': dim=3
+        - 'state'   : dim=6
+        - 3 or 6    : dim override (optional)
+
+      Examples (all permutations supported):
+        obj_hint=('batch','position')  -> (M,3)
+        obj_hint=('position','batch')  -> (3,M)
+        obj_hint=('batch','state')     -> (M,6)
+
+        obj_hint=('time','state')      -> (N,6)
+        obj_hint=('state','time')      -> (6,N)
+
+        obj_hint=('time','state','batch') -> (N,6,M)
+        obj_hint=('batch','time','state') -> (M,N,6)
+        etc.
+
+      Earth hints:
+        Earth is treated as time-indexed only (no 'batch' axis supported):
+          earth_hint=('time','state') -> (N,6)
+          earth_hint=('state','time') -> (6,N)
+          earth_hint=('time','position') -> (N,3)
+          earth_hint=('position','time') -> (3,N)
+        If earth is constant, pass (3,) or (6,) (hint optional).
+
+    Returns: same layout as obj (including the hinted axis order if hint was used).
+    """
+
+    if layout not in ("auto", "batch", "time"):
+        raise ValueError("layout must be one of {'auto','batch','time'}")
+
+    O = np.asarray(obj, dtype=float)
+    E = np.asarray(earth, dtype=float)
+
+    # -----------------------
+    # Hint parsing: explicit axis order
+    # -----------------------
+    def _parse_struct_hint(h, name, allow_batch=True):
+        """
+        Returns (order, dim) where:
+          order: list like ['batch','dim'] or ['time','dim','batch'] (axis order)
+          dim: 3 or 6 or None
+        """
+        if h is None:
+            return None, None
+
+        # tokenize
+        if isinstance(h, (tuple, list, set)):
+            tokens = list(h)
+        elif isinstance(h, str):
+            s = h.strip()
+            if s.startswith("(") and s.endswith(")"):
+                s = s[1:-1]
+            tokens = [t.strip() for t in s.split(",") if t.strip()]
+        else:
+            raise ValueError(f"{name}_hint must be None, a tuple/list/set, or a string like '(time,state,batch)'")
+
+        order = []
+        dim = None
+
+        def _add_axis(ax):
+            if ax in order:
+                raise ValueError(f"{name}_hint repeats axis '{ax}'. Got {h}.")
+            order.append(ax)
+
+        for t in tokens:
+            # ints
+            if isinstance(t, (int, np.integer)):
+                iv = int(t)
+                if iv in (3, 6):
+                    dim = iv
+                else:
+                    raise ValueError(f"{name}_hint invalid dim {t} (use 3 or 6)")
+                continue
+
+            ts = str(t).strip().lower()
+
+            if ts == "batch":
+                if not allow_batch:
+                    raise ValueError(f"{name}_hint may not include 'batch'. Earth cannot be batch-indexed here.")
+                _add_axis("batch")
+            elif ts == "time":
+                _add_axis("time")
+            elif ts in ("position", "pos"):
+                if dim is not None and dim != 3:
+                    raise ValueError(f"{name}_hint conflicts: both state(6) and position(3) implied.")
+                dim = 3
+                _add_axis("dim")
+            elif ts in ("state", "st"):
+                if dim is not None and dim != 6:
+                    raise ValueError(f"{name}_hint conflicts: both position(3) and state(6) implied.")
+                dim = 6
+                _add_axis("dim")
+            elif ts in ("3", "6"):
+                dim = int(ts)
+                # if user did NOT include position/state token, we still need a 'dim' axis
+                if "dim" not in order:
+                    _add_axis("dim")
+            elif ts == "":
+                continue
+            else:
+                raise ValueError(
+                    f"{name}_hint token '{t}' unrecognized. Use 'batch','time','position','state',3,6."
+                )
+
+        if dim is not None and "dim" not in order:
+            _add_axis("dim")
+
+        if "dim" not in order:
+            raise ValueError(f"{name}_hint must include 'position'/'state' (or 3/6). Got {h}.")
+
+        if (dim not in (3, 6)):
+            raise ValueError(f"{name}_hint must resolve dim to 3 or 6. Got {h}.")
+
+        return order, dim
+
+    obj_order_hint, obj_dim_hint = _parse_struct_hint(obj_hint, "obj", allow_batch=True)
+    earth_order_hint, earth_dim_hint = _parse_struct_hint(earth_hint, "earth", allow_batch=False) if earth_hint is not None else (None, None)
+
+    # -----------------------
+    # Dim inference (fallback when no explicit hint)
+    # -----------------------
+    def infer_dim_fallback(A, name):
+        if A.ndim == 1:
+            if A.shape in [(3,), (6,)]:
+                return A.shape[0]
+            raise ValueError(f"{name} expected (3,) or (6,), got {A.shape}")
+
+        if A.ndim == 2:
+            r, c = A.shape
+            r_is = r in (3, 6)
+            c_is = c in (3, 6)
+            if r_is and not c_is:
+                return r
+            if c_is and not r_is:
+                return c
+            if r_is and c_is:
+                return 6 if (r == 6 or c == 6) else 3
+
+        if A.ndim == 3 and A.shape[-1] in (3, 6):
+            return A.shape[-1]
+
+        raise ValueError(f"Could not infer dim for {name} with shape {A.shape}")
+
+    obj_dim = obj_dim_hint if obj_dim_hint is not None else infer_dim_fallback(O, "obj")
+    earth_dim = earth_dim_hint if earth_dim_hint is not None else infer_dim_fallback(E, "earth")
+
+    # -----------------------
+    # STRICT RULE
+    # -----------------------
+    if obj_dim == 6 and earth_dim == 3:
+        raise ValueError(
+            "Invalid input: obj is 6D state but earth is 3D position. "
+            "Earth velocity is required to compute omega and the rotating-frame velocity correction."
+        )
+
+    # -----------------------
+    # Normalize obj to internal (M,N,dim), and record how to restore
+    # -----------------------
+    def _normalize_obj_with_hint(A, order, dim):
+        """
+        Uses explicit axis order to convert A to (M,N,dim).
+        Missing axes ('batch' or 'time') are treated as singleton.
+        """
+        if A.ndim == 1:
+            if A.shape != (dim,):
+                raise ValueError(f"obj expected ({dim},), got {A.shape}")
+            A_int = A[None, None, :]
+            restore = {"used_hint": True, "order": ["dim"], "orig_ndim": 1}
+            return A_int, restore
+
+        if A.ndim != len(order):
+            raise ValueError(f"obj_hint implies {len(order)}D but obj has ndim={A.ndim}, shape={A.shape}")
+
+        ax_dim = order.index("dim")
+        ax_batch = order.index("batch") if "batch" in order else None
+        ax_time  = order.index("time")  if "time" in order else None
+
+        if A.shape[ax_dim] != dim:
+            raise ValueError(f"obj dim axis length {A.shape[ax_dim]} does not match hinted dim={dim}.")
+
+        target_axes_existing = []
+        if ax_batch is not None:
+            target_axes_existing.append(ax_batch)
+        if ax_time is not None:
+            target_axes_existing.append(ax_time)
+        target_axes_existing.append(ax_dim)
+
+        A_perm = np.transpose(A, axes=target_axes_existing)
+
+        if ax_batch is not None and ax_time is not None:
+            A_int = A_perm
+        elif ax_batch is not None and ax_time is None:
+            A_int = A_perm[:, None, :]
+        elif ax_batch is None and ax_time is not None:
+            A_int = A_perm[None, :, :]
+        else:
+            A_int = A_perm[None, None, :]
+
+        restore = {"used_hint": True, "order": order, "orig_ndim": A.ndim}
+        return A_int, restore
+
+    def _choose_obj_mode_for_Kdim(K):
+        if layout in ("batch", "time"):
+            return layout
+        earth_time_like = (
+            E.ndim == 2 and (
+                (E.shape[1] == earth_dim and E.shape[0] == K) or
+                (E.shape[0] == earth_dim and E.shape[1] == K)
+            )
+        )
+        return "time" if earth_time_like else "batch"
+
+    if obj_order_hint is not None:
+        O_int, obj_restore = _normalize_obj_with_hint(O, obj_order_hint, obj_dim)
+        out_style = ("hinted", obj_restore)
+    else:
+        if O.ndim == 1:
+            if O.shape != (obj_dim,):
+                raise ValueError(f"obj expected ({obj_dim},), got {O.shape}")
+            O_int = O[None, None, :]
+            out_style = ("single",)
+
+        elif O.ndim == 2:
+            if O.shape == (obj_dim, 1):
+                O_int = O[:, 0][None, None, :]
+                out_style = ("single",)
+
+            elif O.shape == (1, obj_dim):
+                O_int = O[0, :][None, None, :]
+                out_style = ("single",)
+
+            elif O.shape[0] == obj_dim and O.shape[1] != obj_dim:  # (dim,N)
+                O_int = O.T[None, :, :]
+                out_style = ("dimxN",)
+
+            elif O.shape[1] == obj_dim and O.shape[0] != obj_dim:  # (K,dim)
+                K = O.shape[0]
+                mode = _choose_obj_mode_for_Kdim(K)
+                if mode == "time":
+                    O_int = O[None, :, :]
+                    out_style = ("Nxdim_time",)
+                else:
+                    O_int = O[:, None, :]
+                    out_style = ("Mxdim",)
+
+            elif O.shape[0] == obj_dim and O.shape[1] == obj_dim:
+                raise ValueError(f"Ambiguous obj shape {O.shape}. Reshape explicitly or use obj_hint.")
+            else:
+                raise ValueError(f"obj unsupported shape {O.shape}")
+
+        elif O.ndim == 3:
+            if O.shape[2] != obj_dim:
+                raise ValueError(f"obj expected (M,N,{obj_dim}), got {O.shape}")
+            O_int = O
+            out_style = ("MNdim",)
+
+        else:
+            raise ValueError(f"obj unsupported ndim={O.ndim}")
+
+    M, N, _ = O_int.shape
+
+    # -----------------------
+    # Normalize earth to (N, earth_dim) (time-indexed only)
+    # -----------------------
+    def _normalize_earth_to_Nd(Earr, N, dim, order_hint=None):
+        if order_hint is not None:
+            if Earr.ndim == 1:
+                if Earr.shape != (dim,):
+                    raise ValueError(f"earth expected ({dim},), got {Earr.shape}")
+                return np.repeat(Earr[None, :], N, axis=0)
+
+            if Earr.ndim != len(order_hint):
+                raise ValueError(f"earth_hint implies {len(order_hint)}D but earth has ndim={Earr.ndim}, shape={Earr.shape}")
+
+            if "batch" in order_hint:
+                raise ValueError("earth_hint may not include 'batch' in this function.")
+
+            ax_dim = order_hint.index("dim")
+            ax_time = order_hint.index("time") if "time" in order_hint else None
+
+            if Earr.shape[ax_dim] != dim:
+                raise ValueError(f"earth dim axis length {Earr.shape[ax_dim]} does not match hinted dim={dim}.")
+
+            if ax_time is None:
+                squeezed = np.squeeze(Earr)
+                if squeezed.shape != (dim,):
+                    raise ValueError(f"earth constant form must squeeze to ({dim},), got {squeezed.shape}")
+                return np.repeat(squeezed[None, :], N, axis=0)
+
+            E_td = np.transpose(Earr, axes=[ax_time, ax_dim])
+            if E_td.shape[0] != N:
+                raise ValueError(f"earth has N={E_td.shape[0]} but obj has N={N}")
+            return E_td
+
+        if Earr.ndim == 1:
+            if Earr.shape != (dim,):
+                raise ValueError(f"earth expected ({dim},), got {Earr.shape}")
+            return np.repeat(Earr[None, :], N, axis=0)
+
+        if Earr.ndim == 2:
+            if Earr.shape == (dim, 1):
+                return np.repeat(Earr[:, 0][None, :], N, axis=0)
+            if Earr.shape == (1, dim):
+                return np.repeat(Earr[0, :][None, :], N, axis=0)
+
+            if Earr.shape[1] == dim and Earr.shape[0] == N:
+                return Earr
+            if Earr.shape[0] == dim and Earr.shape[1] == N:
+                return Earr.T
+
+            if Earr.shape[0] == dim and Earr.shape[1] == dim:
+                raise ValueError(
+                    f"Ambiguous earth shape {Earr.shape} with dim={dim}. Reshape explicitly or use earth_hint."
+                )
+
+        raise ValueError(f"earth unsupported shape {Earr.shape} for dim={dim} and N={N}")
+
+    E_N = _normalize_earth_to_Nd(E, N, earth_dim, earth_order_hint)
+
+    # For obj_dim==3, allow earth_dim==6 but ignore vel; for obj_dim==6 earth_dim==6 is guaranteed
+    h_r_E = E_N[:, :3]                 # (N,3)
+    h_v_E = E_N[:, 3:] if obj_dim == 6 else None
+
+    # ---- unpack ECLIP obj ----
+    r = O_int[:, :, :3]                # (M,N,3) in inertial ecliptic
+    v = O_int[:, :, 3:] if obj_dim == 6 else None
+
+    # angles from Earth-Sun direction (same convention as inverse function)
+    angles = np.arctan2(-h_r_E[:, 1], -h_r_E[:, 0])  # (N,)
+
+    c = np.cos(angles)
+    s = np.sin(angles)
+
+    # Rotation inertial ecliptic -> SECR: Rz(-angles)
+    Rt = np.zeros((N, 3, 3), dtype=float)
+    Rt[:, 0, 0] = c
+    Rt[:, 0, 1] = s
+    Rt[:, 1, 0] = -s
+    Rt[:, 1, 1] = c
+    Rt[:, 2, 2] = 1.0
+
+    # rotating position: r' = Rt * r
+    secr_r = np.einsum("nij,mnj->mni", Rt, r)  # (M,N,3)
+
+    if obj_dim == 3:
+        out_int = secr_r
+    else:
+        # omega magnitude from Earth motion (inertial)
+        rE_norm2 = np.sum(h_r_E * h_r_E, axis=1)
+        rE_norm2 = np.maximum(rE_norm2, eps)
+        omega_mag = np.linalg.norm(np.cross(h_r_E, h_v_E), axis=1) / rE_norm2  # (N,)
+
+        omega = np.zeros((N, 3), dtype=float)
+        omega[:, 2] = omega_mag
+
+        # omega in SECR coordinates (rotate inertial omega into SECR using Rt)
+        omega_p = np.einsum("nij,nj->ni", Rt, omega)  # (N,3)
+
+        # rotating velocity: v' = Rt*v - omega' x r'
+        secr_v = np.einsum("nij,mnj->mni", Rt, v) - np.cross(omega_p[None, :, :], secr_r)
+
+        out_int = np.concatenate([secr_r, secr_v], axis=2)  # (M,N,6)
+
+    # -----------------------
+    # Restore original layout
+    # -----------------------
+    def _restore_obj_from_hint(out_int_MNdim, restore):
+        order = restore["order"]
+        orig_ndim = restore["orig_ndim"]
+
+        if orig_ndim == 1:
+            return out_int_MNdim[0, 0, :]
+
+        have_batch = "batch" in order
+        have_time  = "time" in order
+
+        A = out_int_MNdim
+
+        if not have_batch:
+            A = A[0, :, :]  # (N,dim)
+        if not have_time:
+            if have_batch:
+                A = A[:, 0, :]  # (M,dim)
+            else:
+                A = A[0, :]     # (dim,)
+
+        present_axes = []
+        if have_batch:
+            present_axes.append("batch")
+        if have_time:
+            present_axes.append("time")
+        present_axes.append("dim")
+
+        if A.ndim == 1:
+            return A
+
+        src = present_axes
+        dst = order[:]
+
+        if set(src) != set(dst):
+            raise RuntimeError(f"Internal restore mismatch: src={src}, dst={dst}")
+
+        perm = [src.index(ax) for ax in dst]
+        return np.transpose(A, axes=perm)
+
+    if out_style[0] == "hinted":
+        return _restore_obj_from_hint(out_int, out_style[1])
+
+    if out_style[0] == "single":
+        return out_int[0, 0, :]
+    if out_style[0] == "Mxdim":
+        return out_int[:, 0, :]
+    if out_style[0] == "dimxN":
+        return out_int[0, :, :].T
+    if out_style[0] == "Nxdim_time":
+        return out_int[0, :, :]
+    return out_int
+
+
+
 def geo_eme_to_geo_eclip_generic(x, eps=1e-12, layout="auto", hint=None):
     """
     Convert geocentric EME/J2000 position(s) or state(s) to geocentric ECLIPJ2000.
@@ -5443,6 +5939,249 @@ def geo_eme_to_geo_eclip_generic(x, eps=1e-12, layout="auto", hint=None):
     if out_style[0] == "Nxdim_time":
         return out_int[0, :, :]
     return out_int
+
+
+
+
+def piecewise_anchor_and_propagate_spacecraft_trajs(
+    *,
+    formation,
+    minimoon,
+    t_targets_jdtdb,          # (T,) JD TDB
+    n_body_propagator,
+    au_km=149_597_870.700,    # km per AU
+
+    # SPICE config for Earth at LPF epoch
+    earth_id=399,
+    sun_id=10,
+    frame_eclip="ECLIPJ2000",
+
+    strict_bounds=True,
+):
+    """
+    Piecewise anchored propagation using hourly quasi-halo reference rows.
+
+    EARTH SOURCE HYBRID (as requested):
+      - Earth(t_lpf): from SPICE (heliocentric ECLIPJ2000, km, km/s)
+      - Earth(t_ast): from minimoon.orbit table (heliocentric ECLIPJ2000, AU, AU/day)
+
+    For each requested epoch t in t_targets_jdtdb:
+      - pick hourly anchor index k from minimoon.orbit['Julian Date'] via floor/bin (searchsorted - 1)
+      - build initial sc states at anchor epoch t0 = jd_grid[k] by:
+            (1) read each SC's matched_trajectory_full row k (GEO-EME state; stored as AU & AU/day despite labels)
+            (2) GEO-EME(lpf) -> GEO-SECR using Earth(t_lpf) from SPICE
+            (3) GEO-SECR -> GEO-EME(t0) using Earth(t0) from TABLE
+      - propagate from t0 to the subset of target times belonging to that anchor hour
+      - stitch into output array (T,M,6)
+
+    Returns:
+      out: (T, M, 6) GEO-EME states in km, km/s
+    """
+
+    t_targets = np.asarray(t_targets_jdtdb, dtype=float).ravel()
+    T = t_targets.shape[0]
+
+    jd_grid = np.asarray(minimoon.orbit["Julian Date"], dtype=float).ravel()
+    if jd_grid.ndim != 1 or jd_grid.size < 2:
+        raise ValueError("minimoon.orbit['Julian Date'] must be 1D with >=2 entries")
+
+    M = len(formation.spacecraft)
+
+    # ---- Earth helio-eclip from TABLE (AU, AU/day) ----
+    earth_cols = [
+        "Earth x (Helio)", "Earth y (Helio)", "Earth z (Helio)",
+        "Earth vx (Helio)", "Earth vy (Helio)", "Earth vz (Helio)",
+    ]
+    for c in earth_cols:
+        if c not in minimoon.orbit.columns:
+            raise KeyError(f"minimoon.orbit missing required Earth ephemeris column '{c}'")
+    earth_table_au_aud = np.asarray(minimoon.orbit[earth_cols], dtype=float)  # (N,6)
+
+    AU_KM = float(au_km)
+    AU_PER_DAY_TO_KMPS = AU_KM / 86400.0
+
+    def _state_au_aud_to_kms(x6):
+        x6 = np.asarray(x6, dtype=float).reshape(6,)
+        y = x6.copy()
+        y[:3] *= AU_KM
+        y[3:] *= AU_PER_DAY_TO_KMPS
+        return y
+
+    def _earth_ast_from_table_at_index_kms(k):
+        return _state_au_aud_to_kms(earth_table_au_aud[int(k)])
+
+    # -------------------------
+    # Time conversions
+    # -------------------------
+    def _timestamp_to_et(ts):
+        """
+        matched_trajectory_full['Time'] is (effectively) UTC timestamp.
+        Convert to SPICE ET.
+        """
+        if isinstance(ts, pd.Timestamp):
+            ts = ts.to_pydatetime()
+        s = ts.strftime("%Y-%m-%dT%H:%M:%S")
+        try:
+            return float(spice.utc2et(s))
+        except Exception as e:
+            raise RuntimeError(f"Failed UTC -> ET via sp.utc2et for '{s}'") from e
+
+    # -------------------------
+    # Earth(t_lpf) from SPICE (HELIO ECLIPJ2000)
+    # -------------------------
+    def _earth_lpf_from_spice_kms(et):
+        """
+        Earth state wrt Sun in ECLIPJ2000 (km, km/s), from SPICE.
+        """
+        st, _lt = spice.spkgeo(int(earth_id), float(et), frame_eclip, int(sun_id))
+        return np.asarray(st, dtype=float).reshape(6,)
+
+    # -------------------------
+    # SC row -> GEO-EME state (km, km/s)
+    # -------------------------
+    def _sc_row_geo_eme_state_kms(row):
+        # columns labeled km/km/s but actually AU and AU/day
+        x_au = np.array(
+            [
+                float(row["GEO_EME_X_(km)"]),
+                float(row["GEO_EME_Y_(km)"]),
+                float(row["GEO_EME_Z_(km)"]),
+            ],
+            dtype=float,
+        )
+        v_au_per_day = np.array(
+            [
+                float(row["GEO_EME_Vx_(km/s)"]),
+                float(row["GEO_EME_Vy_(km/s)"]),
+                float(row["GEO_EME_Vz_(km/s)"]),
+            ],
+            dtype=float,
+        )
+        x_km = x_au * AU_KM
+        v_kmps = v_au_per_day * AU_PER_DAY_TO_KMPS
+        return np.concatenate([x_km, v_kmps], axis=0)
+
+    # -------------------------
+    # Re-epoch mapping: LPF -> SECR(using SPICE Earth) -> AST(using TABLE Earth)
+    # -------------------------
+    def _reepoch_sc_state_to_anchor_epoch(*, sc_row, earth_ast_kms):
+        """
+        GEO-EME(lpf) -> GEO-ECLIP(lpf)
+        GEO-ECLIP(lpf) -> GEO-SECR(lpf)   using Earth_lpf from SPICE
+        GEO-SECR(lpf)  -> GEO-ECLIP(ast)  using Earth_ast from TABLE
+        GEO-ECLIP(ast) -> GEO-EME(ast)
+        """
+        # LPF epoch (from spacecraft table time)
+        et_lpf = _timestamp_to_et(sc_row["Time"])
+
+        # Earth at LPF from SPICE
+        earth_lpf_kms = _earth_lpf_from_spice_kms(et_lpf)
+
+        # Earth at AST anchor from TABLE (already km/km/s)
+        earth_ast_kms = np.asarray(earth_ast_kms, dtype=float).reshape(6,)
+
+        # SC GEO-EME at LPF
+        x_eme_lpf = _sc_row_geo_eme_state_kms(sc_row)
+
+        # GEO-EME -> GEO-ECLIP
+        try:
+            x_ecl_lpf = geo_eme_to_geo_eclip_generic(x_eme_lpf, hint=("state",))
+        except TypeError:
+            x_ecl_lpf = geo_eme_to_geo_eclip_generic(x_eme_lpf)
+
+        # GEO-ECLIP -> GEO-SECR at LPF (Earth from SPICE)
+        x_secr = geo_eclip_to_geo_secr_generic(
+            x_ecl_lpf, earth_lpf_kms,
+            obj_hint=("state",),
+            earth_hint=("state",),
+        )
+
+        # GEO-SECR -> GEO-ECLIP at AST (Earth from TABLE)
+        x_ecl_ast = geo_secr_to_geo_eclip_generic(
+            x_secr, earth_ast_kms,
+            obj_hint=("state",),
+            earth_hint=("state",),
+        )
+
+        # GEO-ECLIP -> GEO-EME
+        try:
+            x_eme_ast = geo_eclip_to_geo_eme_generic(x_ecl_ast, hint=("state",))
+        except TypeError:
+            x_eme_ast = geo_eclip_to_geo_eme_generic(x_ecl_ast)
+
+        return np.asarray(x_eme_ast, dtype=float).reshape(6,)
+
+    # -------------------------
+    # Assign each target to an hourly anchor index k (floor)
+    # -------------------------
+    k_of_t = np.searchsorted(jd_grid, t_targets, side="right") - 1
+    if strict_bounds:
+        if np.any(k_of_t < 0) or np.any(k_of_t >= jd_grid.size):
+            bad = np.where((k_of_t < 0) | (k_of_t >= jd_grid.size))[0][:10]
+            raise ValueError(
+                "Some requested epochs are outside minimoon.orbit JD grid. "
+                f"Example bad indices: {bad}, times: {t_targets[bad]}"
+            )
+    else:
+        k_of_t = np.clip(k_of_t, 0, jd_grid.size - 1)
+
+    groups = {}
+    for ti, k in enumerate(k_of_t.tolist()):
+        groups.setdefault(int(k), []).append(int(ti))
+
+    # -------------------------
+    # For each group, build anchored initial states and propagate
+    # -------------------------
+    out = np.full((T, M, 6), np.nan, dtype=float)
+
+    for k, idx_list in groups.items():
+        idx = np.asarray(idx_list, dtype=int)
+
+        # anchor epoch t0 is the asteroid JD grid hour
+        t0_jdtdb = float(jd_grid[k])
+
+        # Earth at AST anchor from TABLE
+        earth_ast_kms = _earth_ast_from_table_at_index_kms(k)
+
+        # subset target times, sorted
+        t_sub = t_targets[idx]
+        order = np.argsort(t_sub)
+        t_sub_sorted = t_sub[order]
+        idx_sorted = idx[order]
+
+        # initial states (M,6) at anchor
+        x0_M6 = np.zeros((M, 6), dtype=float)
+        for m, sc in enumerate(formation.spacecraft):
+            row = sc.matched_trajectory_full.iloc[k]
+            x0_M6[m, :] = _reepoch_sc_state_to_anchor_epoch(
+                sc_row=row,
+                earth_ast_kms=earth_ast_kms,
+            )
+
+        # propagate from t0 to targets in this bin
+        traj = n_body_propagator.propagate_multiple_objects(
+            x0_M6,
+            t0_jdtdb,
+            t_sub_sorted,
+        )
+        traj = np.asarray(traj, dtype=float)
+
+        # normalize to (len(t_sub_sorted), M, 6)
+        if traj.ndim != 3:
+            raise ValueError(f"propagate_multiple_objects returned ndim={traj.ndim}, expected 3D")
+        if traj.shape == (len(t_sub_sorted), M, 6):
+            traj_T_M_6 = traj
+        elif traj.shape == (M, len(t_sub_sorted), 6):
+            traj_T_M_6 = np.transpose(traj, (1, 0, 2))
+        else:
+            raise ValueError(
+                f"propagate_multiple_objects returned unexpected shape {traj.shape}; "
+                f"expected ({len(t_sub_sorted)},{M},6) or ({M},{len(t_sub_sorted)},6)"
+            )
+
+        out[idx_sorted, :, :] = traj_T_M_6
+
+    return out
 
 
 def get_sc_state_from_sc1_position(detected_pop, config):

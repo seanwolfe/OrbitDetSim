@@ -1623,10 +1623,18 @@ def run_OD(config):
                     n_body_propagator.propagate_multiple_objects
                 )
 
-                # propagate formation to each epoch
-                sc_eme_states_kms = formation.get_spacecraft_states()  # current sc pos at detection instant
+                # because we want a different integration epoch to start from for every hour investigated
+                sc_eme_states_kms_piecewise = util.piecewise_anchor_and_propagate_spacecraft_trajs(
+                    formation=formation, minimoon=minimoon,
+                    t_targets_jdtdb=timer.attcoord_searchtimes_jdtdb,
+                    n_body_propagator=n_body_propagator
+                )
+
+                # propagate formation to each epoch if we just did it smoothly
+                sc_eme_states_kms = formation.get_spacecraft_states()  # current sc state at detection instant
                 sc_eme_trajs_kms = n_body_propagator.propagate_multiple_objects(sc_eme_states_kms, timer.curr_epoch,
                                                                                 timer.attcoord_searchtimes_jdtdb)
+
 
                 # propagate asteroid true to each epoch
                 ast_eme_state_kms = minimoon.curr_state_eme
@@ -1637,12 +1645,13 @@ def run_OD(config):
                 # need check evaluate what the difference between s/c pos integrated for an hour vs. real pos
 
                 # to visualize the possible att coord scenarios
-                viz_prop_flag = False
+                viz_prop_flag = True
                 if viz_prop_flag:
                     util.plot_priors_positions_and_cov_2d(
                         x_ts,
                         P_ts,
                         sc_trajs_km=sc_eme_trajs_kms,  # (K,M,6) or (K,M,3)
+                        sc_trajs_km2=sc_eme_states_kms_piecewise,
                         stride=config['two_d_prop']['stride'],
                         n_std=config['two_d_prop']['stride'],
                         planes=("xy", "xz", "yz"),
@@ -1653,7 +1662,7 @@ def run_OD(config):
                 # get various required inputs
                 sc_pointings_eme = formation.get_spacecraft_pointings()  # where sc are pointing
 
-                # assumption: all s/c have simlar slew characteristics
+                # assumption: all s/c have similar slew characteristics
                 sc0 = formation.spacecraft[0]
                 theta_h_rad = util.fov_deg2_to_half_angle_rad(sc0.fov)  # width of sc FOV
                 tau_max = sc0.reaction_wheel_torque
