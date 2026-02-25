@@ -1576,7 +1576,8 @@ def run_OD(config):
 
         # formation
         formation = Formation(config)
-        formation.recall_formation(int(row['INDEX_USED']), config)
+        sc1_ini_index = formation.get_index_from_pos(util.parse_vec_cell(row["SPACECRAFT_1_INI_POS(km)"]))
+        formation.recall_formation(sc1_ini_index, config)
         formation.match_spacecraft_trajectory_full(int(row['TOTAL_LENGTH']), config)
         formation.set_spacecraft_states(
             setup["frames"]["sc_eme_ae_kms"],
@@ -1625,13 +1626,14 @@ def run_OD(config):
 
                 # because we want a different integration epoch to start from for every hour investigated
                 sc_eme_states_kms_piecewise = util.piecewise_anchor_and_propagate_spacecraft_trajs(
-                    formation=formation, minimoon=minimoon,
+                    formation=formation, minimoon=minimoon, timer=timer,
                     t_targets_jdtdb=timer.attcoord_searchtimes_jdtdb,
                     n_body_propagator=n_body_propagator
                 )
 
                 # propagate formation to each epoch if we just did it smoothly
                 sc_eme_states_kms = formation.get_spacecraft_states()  # current sc state at detection instant
+
                 sc_eme_trajs_kms = n_body_propagator.propagate_multiple_objects(sc_eme_states_kms, timer.curr_epoch,
                                                                                 timer.attcoord_searchtimes_jdtdb)
 

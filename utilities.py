@@ -5942,14 +5942,16 @@ def geo_eme_to_geo_eclip_generic(x, eps=1e-12, layout="auto", hint=None):
 
 
 
-
 def piecewise_anchor_and_propagate_spacecraft_trajs(
     *,
     formation,
     minimoon,
-    t_targets_jdtdb,          # (T,) JD TDB
+    timer,                    # needs curr_integration_index
+    t_targets_jdtdb,           # (T,) JD TDB epochs you want states at
     n_body_propagator,
-    au_km=149_597_870.700,    # km per AU
+
+    # units
+    au_km=149_597_870.700,     # km per AU (only used because table values are AU and AU/day)
 
     # SPICE config for Earth at LPF epoch
     earth_id=399,
@@ -5959,35 +5961,59 @@ def piecewise_anchor_and_propagate_spacecraft_trajs(
     strict_bounds=True,
 ):
     """
-    Piecewise anchored propagation using hourly quasi-halo reference rows.
+    Piecewise anchored propagation using quasi-halo reference rows.
 
-    EARTH SOURCE HYBRID (as requested):
-      - Earth(t_lpf): from SPICE (heliocentric ECLIPJ2000, km, km/s)
-      - Earth(t_ast): from minimoon.orbit table (heliocentric ECLIPJ2000, AU, AU/day)
+    Index/anchor logic (IMPORTANT, fixes off-by-one):
+      - Start index is k0 = timer.curr_integration_index
+      - Anchor epochs come from the minimoon hourly grid: jd_grid[k]
+      - Targets are assigned to anchors RELATIVE to k0:
+            dt_hour = jd_grid[k0+1] - jd_grid[k0]
+            steps_after = floor((t - jd_grid[k0]) / dt_hour)
+            k = k0 + steps_after
+        so the first anchor is always k0 for targets near the start.
 
-    For each requested epoch t in t_targets_jdtdb:
-      - pick hourly anchor index k from minimoon.orbit['Julian Date'] via floor/bin (searchsorted - 1)
-      - build initial sc states at anchor epoch t0 = jd_grid[k] by:
-            (1) read each SC's matched_trajectory_full row k (GEO-EME state; stored as AU & AU/day despite labels)
-            (2) GEO-EME(lpf) -> GEO-SECR using Earth(t_lpf) from SPICE
-            (3) GEO-SECR -> GEO-EME(t0) using Earth(t0) from TABLE
-      - propagate from t0 to the subset of target times belonging to that anchor hour
-      - stitch into output array (T,M,6)
+    Earth sources (as requested):
+      - Earth(t_lpf): from SPICE (heliocentric ECLIPJ2000, km, km/s) using spice.spkgeo
+      - Earth(t_ast): from minimoon.orbit table (heliocentric ECLIPJ2000, AU, AU/day), converted to km, km/s
+
+    Spacecraft row states:
+      - matched_trajectory_full GEO_EME columns are labeled km/km/s but are actually AU and AU/day.
+        They are converted to km/km/s before use.
 
     Returns:
       out: (T, M, 6) GEO-EME states in km, km/s
     """
 
+    # -------------------------
+    # Inputs
+    # -------------------------
     t_targets = np.asarray(t_targets_jdtdb, dtype=float).ravel()
-    T = t_targets.shape[0]
+    T = int(t_targets.shape[0])
+    M = int(len(formation.spacecraft))
+
+    if T == 0:
+        return np.zeros((0, M, 6), dtype=float)
 
     jd_grid = np.asarray(minimoon.orbit["Julian Date"], dtype=float).ravel()
     if jd_grid.ndim != 1 or jd_grid.size < 2:
         raise ValueError("minimoon.orbit['Julian Date'] must be 1D with >=2 entries")
 
-    M = len(formation.spacecraft)
+    k0 = int(timer.curr_integration_index)
+    if strict_bounds and not (0 <= k0 < jd_grid.size - 1):
+        raise ValueError(
+            f"timer.curr_integration_index={k0} out of bounds for jd_grid size {jd_grid.size}"
+        )
 
-    # ---- Earth helio-eclip from TABLE (AU, AU/day) ----
+    # grid-derived hour step (robust; avoids assuming exactly 1/24)
+    dt_hour = float(jd_grid[k0 + 1] - jd_grid[k0])
+    if dt_hour <= 0:
+        raise ValueError("jd_grid must be strictly increasing (dt_hour <= 0 detected)")
+
+    t0_grid = float(jd_grid[k0])
+
+    # -------------------------
+    # Earth helio-eclip from TABLE (AU, AU/day)
+    # -------------------------
     earth_cols = [
         "Earth x (Helio)", "Earth y (Helio)", "Earth z (Helio)",
         "Earth vx (Helio)", "Earth vy (Helio)", "Earth vz (Helio)",
@@ -5995,6 +6021,7 @@ def piecewise_anchor_and_propagate_spacecraft_trajs(
     for c in earth_cols:
         if c not in minimoon.orbit.columns:
             raise KeyError(f"minimoon.orbit missing required Earth ephemeris column '{c}'")
+
     earth_table_au_aud = np.asarray(minimoon.orbit[earth_cols], dtype=float)  # (N,6)
 
     AU_KM = float(au_km)
@@ -6011,28 +6038,16 @@ def piecewise_anchor_and_propagate_spacecraft_trajs(
         return _state_au_aud_to_kms(earth_table_au_aud[int(k)])
 
     # -------------------------
-    # Time conversions
+    # Time conversions (LPF Earth only)
     # -------------------------
     def _timestamp_to_et(ts):
-        """
-        matched_trajectory_full['Time'] is (effectively) UTC timestamp.
-        Convert to SPICE ET.
-        """
+        # ts is expected to be a pandas.Timestamp or datetime-like
         if isinstance(ts, pd.Timestamp):
             ts = ts.to_pydatetime()
         s = ts.strftime("%Y-%m-%dT%H:%M:%S")
-        try:
-            return float(spice.utc2et(s))
-        except Exception as e:
-            raise RuntimeError(f"Failed UTC -> ET via sp.utc2et for '{s}'") from e
+        return float(spice.utc2et(s))
 
-    # -------------------------
-    # Earth(t_lpf) from SPICE (HELIO ECLIPJ2000)
-    # -------------------------
     def _earth_lpf_from_spice_kms(et):
-        """
-        Earth state wrt Sun in ECLIPJ2000 (km, km/s), from SPICE.
-        """
         st, _lt = spice.spkgeo(int(earth_id), float(et), frame_eclip, int(sun_id))
         return np.asarray(st, dtype=float).reshape(6,)
 
@@ -6042,24 +6057,14 @@ def piecewise_anchor_and_propagate_spacecraft_trajs(
     def _sc_row_geo_eme_state_kms(row):
         # columns labeled km/km/s but actually AU and AU/day
         x_au = np.array(
-            [
-                float(row["GEO_EME_X_(km)"]),
-                float(row["GEO_EME_Y_(km)"]),
-                float(row["GEO_EME_Z_(km)"]),
-            ],
+            [float(row["GEO_EME_X_(km)"]), float(row["GEO_EME_Y_(km)"]), float(row["GEO_EME_Z_(km)"])],
             dtype=float,
         )
         v_au_per_day = np.array(
-            [
-                float(row["GEO_EME_Vx_(km/s)"]),
-                float(row["GEO_EME_Vy_(km/s)"]),
-                float(row["GEO_EME_Vz_(km/s)"]),
-            ],
+            [float(row["GEO_EME_Vx_(km/s)"]), float(row["GEO_EME_Vy_(km/s)"]), float(row["GEO_EME_Vz_(km/s)"])],
             dtype=float,
         )
-        x_km = x_au * AU_KM
-        v_kmps = v_au_per_day * AU_PER_DAY_TO_KMPS
-        return np.concatenate([x_km, v_kmps], axis=0)
+        return np.concatenate([x_au * AU_KM, v_au_per_day * AU_PER_DAY_TO_KMPS], axis=0)
 
     # -------------------------
     # Re-epoch mapping: LPF -> SECR(using SPICE Earth) -> AST(using TABLE Earth)
@@ -6071,16 +6076,10 @@ def piecewise_anchor_and_propagate_spacecraft_trajs(
         GEO-SECR(lpf)  -> GEO-ECLIP(ast)  using Earth_ast from TABLE
         GEO-ECLIP(ast) -> GEO-EME(ast)
         """
-        # LPF epoch (from spacecraft table time)
         et_lpf = _timestamp_to_et(sc_row["Time"])
-
-        # Earth at LPF from SPICE
         earth_lpf_kms = _earth_lpf_from_spice_kms(et_lpf)
-
-        # Earth at AST anchor from TABLE (already km/km/s)
         earth_ast_kms = np.asarray(earth_ast_kms, dtype=float).reshape(6,)
 
-        # SC GEO-EME at LPF
         x_eme_lpf = _sc_row_geo_eme_state_kms(sc_row)
 
         # GEO-EME -> GEO-ECLIP
@@ -6112,44 +6111,57 @@ def piecewise_anchor_and_propagate_spacecraft_trajs(
         return np.asarray(x_eme_ast, dtype=float).reshape(6,)
 
     # -------------------------
-    # Assign each target to an hourly anchor index k (floor)
+    # Assign each target to an anchor index k RELATIVE to k0 (fixes off-by-one)
     # -------------------------
-    k_of_t = np.searchsorted(jd_grid, t_targets, side="right") - 1
+    eps = 1e-12
+
+    steps_after = np.floor((t_targets - t0_grid) / dt_hour + eps).astype(int)
+    k_of_t = k0 + steps_after
+
     if strict_bounds:
         if np.any(k_of_t < 0) or np.any(k_of_t >= jd_grid.size):
             bad = np.where((k_of_t < 0) | (k_of_t >= jd_grid.size))[0][:10]
             raise ValueError(
-                "Some requested epochs are outside minimoon.orbit JD grid. "
-                f"Example bad indices: {bad}, times: {t_targets[bad]}"
+                "Some requested epochs fall outside minimoon.orbit grid when anchored at curr_integration_index. "
+                f"Example bad target indices: {bad}, times: {t_targets[bad]}, k_of_t: {k_of_t[bad]}"
+            )
+        if np.any(steps_after < 0):
+            bad = np.where(steps_after < 0)[0][:10]
+            raise ValueError(
+                "Some requested epochs are earlier than the anchor grid time jd_grid[k0]. "
+                f"Example indices: {bad}, times: {t_targets[bad]}, dt_sec: {(t_targets[bad]-t0_grid)*86400.0}"
             )
     else:
         k_of_t = np.clip(k_of_t, 0, jd_grid.size - 1)
 
+
+    # group target indices by anchor index k
     groups = {}
     for ti, k in enumerate(k_of_t.tolist()):
         groups.setdefault(int(k), []).append(int(ti))
 
     # -------------------------
-    # For each group, build anchored initial states and propagate
+    # Propagate per-group and stitch
     # -------------------------
     out = np.full((T, M, 6), np.nan, dtype=float)
 
     for k, idx_list in groups.items():
         idx = np.asarray(idx_list, dtype=int)
 
-        # anchor epoch t0 is the asteroid JD grid hour
-        t0_jdtdb = float(jd_grid[k])
+        # anchor epoch from table
+        t_anchor = float(jd_grid[k])
 
-        # Earth at AST anchor from TABLE
+        # Earth at anchor from TABLE row k (converted to km/km/s)
         earth_ast_kms = _earth_ast_from_table_at_index_kms(k)
 
-        # subset target times, sorted
+        # targets in this group, sorted for propagation
         t_sub = t_targets[idx]
+        print(t_sub)
         order = np.argsort(t_sub)
         t_sub_sorted = t_sub[order]
         idx_sorted = idx[order]
 
-        # initial states (M,6) at anchor
+        # build initial states at anchor (M,6) from row k
         x0_M6 = np.zeros((M, 6), dtype=float)
         for m, sc in enumerate(formation.spacecraft):
             row = sc.matched_trajectory_full.iloc[k]
@@ -6158,25 +6170,59 @@ def piecewise_anchor_and_propagate_spacecraft_trajs(
                 earth_ast_kms=earth_ast_kms,
             )
 
-        # propagate from t0 to targets in this bin
-        traj = n_body_propagator.propagate_multiple_objects(
-            x0_M6,
-            t0_jdtdb,
-            t_sub_sorted,
+        traj = np.asarray(
+            n_body_propagator.propagate_multiple_objects(x0_M6, t_anchor, t_sub_sorted),
+            dtype=float,
         )
-        traj = np.asarray(traj, dtype=float)
 
-        # normalize to (len(t_sub_sorted), M, 6)
-        if traj.ndim != 3:
-            raise ValueError(f"propagate_multiple_objects returned ndim={traj.ndim}, expected 3D")
-        if traj.shape == (len(t_sub_sorted), M, 6):
-            traj_T_M_6 = traj
-        elif traj.shape == (M, len(t_sub_sorted), 6):
-            traj_T_M_6 = np.transpose(traj, (1, 0, 2))
+        # ---- normalize traj to (len(t_sub_sorted), M, 6) ----
+        Tsub = int(len(t_sub_sorted))
+
+        if traj.ndim == 3:
+            if traj.shape == (Tsub, M, 6):
+                traj_T_M_6 = traj
+            elif traj.shape == (M, Tsub, 6):
+                traj_T_M_6 = np.transpose(traj, (1, 0, 2))
+            else:
+                raise ValueError(
+                    f"propagate_multiple_objects returned unexpected 3D shape {traj.shape}; "
+                    f"expected ({Tsub},{M},6) or ({M},{Tsub},6)"
+                )
+
+        elif traj.ndim == 2:
+            # common when Tsub == 1
+            if Tsub != 1:
+                raise ValueError(
+                    f"propagate_multiple_objects returned 2D shape {traj.shape} but Tsub={Tsub} (expected 3D)."
+                )
+
+            if traj.shape == (M, 6):
+                traj_T_M_6 = traj.reshape(1, M, 6)
+            elif traj.shape == (6, M):
+                traj_T_M_6 = traj.T.reshape(1, M, 6)
+            elif traj.shape == (1, 6) and M == 1:
+                traj_T_M_6 = traj.reshape(1, 1, 6)
+            elif traj.shape == (6, 1) and M == 1:
+                traj_T_M_6 = traj.T.reshape(1, 1, 6)
+            else:
+                raise ValueError(
+                    f"propagate_multiple_objects returned unexpected 2D shape {traj.shape} for Tsub=1; "
+                    f"expected ({M},6) (or (6,{M}) if transposed)."
+                )
+
+        elif traj.ndim == 1:
+            # possible when M==1 and Tsub==1
+            if Tsub == 1 and traj.shape == (6,) and M == 1:
+                traj_T_M_6 = traj.reshape(1, 1, 6)
+            else:
+                raise ValueError(
+                    f"propagate_multiple_objects returned unexpected 1D shape {traj.shape}; "
+                    f"expected (6,) only when M==1 and Tsub==1."
+                )
+
         else:
             raise ValueError(
-                f"propagate_multiple_objects returned unexpected shape {traj.shape}; "
-                f"expected ({len(t_sub_sorted)},{M},6) or ({M},{len(t_sub_sorted)},6)"
+                f"propagate_multiple_objects returned traj with ndim={traj.ndim}, shape={traj.shape}, unsupported."
             )
 
         out[idx_sorted, :, :] = traj_T_M_6

@@ -64,9 +64,9 @@ def od_setup_from_iod(config, row, *, util, sp, eps=1e-12):
         se_str = f"EPOCH_SC_{i + 1}(jdtdb)"
         se_jdtdb = row[se_str]
         se_et = sp.unitim(se_jdtdb, "JDTDB", "ET")
-
         earth_helio_se_i, _ = sp.spkgeo(body, se_et, "ECLIPJ2000", reference_body)
         earth_helio_se_kms[i, :] = earth_helio_se_i
+
 
     # Spacecraft boresight in GEO SECR (cartesian unit-ish vectors, presumably)
     sc_pointing_sunearth_cartesian = np.zeros((M, 3), dtype=float)

@@ -6,7 +6,7 @@ import math
 
 class SimTime:
     def __init__(self, configs, current_od_index=None, current_epoch=None, iod_time=None,
-                 current_integration_epoch=None, current_integration_index=None):
+                 current_integration_epoch=None, current_integration_index=None, attitude_coordination_expected_time=None):
         self.curr_od_index = current_od_index
         self.curr_epoch = current_epoch  # jdtdb - actual time in simulation
         self.curr_integration_epoch = current_integration_epoch  # jdtdb - time from which integrations begin (to get to curr epoch)
@@ -21,6 +21,8 @@ class SimTime:
                                                 self.attcoord_numdt)  # seconds
         self.attcoord_searchtimes_jdtdb = None
         self.attcoord_time = None  # seconds
+        self.attcoord_expectedtime = len(self.attcoord_searchtimes) * float(configs['epochs']['average_epoch_time']) \
+            if attitude_coordination_expected_time is None else attitude_coordination_expected_time
         self.datacollect_time = int(configs['number_of_frames']) * float(configs['time_between_frames'])  # seconds
         self.detection_patchtime = configs['patch_time']
         big_H, big_L = int(configs['number_of_pixels'][0]), int(configs['number_of_pixels'][1])
@@ -29,8 +31,9 @@ class SimTime:
         self.iod_time = iod_time
         self.slew_time = None  # seconds
 
+
     def set_attcoord_searchtimes(self):
-        delta = (self.datacollect_time + self.detection_time + self.iod_time) / 86400.0  # in days
+        delta = (self.datacollect_time + self.detection_time + self.iod_time + self.attcoord_expectedtime) / 86400.0  # in days
         big_t_set_jdtdb = self.curr_epoch + (self.attcoord_searchtimes / 86400.0) + delta
         big_t_set_jdtdb = big_t_set_jdtdb[big_t_set_jdtdb <= self.end_time + 1e-15]
         self.attcoord_searchtimes_jdtdb = big_t_set_jdtdb
