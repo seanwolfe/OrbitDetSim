@@ -156,8 +156,8 @@ error:
 # epoch grid to search over
 epochs:
   dt_min: 10.0   # in seconds, first time to check
-  dt_max: 360010.0  # last time to check
-  n_dt: 10       # number of checks
+  dt_max: 8640000.0  # last time to check
+  n_dt: 100       # number of checks
   average_epoch_time: 5  # average time to run the att coord algorithm for one time, seconds
 
 d_mahal: 3.0
@@ -190,7 +190,7 @@ ems:
 base_seed: 1765220306
 num_od_runs: 1
 od_file_dir: 'OD_results'
-od_duration_days: 30
+od_duration_days: 3000
 od_max_steps: 1000
 iod_cov_topo_std: [4.4, 2.31, 1.28e+6, 3.27e-5, 2.44e-5, 1.09]  # ra, dec, rho, ra dot, dec dot, rho dot (deg, km, deg/s, km/s)
 INCLUDE_EMS_EXCLUSION: 1
@@ -208,9 +208,9 @@ epsilon_ukf: 0.0000000001
 #############################
 # Visualization relevant parameters
 ############################
-ray_length: 5.0e+6
+ray_length: 8.0e+6
 two_d_prop:
-  stride: 1
+  stride: 5
   n_std: 3
   xlim: [-5.0e+6, 5.0e+6]
   ylim: [-5.0e+6, 5.0e+6]

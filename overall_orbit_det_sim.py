@@ -1632,10 +1632,9 @@ def run_OD(config):
                 )
 
                 # propagate formation to each epoch if we just did it smoothly
-                sc_eme_states_kms = formation.get_spacecraft_states()  # current sc state at detection instant
-
-                sc_eme_trajs_kms = n_body_propagator.propagate_multiple_objects(sc_eme_states_kms, timer.curr_epoch,
-                                                                                timer.attcoord_searchtimes_jdtdb)
+                # sc_eme_states_kms = formation.get_spacecraft_states()  # current sc state at detection instant
+                # sc_eme_trajs_kms = n_body_propagator.propagate_multiple_objects(sc_eme_states_kms, timer.curr_epoch,
+                #                                                                 timer.attcoord_searchtimes_jdtdb)
 
 
                 # propagate asteroid true to each epoch
@@ -1652,13 +1651,17 @@ def run_OD(config):
                     util.plot_priors_positions_and_cov_2d(
                         x_ts,
                         P_ts,
-                        sc_trajs_km=sc_eme_trajs_kms,  # (K,M,6) or (K,M,3)
+                        # sc_trajs_km=sc_eme_trajs_kms,  # (K,M,6) or (K,M,3)
                         sc_trajs_km2=sc_eme_states_kms_piecewise,
                         stride=config['two_d_prop']['stride'],
                         n_std=config['two_d_prop']['stride'],
                         planes=("xy", "xz", "yz"),
                         title_prefix="Asteroid prior + spacecraft"
                     )
+
+                    util.plot_matched_trajectory_full_range(formation=formation, idx_start=0, idx_stop=2400,
+                                                            frame="GEO_EME", plot_3d=True, plot_xy=False)
+
 
                 # perform attitude coord.
                 # get various required inputs
@@ -1679,7 +1682,7 @@ def run_OD(config):
                 omega_max = 1.63 * h_max / I_max
 
                 res_kcoverage, result_mean, result_kcoverage_series, result_mean_series = attitude_coordination.step(
-                    sc_eme_trajs_kms[:, :, :3],
+                    sc_eme_states_kms_piecewise[:, :, :3],
                     sc_pointings_eme,
                     x_ts[:, :3],
                     P_ts[:, :3, :3],
@@ -1696,6 +1699,14 @@ def run_OD(config):
 
                 attcoord_endtime = time.time()
 
+                # set the att coordination time
+                timer.set_attcoord_time(attcoord_endtime - attcoord_startime)
+                print(timer.attcoord_time)
+
+                # set the desired slew time from att coor result
+                timer.set_slew_time(res_kcoverage.chosen_dt)
+                print(timer.slew_time)
+
                 # visualize att_coord result
                 # Force visualization ON (as requested)
                 att_coord_viz_flag = True
@@ -1711,7 +1722,7 @@ def run_OD(config):
                     ems_radius = config["ems"]['R_em']
 
                     # Pull states/vectors from setup
-                    sc_eme_ae_kms = np.squeeze(sc_eme_trajs_kms[best_idx, :, :3])
+                    sc_eme_ae_kms = np.squeeze(sc_eme_states_kms_piecewise[best_idx, :, :3])
                     sc_pointing_eme_cartesian = res_kcoverage.u_cmd
                     ang_eme = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_eme_cartesian)
                     ast_truth_eme = np.squeeze(ast_eme_traj_kms[best_idx, :3])
@@ -1779,7 +1790,7 @@ def run_OD(config):
                             epoch = timer.attcoord_searchtimes[idx]
 
                             # --- states at this epoch ---
-                            sc_xyz = np.asarray(sc_eme_trajs_kms[idx, :, :3], dtype=float)  # (M,3)
+                            sc_xyz = np.asarray(sc_eme_states_kms_piecewise[idx, :, :3], dtype=float)  # (M,3)
                             ast_truth = np.asarray(ast_eme_traj_kms[idx, :3], dtype=float).reshape(3, )
                             ast_mean = np.asarray(x_ts[idx, :3], dtype=float).reshape(3, )
                             P3 = np.asarray(P_ts[idx, :3, :3], dtype=float).reshape(3, 3)
@@ -1909,8 +1920,9 @@ def run_OD(config):
                         show_ems=True,
                         show_fov_cones=True,
                         title="3D OD Scenario Demo (EME)",
-                        slew_history=slew_history,
-                        slew_history_line_len=ray_length
+                        slew_history=None,
+                        slew_history_line_len=ray_length,
+                        agent_orbit_tracks_xyz=[sc_eme_states_kms_piecewise[:, i, :3] for i in range(config['num_spacecraft'])]
                     )
 
 
@@ -2033,24 +2045,16 @@ def run_OD(config):
 
                     plt.show()
 
-                # set the att coordination time
-                timer.set_attcoord_time(attcoord_endtime - attcoord_startime)
 
-                # set the desired slew time from att coor result
-                timer.set_slew_time(res_kcoverage.chosen_dt)
 
                 # get the next data collection epoch
                 timer.step()
 
-                # check if we move to next trajectory step (they are in 1hr intervals)
+                # update formation
 
-                    # if yes:
-                        # update formation
-                        # update minimoon
+                # update minimoon true
+                # update minimoon belief
 
-                    # if no
-                        # update formation
-                        # update minimoon
 
             # update od index
 

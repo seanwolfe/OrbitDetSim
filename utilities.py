@@ -644,7 +644,7 @@ def plot_od_scenario_3d_new(
             trk = np.asarray(trk, dtype=float)
             if trk.ndim != 2 or trk.shape[1] != 3:
                 raise ValueError(f"agent_orbit_tracks_xyz[{i}] must be (K,3)")
-            ax.plot(trk[:, 0], trk[:, 1], trk[:, 2], lw=1.2, alpha=0.7,
+            ax.plot(trk[:, 0], trk[:, 1], trk[:, 2], lw=1.2, alpha=0.7, color='blue',
                     label="Agent orbit" if i == 0 else None)
 
     # ---- trajectories (mean + true) ----
@@ -6108,7 +6108,7 @@ def piecewise_anchor_and_propagate_spacecraft_trajs(
         except TypeError:
             x_eme_ast = geo_eclip_to_geo_eme_generic(x_ecl_ast)
 
-        return np.asarray(x_eme_ast, dtype=float).reshape(6,)
+        return np.asarray(x_ecl_ast, dtype=float).reshape(6,)
 
     # -------------------------
     # Assign each target to an anchor index k RELATIVE to k0 (fixes off-by-one)
@@ -6144,7 +6144,7 @@ def piecewise_anchor_and_propagate_spacecraft_trajs(
     # Propagate per-group and stitch
     # -------------------------
     out = np.full((T, M, 6), np.nan, dtype=float)
-
+    all_x0m = []
     for k, idx_list in groups.items():
         idx = np.asarray(idx_list, dtype=int)
 
@@ -6156,10 +6156,10 @@ def piecewise_anchor_and_propagate_spacecraft_trajs(
 
         # targets in this group, sorted for propagation
         t_sub = t_targets[idx]
-        print(t_sub)
         order = np.argsort(t_sub)
         t_sub_sorted = t_sub[order]
         idx_sorted = idx[order]
+
 
         # build initial states at anchor (M,6) from row k
         x0_M6 = np.zeros((M, 6), dtype=float)
@@ -6170,6 +6170,7 @@ def piecewise_anchor_and_propagate_spacecraft_trajs(
                 earth_ast_kms=earth_ast_kms,
             )
 
+        all_x0m.append(x0_M6)
         traj = np.asarray(
             n_body_propagator.propagate_multiple_objects(x0_M6, t_anchor, t_sub_sorted),
             dtype=float,
@@ -6226,6 +6227,15 @@ def piecewise_anchor_and_propagate_spacecraft_trajs(
             )
 
         out[idx_sorted, :, :] = traj_T_M_6
+
+    all_x0m = np.array(all_x0m)
+
+    fig = plt.figure(figsize=(9.5, 7.5))
+    ax3d = fig.add_subplot(111, projection="3d")
+    for i in range(M):
+        ax3d.plot(all_x0m[:, i, 0], all_x0m[:, i, 1], all_x0m[:, i, 2])
+        # ax3d.plot(traj_T_M_6[:, i, 0], traj_T_M_6[:, i, 1], traj_T_M_6[:, i, 2])
+    plt.show()
 
     return out
 
@@ -6877,3 +6887,249 @@ def _source_basenames_in_visible(vis_dir, save_format):
     files = sorted(files)
     bases = [os.path.splitext(os.path.basename(p))[0] for p in files]
     return bases
+
+
+def plot_matched_trajectory_full_range(
+    *,
+    formation,
+    # selection (choose one)
+    idx_start=None,
+    idx_stop=None,              # inclusive if inclusive_stop=True else python-slice style
+    time_start=None,            # datetime-like or pandas Timestamp
+    time_stop=None,             # datetime-like or pandas Timestamp
+
+    inclusive_stop=True,
+
+    # what to plot
+    frame="GEO_EME",            # "GEO_EME" or "GEO_ECLIP" (must exist as columns)
+    plot_3d=False,              # if True: one 3D axis; else: 3 subplots x(t),y(t),z(t)
+    plot_xy=True,               # if not plot_3d: add an XY trajectory subplot (extra)
+    use_time_axis=True,         # x-axis is Time if available; else index
+    units="auto",               # "auto" | "au" | "km" (your tables are AU, AU/day even if labeled km)
+    au_km=149_597_870.700,
+
+    # styling
+    show_markers=True,
+    mark_every=10,
+    linewidth=1.2,
+    alpha=0.9,
+    title=None,
+    legend=True,
+):
+    """
+    Plot a desired range of each spacecraft's matched_trajectory_full from a formation object.
+
+    Assumes each spacecraft has:
+      sc.matched_trajectory_full : pandas DataFrame with columns like:
+        Time
+        GEO_EME_X_(km), GEO_EME_Y_(km), GEO_EME_Z_(km)
+        GEO_ECLIP_X_(km), GEO_ECLIP_Y_(km), GEO_ECLIP_Z_(km)
+      (Despite labels, you told me these are AU; this function can convert to km.)
+
+    Selection:
+      - By index: idx_start/idx_stop
+      - OR by time: time_start/time_stop (uses the 'Time' column)
+    """
+
+    # -------------------------
+    # helpers
+    # -------------------------
+    def _get_cols(prefix):
+        x = f"{prefix}_X_(km)"
+        y = f"{prefix}_Y_(km)"
+        z = f"{prefix}_Z_(km)"
+        return x, y, z
+
+    def _coerce_ts(x):
+        if x is None:
+            return None
+        return pd.to_datetime(x)
+
+    def _slice_df(df):
+        # Prefer time slicing if time_start/stop provided
+        if (time_start is not None) or (time_stop is not None):
+            if "Time" not in df.columns:
+                raise KeyError("time_start/time_stop provided but matched_trajectory_full has no 'Time' column.")
+            ts0 = _coerce_ts(time_start)
+            ts1 = _coerce_ts(time_stop)
+
+            tt = pd.to_datetime(df["Time"])
+            mask = np.ones(len(df), dtype=bool)
+            if ts0 is not None:
+                mask &= (tt >= ts0)
+            if ts1 is not None:
+                mask &= (tt <= ts1) if inclusive_stop else (tt < ts1)
+            return df.loc[mask].copy()
+
+        # else index slicing
+        if idx_start is None and idx_stop is None:
+            return df.copy()
+
+        i0 = 0 if idx_start is None else int(idx_start)
+        if idx_stop is None:
+            return df.iloc[i0:].copy()
+        i1 = int(idx_stop)
+        if inclusive_stop:
+            return df.iloc[i0 : i1 + 1].copy()
+        return df.iloc[i0 : i1].copy()
+
+    def _infer_units_scale(df_xyz):
+        # If user says "auto", try to guess if values look like AU (~1e-2 here) vs km (~1e6+)
+        # Your examples are ~0.008, so AU.
+        # We'll base on median norm.
+        v = np.asarray(df_xyz, float)
+        med = float(np.nanmedian(np.linalg.norm(v, axis=1))) if v.size else 0.0
+        if med == 0.0 or not np.isfinite(med):
+            return 1.0, "raw"
+        # Heuristic: if med < 1e3 -> likely AU; if med > 1e5 -> likely km
+        if med < 1e3:
+            return float(au_km), "km"
+        return 1.0, "km"
+
+    # -------------------------
+    # validate spacecraft + columns
+    # -------------------------
+    if not hasattr(formation, "spacecraft"):
+        raise AttributeError("formation must have attribute 'spacecraft' (list of spacecraft objects).")
+
+    xcol, ycol, zcol = _get_cols(frame)
+    AU_KM = float(au_km)
+
+    # -------------------------
+    # figure layout
+    # -------------------------
+    if plot_3d:
+        fig = plt.figure(figsize=(9.5, 7.5))
+        ax3d = fig.add_subplot(111, projection="3d")
+        axes = (ax3d,)
+    else:
+        # x/y/z time series
+        nrows = 4 if plot_xy else 3
+        fig, axs = plt.subplots(nrows=nrows, ncols=1, figsize=(11, 9), sharex=True)
+        axs = np.atleast_1d(axs)
+        axes = tuple(axs)
+
+    # -------------------------
+    # plotting loop
+    # -------------------------
+    for m, sc in enumerate(formation.spacecraft):
+        if not hasattr(sc, "matched_trajectory_full"):
+            raise AttributeError(f"spacecraft[{m}] has no matched_trajectory_full.")
+
+        df = sc.matched_trajectory_full
+        if not hasattr(df, "columns"):
+            raise TypeError(f"spacecraft[{m}].matched_trajectory_full is not a DataFrame-like object.")
+
+        for c in (xcol, ycol, zcol):
+            if c not in df.columns:
+                raise KeyError(
+                    f"spacecraft[{m}].matched_trajectory_full missing column '{c}'. "
+                    f"Available columns include: {list(df.columns)[:20]} ..."
+                )
+
+        dfr = _slice_df(df)
+        if len(dfr) == 0:
+            continue
+
+        xyz = dfr[[xcol, ycol, zcol]].to_numpy(dtype=float)
+
+        # units handling
+        if units == "au":
+            scale = 1.0
+            yunit = "AU"
+        elif units == "km":
+            scale = AU_KM
+            yunit = "km"
+        else:
+            # auto: infer; but for your case this will choose km conversion
+            scale, yunit = _infer_units_scale(xyz)
+
+        xyzp = xyz * float(scale)
+
+        # x-axis
+        if use_time_axis and ("Time" in dfr.columns):
+            t = pd.to_datetime(dfr["Time"])
+            tx = t
+            xlabel = "Time"
+        else:
+            tx = dfr.index.to_numpy()
+            xlabel = "Index"
+
+        label = getattr(sc, "name", None)
+        if label is None:
+            label = f"SC{m+1}"
+
+        if plot_3d:
+            ax = axes[0]
+            ax.plot(xyzp[:, 0], xyzp[:, 1], xyzp[:, 2], lw=linewidth, alpha=alpha, label=label)
+            if show_markers:
+                ax.scatter(
+                    xyzp[::max(1, int(mark_every)), 0],
+                    xyzp[::max(1, int(mark_every)), 1],
+                    xyzp[::max(1, int(mark_every)), 2],
+                    s=10,
+                    alpha=min(1.0, alpha),
+                )
+        else:
+            axx, axy, axz = axes[0], axes[1], axes[2]
+            axx.plot(tx, xyzp[:, 0], lw=linewidth, alpha=alpha, label=label)
+            axy.plot(tx, xyzp[:, 1], lw=linewidth, alpha=alpha, label=label)
+            axz.plot(tx, xyzp[:, 2], lw=linewidth, alpha=alpha, label=label)
+
+            if show_markers:
+                step = max(1, int(mark_every))
+                axx.scatter(tx[::step], xyzp[::step, 0], s=10, alpha=min(1.0, alpha))
+                axy.scatter(tx[::step], xyzp[::step, 1], s=10, alpha=min(1.0, alpha))
+                axz.scatter(tx[::step], xyzp[::step, 2], s=10, alpha=min(1.0, alpha))
+
+            if plot_xy:
+                axxy = axes[3]
+                axxy.plot(xyzp[:, 0], xyzp[:, 1], lw=linewidth, alpha=alpha, label=label)
+                if show_markers:
+                    axxy.scatter(xyzp[::step, 0], xyzp[::step, 1], s=10, alpha=min(1.0, alpha))
+
+    # -------------------------
+    # labels / titles
+    # -------------------------
+    if plot_3d:
+        ax = axes[0]
+        ax.set_xlabel(f"{frame} X [{yunit}]")
+        ax.set_ylabel(f"{frame} Y [{yunit}]")
+        ax.set_zlabel(f"{frame} Z [{yunit}]")
+        ax.grid(alpha=0.25)
+        if title is None:
+            title = f"{frame} matched_trajectory_full (3D)"
+        ax.set_title(title)
+        if legend:
+            ax.legend(loc="best")
+    else:
+        axes[0].set_ylabel(f"X [{yunit}]")
+        axes[1].set_ylabel(f"Y [{yunit}]")
+        axes[2].set_ylabel(f"Z [{yunit}]")
+        axes[-1].set_xlabel(xlabel)
+
+        if plot_xy:
+            axes[3].set_xlabel(f"X [{yunit}]")
+            axes[3].set_ylabel(f"Y [{yunit}]")
+            axes[3].set_title(f"{frame} XY trajectory")
+            axes[3].grid(alpha=0.25)
+
+        axes[0].grid(alpha=0.25)
+        axes[1].grid(alpha=0.25)
+        axes[2].grid(alpha=0.25)
+
+        if title is None:
+            sel = ""
+            if (time_start is not None) or (time_stop is not None):
+                sel = f" | {time_start} → {time_stop}"
+            elif (idx_start is not None) or (idx_stop is not None):
+                sel = f" | idx {idx_start} → {idx_stop}"
+            title = f"{frame} matched_trajectory_full{sel}"
+        axes[0].set_title(title)
+
+        if legend:
+            for ax in axes:
+                ax.legend(loc="best")
+
+    fig.tight_layout()
+    return fig, axes
