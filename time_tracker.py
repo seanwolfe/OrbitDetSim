@@ -49,8 +49,11 @@ class SimTime:
     def set_slew_time(self, time):
         self.slew_time = time
 
-    def step(self):
+    def step(self, epoch, best_anchor_index, best_anchor_epoch):
         # update curr epoch
-        self.curr_epoch += (self.datacollect_time + self.detection_time +
-                            self.iod_time + self.attcoord_time + self.slew_time) / 86400.0
+        self.curr_epoch = epoch
+        self.curr_od_index += 1
+        self.curr_integration_epoch = best_anchor_epoch
+        self.curr_integration_index = best_anchor_index
+
 

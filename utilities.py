@@ -356,6 +356,8 @@ def plot_od_scenario_3d_new(
         # trajectories (full history / window) to plot as lines
         target_mean_traj_xyz=None,   # (K,3)
         true_target_traj_xyz=None,   # (K,3)
+        true_target_traj_xyz_2=None,
+
 
         # EMS sphere
         ems_center_xyz=None,       # (3,)
@@ -495,6 +497,10 @@ def plot_od_scenario_3d_new(
             Tt = np.asarray(true_target_traj_xyz, dtype=float)
             if Tt.ndim == 2 and Tt.shape[1] == 3 and Tt.size > 0:
                 xs.append(Tt[:, 0]); ys.append(Tt[:, 1]); zs.append(Tt[:, 2])
+        if true_target_traj_xyz_2 is not None:
+            Tt2 = np.asarray(true_target_traj_xyz_2, dtype=float)
+            if Tt2.ndim == 2 and Tt2.shape[1] == 3 and Tt2.size > 0:
+                xs.append(Tt2[:, 0]); ys.append(Tt2[:, 1]); zs.append(Tt2[:, 2])
 
         xall = np.concatenate([np.asarray(v).ravel() for v in xs])
         yall = np.concatenate([np.asarray(v).ravel() for v in ys])
@@ -661,6 +667,13 @@ def plot_od_scenario_3d_new(
             raise ValueError("true_target_traj_xyz must be (K,3)")
         ax.plot(Tt[:, 0], Tt[:, 1], Tt[:, 2], lw=1.6, alpha=0.8, color="green",
                 label="True trajectory")
+    if true_target_traj_xyz_2 is not None:
+        Tt2 = np.asarray(true_target_traj_xyz_2, dtype=float)
+        if Tt2.ndim != 2 or Tt2.shape[1] != 3:
+            raise ValueError("true_target_traj_xyz_2 must be (K,3)")
+        print("here")
+        ax.plot(Tt2[:, 0], Tt2[:, 1], Tt2[:, 2], lw=1.6, alpha=0.8, color="green",
+                label="True trajectory 2", linestyle='--')
 
     # ---- initial optimizer pointing (solid black lines) ----
     if u_init_agents_xyz is not None:
@@ -5946,12 +5959,12 @@ def piecewise_anchor_and_propagate_spacecraft_trajs(
     *,
     formation,
     minimoon,
-    timer,                    # needs curr_integration_index
-    t_targets_jdtdb,           # (T,) JD TDB epochs you want states at
+    timer,                     # needs curr_integration_index
+    t_targets_jdtdb,            # (T,) JD TDB epochs you want states at
     n_body_propagator,
 
     # units
-    au_km=149_597_870.700,     # km per AU (only used because table values are AU and AU/day)
+    au_km=149_597_870.700,      # km per AU (only used because table values are AU and AU/day)
 
     # SPICE config for Earth at LPF epoch
     earth_id=399,
@@ -5959,6 +5972,9 @@ def piecewise_anchor_and_propagate_spacecraft_trajs(
     frame_eclip="ECLIPJ2000",
 
     strict_bounds=True,
+
+    # NEW: return metadata about anchor usage
+    return_anchor_info=False,
 ):
     """
     Piecewise anchored propagation using quasi-halo reference rows.
@@ -5972,16 +5988,16 @@ def piecewise_anchor_and_propagate_spacecraft_trajs(
             k = k0 + steps_after
         so the first anchor is always k0 for targets near the start.
 
-    Earth sources (as requested):
-      - Earth(t_lpf): from SPICE (heliocentric ECLIPJ2000, km, km/s) using spice.spkgeo
-      - Earth(t_ast): from minimoon.orbit table (heliocentric ECLIPJ2000, AU, AU/day), converted to km, km/s
-
-    Spacecraft row states:
-      - matched_trajectory_full GEO_EME columns are labeled km/km/s but are actually AU and AU/day.
-        They are converted to km/km/s before use.
-
     Returns:
-      out: (T, M, 6) GEO-EME states in km, km/s
+      - if return_anchor_info == False:
+            out: (T, M, 6) GEO-EME states in km, km/s
+      - if return_anchor_info == True:
+            (out, anchor_info) where anchor_info is a dict containing:
+              * anchor_k_of_t: (T,) anchor index used for each target epoch
+              * anchor_epoch_of_t: (T,) anchor JD for each target epoch
+              * anchors_used_k: (A,) sorted unique anchor indices actually used
+              * anchors_used_epoch: (A,) JDs of anchors_used_k
+              * groups: dict[int, list[int]] mapping anchor k -> list of target indices
     """
 
     # -------------------------
@@ -5992,7 +6008,17 @@ def piecewise_anchor_and_propagate_spacecraft_trajs(
     M = int(len(formation.spacecraft))
 
     if T == 0:
-        return np.zeros((0, M, 6), dtype=float)
+        out = np.zeros((0, M, 6), dtype=float)
+        if return_anchor_info:
+            anchor_info = {
+                "anchor_k_of_t": np.zeros((0,), dtype=int),
+                "anchor_epoch_of_t": np.zeros((0,), dtype=float),
+                "anchors_used_k": np.zeros((0,), dtype=int),
+                "anchors_used_epoch": np.zeros((0,), dtype=float),
+                "groups": {},
+            }
+            return out, anchor_info
+        return out
 
     jd_grid = np.asarray(minimoon.orbit["Julian Date"], dtype=float).ravel()
     if jd_grid.ndim != 1 or jd_grid.size < 2:
@@ -6104,26 +6130,26 @@ def piecewise_anchor_and_propagate_spacecraft_trajs(
 
         # GEO-ECLIP -> GEO-EME
         try:
-            x_eme_ast = geo_eclip_to_geo_eme_generic(x_ecl_ast, hint=("state",))
+            _x_eme_ast = geo_eclip_to_geo_eme_generic(x_ecl_ast, hint=("state",))
         except TypeError:
-            x_eme_ast = geo_eclip_to_geo_eme_generic(x_ecl_ast)
+            _x_eme_ast = geo_eclip_to_geo_eme_generic(x_ecl_ast)
 
+        # NOTE: matches your original behavior: return ECL-at-ast (not EME)
         return np.asarray(x_ecl_ast, dtype=float).reshape(6,)
 
     # -------------------------
     # Assign each target to an anchor index k RELATIVE to k0 (fixes off-by-one)
     # -------------------------
     eps = 1e-12
-
     steps_after = np.floor((t_targets - t0_grid) / dt_hour + eps).astype(int)
-    k_of_t = k0 + steps_after
+    anchor_k_of_t = k0 + steps_after
 
     if strict_bounds:
-        if np.any(k_of_t < 0) or np.any(k_of_t >= jd_grid.size):
-            bad = np.where((k_of_t < 0) | (k_of_t >= jd_grid.size))[0][:10]
+        if np.any(anchor_k_of_t < 0) or np.any(anchor_k_of_t >= jd_grid.size):
+            bad = np.where((anchor_k_of_t < 0) | (anchor_k_of_t >= jd_grid.size))[0][:10]
             raise ValueError(
                 "Some requested epochs fall outside minimoon.orbit grid when anchored at curr_integration_index. "
-                f"Example bad target indices: {bad}, times: {t_targets[bad]}, k_of_t: {k_of_t[bad]}"
+                f"Example bad target indices: {bad}, times: {t_targets[bad]}, anchor_k_of_t: {anchor_k_of_t[bad]}"
             )
         if np.any(steps_after < 0):
             bad = np.where(steps_after < 0)[0][:10]
@@ -6132,12 +6158,13 @@ def piecewise_anchor_and_propagate_spacecraft_trajs(
                 f"Example indices: {bad}, times: {t_targets[bad]}, dt_sec: {(t_targets[bad]-t0_grid)*86400.0}"
             )
     else:
-        k_of_t = np.clip(k_of_t, 0, jd_grid.size - 1)
+        anchor_k_of_t = np.clip(anchor_k_of_t, 0, jd_grid.size - 1)
 
+    anchor_epoch_of_t = jd_grid[anchor_k_of_t]
 
     # group target indices by anchor index k
     groups = {}
-    for ti, k in enumerate(k_of_t.tolist()):
+    for ti, k in enumerate(anchor_k_of_t.tolist()):
         groups.setdefault(int(k), []).append(int(ti))
 
     # -------------------------
@@ -6145,6 +6172,7 @@ def piecewise_anchor_and_propagate_spacecraft_trajs(
     # -------------------------
     out = np.full((T, M, 6), np.nan, dtype=float)
     all_x0m = []
+
     for k, idx_list in groups.items():
         idx = np.asarray(idx_list, dtype=int)
 
@@ -6160,7 +6188,6 @@ def piecewise_anchor_and_propagate_spacecraft_trajs(
         t_sub_sorted = t_sub[order]
         idx_sorted = idx[order]
 
-
         # build initial states at anchor (M,6) from row k
         x0_M6 = np.zeros((M, 6), dtype=float)
         for m, sc in enumerate(formation.spacecraft):
@@ -6171,6 +6198,7 @@ def piecewise_anchor_and_propagate_spacecraft_trajs(
             )
 
         all_x0m.append(x0_M6)
+
         traj = np.asarray(
             n_body_propagator.propagate_multiple_objects(x0_M6, t_anchor, t_sub_sorted),
             dtype=float,
@@ -6228,14 +6256,33 @@ def piecewise_anchor_and_propagate_spacecraft_trajs(
 
         out[idx_sorted, :, :] = traj_T_M_6
 
-    all_x0m = np.array(all_x0m)
+    # -------------------------
+    # Optional debug plot of anchors
+    # -------------------------
+    plot_graphs = False
+    if plot_graphs:
+        all_x0m = np.asarray(all_x0m, dtype=float)
+        try:
+            fig = plt.figure(figsize=(9.5, 7.5))
+            ax3d = fig.add_subplot(111, projection="3d")
+            for i in range(M):
+                ax3d.plot(all_x0m[:, i, 0], all_x0m[:, i, 1], all_x0m[:, i, 2])
+            plt.show()
+        except Exception:
+            # don't fail if running headless
+            pass
 
-    fig = plt.figure(figsize=(9.5, 7.5))
-    ax3d = fig.add_subplot(111, projection="3d")
-    for i in range(M):
-        ax3d.plot(all_x0m[:, i, 0], all_x0m[:, i, 1], all_x0m[:, i, 2])
-        # ax3d.plot(traj_T_M_6[:, i, 0], traj_T_M_6[:, i, 1], traj_T_M_6[:, i, 2])
-    plt.show()
+    if return_anchor_info:
+        anchors_used_k = np.array(sorted(groups.keys()), dtype=int)
+        anchors_used_epoch = np.array([float(jd_grid[k]) for k in anchors_used_k], dtype=float)
+        anchor_info = {
+            "anchor_k_of_t": np.asarray(anchor_k_of_t, dtype=int),
+            "anchor_epoch_of_t": np.asarray(anchor_epoch_of_t, dtype=float),
+            "anchors_used_k": anchors_used_k,
+            "anchors_used_epoch": anchors_used_epoch,
+            "groups": groups,
+        }
+        return out, anchor_info
 
     return out
 

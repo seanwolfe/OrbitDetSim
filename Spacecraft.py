@@ -35,7 +35,6 @@ class Spacecraft:
         self.velocity = velocity
         return
 
-
     def get_spacecraft_pos(self, index):
         return self.matched_trajectory[index, :]
 

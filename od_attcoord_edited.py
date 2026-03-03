@@ -1248,7 +1248,7 @@ class AttitudeCoordinator:
 
         # coverage counting
         coverage_point: Optional[np.ndarray] = None,  # (3,) or (N,3)
-    ) -> Tuple[AttCoordResult, AttCoordResult, List[Dict[str, Any]], List[Dict[str, Any]]]:
+    ) -> Tuple[AttCoordResult, AttCoordResult, List[Dict[str, Any]], List[Dict[str, Any]], float]:
         """
         Returns:
             (res_opt_best, res_mean_best, opt_series, mean_series)
@@ -1419,6 +1419,8 @@ class AttitudeCoordinator:
         # ============================================================
         # (B) MEAN per-epoch diagnostics + earliest-feasible selection
         # ============================================================
+        start_mean = time.time()
+
         mean_series: List[Dict[str, Any]] = []
         best_mean = None
 
@@ -1486,7 +1488,9 @@ class AttitudeCoordinator:
                 },
             )
 
-        return res_opt_best, res_mean_best, opt_series, mean_series
+        mean_time = time.time() - start_mean
+
+        return res_opt_best, res_mean_best, opt_series, mean_series, mean_time
 
 
 def unit(v: np.ndarray, eps: float = 1e-12) -> Optional[np.ndarray]:

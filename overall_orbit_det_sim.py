@@ -23,6 +23,7 @@ import matplotlib.pyplot as plt
 from od_attcoord_edited import AttitudeCoordinator, compute_J_grid_theta_phi_single_free
 import math
 import time
+from datetime import datetime
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
 sp.furnsh("de430.bsp")
@@ -1304,6 +1305,117 @@ def run_OD(config):
             k += 1
         return path, name
 
+    def _fmt_vec(v, n=3, prec=3):
+        """Format first n entries of a vector."""
+        if v is None:
+            return ""
+        v = np.asarray(v).reshape(-1)
+        n = min(n, v.size)
+        return "[" + ", ".join(f"{v[i]:.{prec}g}" for i in range(n)) + (", ..." if v.size > n else "") + "]"
+
+    def _safe_norm(v):
+        if v is None:
+            return np.nan
+        v = np.asarray(v).reshape(-1)
+        return float(np.linalg.norm(v)) if v.size else np.nan
+
+    def _safe_diag(P, n=6):
+        if P is None:
+            return None
+        P = np.asarray(P)
+        if P.ndim != 2:
+            return None
+        d = np.diag(P).reshape(-1)
+        n = min(n, d.size)
+        return d[:n]
+
+    def print_od_status(
+            *,
+            timer,
+            ukf,
+            minimoon=None,
+            formation=None,
+            # optional “truth” you may have at this epoch (6,)
+            x_true=None,
+            # optional extras
+            n_detections=None,
+            status_every=1,
+            prefix="[OD]",
+            print_time=True,
+    ):
+        """
+        Prints a single status line (and a couple wrapped lines) about the current OD step.
+        Leave args as None if you don't have them.
+        """
+        k = getattr(timer, "curr_od_index", None)
+        if k is None:
+            return
+
+        if status_every is not None and status_every > 1:
+            if (k % status_every) != 0:
+                return
+
+        # --- estimate ---
+        x_est = getattr(ukf, "x", None)
+        P_est = getattr(ukf, "P", None)
+
+        # --- truth inference (best-effort) ---
+        # Priority: explicit x_true arg > minimoon.curr_state_eme
+        if x_true is None and minimoon is not None:
+            x_true = getattr(minimoon, "curr_state_eme", None)
+
+        # --- compute error metrics if possible ---
+        err = None
+        pos_err_norm = np.nan
+        vel_err_norm = np.nan
+        if x_est is not None and x_true is not None:
+            try:
+                xe = np.asarray(x_est).reshape(-1)
+                xt = np.asarray(x_true).reshape(-1)
+                if xe.size >= 6 and xt.size >= 6:
+                    err = xe[:6] - xt[:6]
+                    pos_err_norm = float(np.linalg.norm(err[:3]))
+                    vel_err_norm = float(np.linalg.norm(err[3:6]))
+            except Exception:
+                pass
+
+        # --- covariance diagonal (best-effort) ---
+        Pdiag = _safe_diag(P_est, n=6)
+
+        # --- spacecraft / detecting info (best-effort) ---
+        det_id = ""
+        if formation is not None and hasattr(formation, "currently_detecting"):
+            det_id = str(getattr(formation, "currently_detecting"))
+
+        # --- epoch info (best-effort) ---
+        epoch = getattr(timer, "curr_epoch", None)
+        endt = getattr(timer, "end_time", None)
+
+        # --- render ---
+        ts = ""
+        if print_time:
+            ts = datetime.now().strftime("%H:%M:%S") + " "
+
+        line1 = (
+            f"{ts}{prefix} k={k} "
+            f"epoch_jdtdb={epoch if epoch is not None else ''} "
+            f"end_jdtdb={endt if endt is not None else ''} "
+            f"det_sc={det_id} "
+            f"n_det={'' if n_detections is None else n_detections}"
+        )
+        line2 = f"{prefix} x_est={_fmt_vec(x_est, n=6, prec=6)}"
+        line3 = (
+            f"{prefix} pos_err_norm={pos_err_norm if not np.isnan(pos_err_norm) else ''} "
+            f"vel_err_norm={vel_err_norm if not np.isnan(vel_err_norm) else ''} "
+            f"P_diag={'' if Pdiag is None else _fmt_vec(Pdiag, n=6, prec=6)}"
+        )
+
+        print(line1)
+        print(line2)
+        print(line3)
+
+        return
+
     # Load MASTER (workers)
     df_master = pd.read_csv(master_fn)
 
@@ -1348,7 +1460,7 @@ def run_OD(config):
         setup = od_setup_from_iod(config, row, util=util, sp=sp)  # dict containing a lot of initial data
 
         # Force visualization ON (as requested)
-        ini_viz_flag = True
+        ini_viz_flag = False
         if ini_viz_flag:
 
             sid = setup["sc_detecting_id"]
@@ -1591,7 +1703,8 @@ def run_OD(config):
         # ----------------------------------------------------------
         timer = SimTime(config, current_od_index=0, current_epoch=t0_jdtdb, iod_time=row['COMPUTATION_TIME_SEC'],
                         current_integration_epoch=t0_jdtdb, current_integration_index=row['INDEX_USED'])
-        
+
+        status_every = int(config.get("od_status_every", 1))
 
         last_pos_rmse = np.nan
         last_vel_rmse = np.nan
@@ -1599,8 +1712,11 @@ def run_OD(config):
         while True:
             # End condition
             if timer.curr_epoch > timer.end_time:
+                print("Over Time")
                 break
+
             if od_max_steps is not None and timer.curr_od_index >= od_max_steps:
+                print("Out of Iterations")
                 break
 
             # update according to iod
@@ -1625,10 +1741,10 @@ def run_OD(config):
                 )
 
                 # because we want a different integration epoch to start from for every hour investigated
-                sc_eme_states_kms_piecewise = util.piecewise_anchor_and_propagate_spacecraft_trajs(
+                sc_eme_states_kms_piecewise, anchor_info = util.piecewise_anchor_and_propagate_spacecraft_trajs(
                     formation=formation, minimoon=minimoon, timer=timer,
                     t_targets_jdtdb=timer.attcoord_searchtimes_jdtdb,
-                    n_body_propagator=n_body_propagator
+                    n_body_propagator=n_body_propagator, return_anchor_info=True
                 )
 
                 # propagate formation to each epoch if we just did it smoothly
@@ -1646,7 +1762,7 @@ def run_OD(config):
                 # need check evaluate what the difference between s/c pos integrated for an hour vs. real pos
 
                 # to visualize the possible att coord scenarios
-                viz_prop_flag = True
+                viz_prop_flag = False
                 if viz_prop_flag:
                     util.plot_priors_positions_and_cov_2d(
                         x_ts,
@@ -1681,7 +1797,7 @@ def run_OD(config):
                 alpha_max = 1.63 * tau_max / I_max
                 omega_max = 1.63 * h_max / I_max
 
-                res_kcoverage, result_mean, result_kcoverage_series, result_mean_series = attitude_coordination.step(
+                res_kcoverage, result_mean, result_kcoverage_series, result_mean_series, mean_time = attitude_coordination.step(
                     sc_eme_states_kms_piecewise[:, :, :3],
                     sc_pointings_eme,
                     x_ts[:, :3],
@@ -1699,13 +1815,40 @@ def run_OD(config):
 
                 attcoord_endtime = time.time()
 
-                # set the att coordination time
-                timer.set_attcoord_time(attcoord_endtime - attcoord_startime)
-                print(timer.attcoord_time)
+                # set the att coordination time, the step also does the mean coverage method for comparison, don't count
+                timer.set_attcoord_time(attcoord_endtime - attcoord_startime - mean_time)
 
                 # set the desired slew time from att coor result
                 timer.set_slew_time(res_kcoverage.chosen_dt)
-                print(timer.slew_time)
+
+                best_epoch = res_kcoverage.chosen_dt
+                best_idx = np.where(timer.attcoord_searchtimes == best_epoch)[0]
+                best_epoch_jdtdb = timer.attcoord_searchtimes_jdtdb[best_idx]
+                k_anchor_best = int(anchor_info["anchor_k_of_t"][best_idx])
+                t_anchor_best = float(anchor_info["anchor_epoch_of_t"][best_idx])
+
+                # update formation
+                # get (M, 3) boresights from resultant optimization
+                best_attitudes = res_kcoverage.u_cmd
+
+                # set them
+                formation.set_spacecraft_pointings(best_attitudes)
+
+                # get (M, 6) boresights
+                best_positions = np.squeeze(sc_eme_states_kms_piecewise[best_idx, :, :])
+
+                # set them
+                formation.set_spacecraft_states(best_positions)
+
+                # update minimoon estimat update minimoon belief
+                ukf.x = np.squeeze(x_ts[best_idx, :])
+                ukf.P = np.squeeze(P_ts[best_idx, :, :])
+
+                # update actual minimoon state
+                minimoon.set_state(ast_eme_traj_kms[best_idx, :3], ast_eme_traj_kms[best_idx, 3:])
+
+                # get the next data collection epoch
+                timer.step(best_epoch_jdtdb, k_anchor_best, t_anchor_best)
 
                 # visualize att_coord result
                 # Force visualization ON (as requested)
@@ -1720,12 +1863,18 @@ def run_OD(config):
                     ems_center_xy = np.array(config["ems"]["p_em"][:2])
                     ems_center_xyz = np.array(config["ems"]["p_em"])
                     ems_radius = config["ems"]['R_em']
+                    ray_length = config['ray_length']
 
                     # Pull states/vectors from setup
                     sc_eme_ae_kms = np.squeeze(sc_eme_states_kms_piecewise[best_idx, :, :3])
                     sc_pointing_eme_cartesian = res_kcoverage.u_cmd
                     ang_eme = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_eme_cartesian)
                     ast_truth_eme = np.squeeze(ast_eme_traj_kms[best_idx, :3])
+                    ast_truth_original_eclip = np.array(minimoon.orbit.loc[:, ["Geo x", "Geo y", "Geo z", "Geo vx",
+                                                                      "Geo vy", "Geo vz"]])
+                    ast_truth_original_eclip[:, :3] *= config['AU_TO_M'] / 1000
+                    ast_truth_original_eclip[:, 3:] *= config['AU_TO_M'] / 1000 / config['SECONDS_PER_DAY']
+                    ast_truth_original_eme = util.geo_eclip_to_geo_eme_generic(ast_truth_original_eclip)
                     ast_iod_eme = np.squeeze(x_ts[best_idx, :3])
                     P_cart_eme = np.squeeze(P_ts[best_idx, :3, :3])
 
@@ -1797,7 +1946,6 @@ def run_OD(config):
 
                             # --- per-epoch optimal pointing command from opt_series ---
                             u_cmd_xyz = np.asarray(result_kcoverage_series[idx]["u"], dtype=float)  # (M,3)
-
 
                             # --- current pointing (for dotted line / slew display) ---
                             u_curr_xyz = np.asarray(sc_pointings_eme, dtype=float)  # (M,3)
@@ -1903,8 +2051,10 @@ def run_OD(config):
                         boresight_line_len=ray_length * 0.1,
                         u_init_agents_xyz=None,
                         init_boresight_line_len=ray_length * 1.5,
-                        xlim=config['three_d_prop']['xlim'], ylim=config['three_d_prop']['ylim'], zlim=config['three_d_prop']['zlim'],
-                        Nx=config['three_d_prop']['Nx'], Ny=config['three_d_prop']['Ny'], Nz=config['three_d_prop']['Nz'],
+                        xlim=config['three_d_prop']['xlim'], ylim=config['three_d_prop']['ylim'],
+                        zlim=config['three_d_prop']['zlim'],
+                        Nx=config['three_d_prop']['Nx'], Ny=config['three_d_prop']['Ny'],
+                        Nz=config['three_d_prop']['Nz'],
                         max_points_for_scatter=config['three_d_prop']['max_points'],
                         target_mean_xyz=ast_iod_eme[:3],
                         target_cov_xyz=target_cov_xyz,
@@ -1912,6 +2062,7 @@ def run_OD(config):
                         true_target_xyz=ast_truth_eme[:3],
                         target_mean_traj_xyz=x_ts[:, :3],
                         true_target_traj_xyz=ast_eme_traj_kms[:, :3],
+                        true_target_traj_xyz_2=ast_truth_original_eme[:, :3],
                         ems_center_xyz=ems_center_xyz,
                         ems_radius=ems_radius,
                         show_coverage=True,
@@ -1922,9 +2073,9 @@ def run_OD(config):
                         title="3D OD Scenario Demo (EME)",
                         slew_history=None,
                         slew_history_line_len=ray_length,
-                        agent_orbit_tracks_xyz=[sc_eme_states_kms_piecewise[:, i, :3] for i in range(config['num_spacecraft'])]
+                        agent_orbit_tracks_xyz=[sc_eme_states_kms_piecewise[:, i, :3] for i in
+                                                range(config['num_spacecraft'])]
                     )
-
 
                     # cost function visualization
                     util.plot_attcoord_costs_from_series(
@@ -1932,12 +2083,10 @@ def run_OD(config):
                         title="Dual coverage score vs objective (best per epoch)"
                     )
 
-
                     # theta and phi progression over optimization
                     thetas, phis = util.plot_theta_phi_over_history(res_kcoverage.extra["history"],
                                                                     int(config["num_spacecraft"]),
                                                                     deg=True)
-
 
                     # map of cost vs. optimization - works for m=2 and fixed
                     # --- NEW: theta/phi grid for ONE free agent (fixed-mode, M=2) --
@@ -2045,24 +2194,23 @@ def run_OD(config):
 
                     plt.show()
 
-
-
-                # get the next data collection epoch
-                timer.step()
-
-                # update formation
-
-                # update minimoon true
-                # update minimoon belief
-
-
-            # update od index
-
             #-------------------------
             # Regular OD Step
             # -------------------------
             else:
-                raise NotImplementedError
+                # perform detection with new attidudes
+
+                # --- Print status for THIS iteration (best-effort fields) ---
+                print_od_status(
+                    timer=timer,
+                    ukf=ukf,
+                    minimoon=minimoon,  # will try minimoon.curr_state_eme as "truth"
+                    formation=formation,  # will show formation.currently_detecting if present
+                    x_true=None,  # override if you have a better truth at this epoch
+                    n_detections=None,  # <-- fill in if/when you track detections
+                    status_every=status_every,
+                    prefix=f"[OD r{rank} uid={uid}]",
+                )
 
         # At this point, the OD row is complete; prepare MASTER update
         # upd = {
