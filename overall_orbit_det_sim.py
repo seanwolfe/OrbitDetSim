@@ -1758,8 +1758,53 @@ def run_OD(config):
                 ast_eme_traj_kms = n_body_propagator.propagate(ast_eme_state_kms, timer.curr_epoch,
                                                                timer.attcoord_searchtimes_jdtdb)
 
+                ast_truth_original_eclip = np.array(minimoon.orbit.loc[:, ["Geo x", "Geo y", "Geo z", "Geo vx",
+                                                                           "Geo vy", "Geo vz"]])
+                ast_truth_original_eclip[:, :3] *= config['AU_TO_M'] / 1000
+                ast_truth_original_eclip[:, 3:] *= config['AU_TO_M'] / 1000 / config['SECONDS_PER_DAY']
 
-                # need check evaluate what the difference between s/c pos integrated for an hour vs. real pos
+                # ---- integrate asteroid (needed for IOD) ----
+                asteroid_state_helio = np.array(minimoon.orbit.loc[33017, ["Helio x", "Helio y", "Helio z", "Helio vx",
+                                                                       "Helio vy", "Helio vz"]])
+                print(asteroid_state_helio)
+                print(minimoon.orbit.iloc[33017][["Helio x", "Helio y", "Helio z", "Helio vx",
+                                                                       "Helio vy", "Helio vz"]])
+                asteroid_state_helio[:3] *= config['AU_TO_M'] / 1000
+                asteroid_state_helio[3:] *= config['AU_TO_M'] / 1000 / config['SECONDS_PER_DAY']
+
+                k = 33017
+                row = minimoon.orbit.iloc[k]  # IMPORTANT
+
+                AU_TO_KM = config['AU_TO_M'] / 1000
+
+                obj_helio0 = row[["Helio x", "Helio y", "Helio z"]].to_numpy(dtype=float) * AU_TO_KM
+                earth_helio0 = row[["Earth x (Helio)", "Earth y (Helio)", "Earth z (Helio)"]].to_numpy(
+                    dtype=float) * AU_TO_KM
+                geo0_from_openorb_helio = obj_helio0 - earth_helio0
+
+                geo0_direct = row[["Geo x", "Geo y", "Geo z"]].to_numpy(dtype=float) * AU_TO_KM
+
+                print("OpenOrb geo direct:", geo0_direct)
+                print("OpenOrb geo via helio subtraction:", geo0_from_openorb_helio)
+                print("diff (km):", geo0_direct - geo0_from_openorb_helio)
+
+                asteroid_integrated_states, asteroid_earth_states = nbody.integrate_n_body(
+                    asteroid_state_helio, minimoon.curr_epoch, config['epochs']['dt_max'],
+                    3600, type="ASTEROID"
+                )
+
+                geo0_int = (asteroid_integrated_states[:3, 0] - asteroid_earth_states[:3, 0])  # check shapes!
+                print("Integrator geo0:", geo0_int)
+                print("Integrator - OpenOrb geo0 (km):", geo0_int - geo0_direct)
+
+                asteroid_state_eclip = (asteroid_integrated_states - asteroid_earth_states).T
+
+                fig = plt.figure()
+                ax = fig.add_subplot(projection="3d")
+                ax.plot(asteroid_state_eclip[:, 0] , asteroid_state_eclip[:, 1], asteroid_state_eclip[:, 2])
+                ax.plot(ast_truth_original_eclip[:, 0], ast_truth_original_eclip[:, 1], ast_truth_original_eclip[:, 2])
+                plt.show()
+
 
                 # to visualize the possible att coord scenarios
                 viz_prop_flag = False
@@ -1870,11 +1915,7 @@ def run_OD(config):
                     sc_pointing_eme_cartesian = res_kcoverage.u_cmd
                     ang_eme = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_eme_cartesian)
                     ast_truth_eme = np.squeeze(ast_eme_traj_kms[best_idx, :3])
-                    ast_truth_original_eclip = np.array(minimoon.orbit.loc[:, ["Geo x", "Geo y", "Geo z", "Geo vx",
-                                                                      "Geo vy", "Geo vz"]])
-                    ast_truth_original_eclip[:, :3] *= config['AU_TO_M'] / 1000
-                    ast_truth_original_eclip[:, 3:] *= config['AU_TO_M'] / 1000 / config['SECONDS_PER_DAY']
-                    ast_truth_original_eme = util.geo_eclip_to_geo_eme_generic(ast_truth_original_eclip)
+
                     ast_iod_eme = np.squeeze(x_ts[best_idx, :3])
                     P_cart_eme = np.squeeze(P_ts[best_idx, :3, :3])
 

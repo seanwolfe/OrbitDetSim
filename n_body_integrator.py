@@ -255,7 +255,7 @@ def integrate_n_body(object_state, epoch, end_time, time_interval, type):
         mass_array = np.array([masses[body] for body in bodies] + [masses["SPACECRAFT"]])
 
     # Function to get state vectors (position, velocity) in km & km/s
-    def get_state(body, reference=10):
+    def get_state(body, reference=0):
         state, _ = spice.spkgeo(body, epoch_et, "ECLIPJ2000", reference)
         return np.array(state)
 
@@ -280,6 +280,9 @@ def integrate_n_body(object_state, epoch, end_time, time_interval, type):
     start_time = 0
     t_span = (start_time, end_time)  # Start at t=0, end at t=900s
     t_eval = np.arange(start_time, end_time, time_interval)  # 30s intervals
+    print(t_span)
+    print(t_eval.shape)
+    print(t_eval[t_eval > t_span[1]])
 
     # Define N-body equations of motion
     def nbody_derivatives(t, y):
@@ -288,12 +291,21 @@ def integrate_n_body(object_state, epoch, end_time, time_interval, type):
         velocities = y[3 * n:].reshape((n, 3))
         accelerations = np.zeros((n, 3))
 
+        min_r = np.inf
+        min_pair = None
+
         for i in range(n):
             for j in range(n):
                 if i != j:
                     r_vec = positions[j] - positions[i]
                     r_mag = np.linalg.norm(r_vec)
+                    if r_mag < min_r:
+                        min_r = r_mag
+                        min_pair = (i, j)
                     accelerations[i] += G * mass_array[j] * r_vec / r_mag ** 3
+
+        if min_r < 1e6:  # 1000 km, adjust threshold
+            print("t=", t, "min_r(m)=", min_r, "pair=", min_pair)
 
         return np.hstack([velocities.flatten(), accelerations.flatten()])
 
@@ -304,8 +316,13 @@ def integrate_n_body(object_state, epoch, end_time, time_interval, type):
     n_bodies = len(mass_array)
     object_idx = n_bodies - 1  # asteroid index
 
-    earth_positions = sol.y[9:12, :]
-    earth_velocities = sol.y[3 * (n_bodies + 3):3 * (n_bodies + 3) + 3, :]
+    n = n_bodies
+    pos0 = 0
+    vel0 = 3 * n
+
+    earth_i = bodies.index(399)  # should be 3
+    earth_positions = sol.y[pos0 + 3 * earth_i: pos0 + 3 * (earth_i + 1), :]
+    earth_velocities = sol.y[vel0 + 3 * earth_i: vel0 + 3 * (earth_i + 1), :]
     object_positions = sol.y[3 * object_idx: 3 * (object_idx + 1), :]
     object_velocities = sol.y[2 * 3 * object_idx + 3: 2 * 3 * object_idx + 6, :]
 
