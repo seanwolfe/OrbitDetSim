@@ -6135,7 +6135,7 @@ def piecewise_anchor_and_propagate_spacecraft_trajs(
             _x_eme_ast = geo_eclip_to_geo_eme_generic(x_ecl_ast)
 
         # NOTE: matches your original behavior: return ECL-at-ast (not EME)
-        return np.asarray(x_ecl_ast, dtype=float).reshape(6,)
+        return np.asarray(_x_eme_ast, dtype=float).reshape(6,)
 
     # -------------------------
     # Assign each target to an anchor index k RELATIVE to k0 (fixes off-by-one)

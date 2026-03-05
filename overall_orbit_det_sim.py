@@ -1460,7 +1460,7 @@ def run_OD(config):
         setup = od_setup_from_iod(config, row, util=util, sp=sp)  # dict containing a lot of initial data
 
         # Force visualization ON (as requested)
-        ini_viz_flag = False
+        ini_viz_flag = True
         if ini_viz_flag:
 
             sid = setup["sc_detecting_id"]
@@ -1695,6 +1695,7 @@ def run_OD(config):
             setup["frames"]["sc_eme_ae_kms"],
             set_epochs_from_row=row
         )
+
         formation.set_spacecraft_pointings(setup["frames"]["sc_pointing_eme_cartesian"])
         formation.currently_detecting = int(setup["sc_detecting_id"])  # initially an int from iod but tuple once multiple
 
@@ -1752,59 +1753,20 @@ def run_OD(config):
                 # sc_eme_trajs_kms = n_body_propagator.propagate_multiple_objects(sc_eme_states_kms, timer.curr_epoch,
                 #                                                                 timer.attcoord_searchtimes_jdtdb)
 
-
                 # propagate asteroid true to each epoch
                 ast_eme_state_kms = minimoon.curr_state_eme
                 ast_eme_traj_kms = n_body_propagator.propagate(ast_eme_state_kms, timer.curr_epoch,
                                                                timer.attcoord_searchtimes_jdtdb)
-
+                #
                 ast_truth_original_eclip = np.array(minimoon.orbit.loc[:, ["Geo x", "Geo y", "Geo z", "Geo vx",
                                                                            "Geo vy", "Geo vz"]])
                 ast_truth_original_eclip[:, :3] *= config['AU_TO_M'] / 1000
                 ast_truth_original_eclip[:, 3:] *= config['AU_TO_M'] / 1000 / config['SECONDS_PER_DAY']
+                ast_truth_original_eme = util.geo_eclip_to_geo_eme_generic(ast_truth_original_eclip,
+                                                                           hint=("time", "state"))
 
+                #
                 # ---- integrate asteroid (needed for IOD) ----
-                asteroid_state_helio = np.array(minimoon.orbit.loc[33017, ["Helio x", "Helio y", "Helio z", "Helio vx",
-                                                                       "Helio vy", "Helio vz"]])
-                print(asteroid_state_helio)
-                print(minimoon.orbit.iloc[33017][["Helio x", "Helio y", "Helio z", "Helio vx",
-                                                                       "Helio vy", "Helio vz"]])
-                asteroid_state_helio[:3] *= config['AU_TO_M'] / 1000
-                asteroid_state_helio[3:] *= config['AU_TO_M'] / 1000 / config['SECONDS_PER_DAY']
-
-                k = 33017
-                row = minimoon.orbit.iloc[k]  # IMPORTANT
-
-                AU_TO_KM = config['AU_TO_M'] / 1000
-
-                obj_helio0 = row[["Helio x", "Helio y", "Helio z"]].to_numpy(dtype=float) * AU_TO_KM
-                earth_helio0 = row[["Earth x (Helio)", "Earth y (Helio)", "Earth z (Helio)"]].to_numpy(
-                    dtype=float) * AU_TO_KM
-                geo0_from_openorb_helio = obj_helio0 - earth_helio0
-
-                geo0_direct = row[["Geo x", "Geo y", "Geo z"]].to_numpy(dtype=float) * AU_TO_KM
-
-                print("OpenOrb geo direct:", geo0_direct)
-                print("OpenOrb geo via helio subtraction:", geo0_from_openorb_helio)
-                print("diff (km):", geo0_direct - geo0_from_openorb_helio)
-
-                asteroid_integrated_states, asteroid_earth_states = nbody.integrate_n_body(
-                    asteroid_state_helio, minimoon.curr_epoch, config['epochs']['dt_max'],
-                    3600, type="ASTEROID"
-                )
-
-                geo0_int = (asteroid_integrated_states[:3, 0] - asteroid_earth_states[:3, 0])  # check shapes!
-                print("Integrator geo0:", geo0_int)
-                print("Integrator - OpenOrb geo0 (km):", geo0_int - geo0_direct)
-
-                asteroid_state_eclip = (asteroid_integrated_states - asteroid_earth_states).T
-
-                fig = plt.figure()
-                ax = fig.add_subplot(projection="3d")
-                ax.plot(asteroid_state_eclip[:, 0] , asteroid_state_eclip[:, 1], asteroid_state_eclip[:, 2])
-                ax.plot(ast_truth_original_eclip[:, 0], ast_truth_original_eclip[:, 1], ast_truth_original_eclip[:, 2])
-                plt.show()
-
 
                 # to visualize the possible att coord scenarios
                 viz_prop_flag = False
@@ -2112,7 +2074,7 @@ def run_OD(config):
                         show_ems=True,
                         show_fov_cones=True,
                         title="3D OD Scenario Demo (EME)",
-                        slew_history=None,
+                        slew_history=slew_history,
                         slew_history_line_len=ray_length,
                         agent_orbit_tracks_xyz=[sc_eme_states_kms_piecewise[:, i, :3] for i in
                                                 range(config['num_spacecraft'])]
@@ -2240,7 +2202,7 @@ def run_OD(config):
             # -------------------------
             else:
                 # perform detection with new attidudes
-
+                break
                 # --- Print status for THIS iteration (best-effort fields) ---
                 print_od_status(
                     timer=timer,

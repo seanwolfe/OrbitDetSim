@@ -1180,6 +1180,7 @@ class AttitudeCoordinator:
         self.max_iterations=int(opt.get("max_iterations", 100))
         self.ftolerance=float(opt.get("ftol", 1e-10))
         self.display=bool(opt.get("display", False))
+        self.num_candidates=int(opt.get("num_candidates", 8))
 
         # Optional EMS / keepout config defaults
         ems = cfg.get("ems", {})
@@ -1355,6 +1356,7 @@ class AttitudeCoordinator:
                 use_fixed_agent=bool(use_fixed_agent),
                 idx_fix=(None if not use_fixed_agent else fixed_agent_idx),
                 u_fix=(None if not use_fixed_agent else fixed_agent_u),
+                num_candidates=int(self.num_candidates)
             )
 
             if u_star is None or not np.isfinite(float(cost_star)):

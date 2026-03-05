@@ -54,22 +54,28 @@ class NBodyPropagator:
         self.method = str(method)
 
         self.KM_TO_M = float(config.get("KM_TO_M", 1000.0))
-        self.G = float(config["GRAVITATIONAL_CONSTANT"])  # SI: m^3 kg^-1 s^-2
+        self.G = float(config["GRAVITATIONAL_CONSTANT"])  # m^3 kg^-1 s^-2
 
-        # Map NAIF IDs -> masses in kg (adapt keys if needed)
         self.mass_map = {
-            '10':  float(config["SUN_MASS"]),
-            '1':   float(config["MERCURY_MASS"]),
-            '2':   float(config["VENUS_MASS"]),
-            '399': float(config["EARTH_MASS"]),
-            '4':   float(config["MARS_MASS"]),
-            '5':   float(config["JUPITER_MASS"]),
-            '6':   float(config["SATURN_MASS"]),
-            '7':   float(config["URANUS_MASS"]),
-            '8':   float(config["NEPTUNE_MASS"]),
-            '301': float(config["MOON_MASS"]),
+            "10": float(config["SUN_MASS"]),
+            "1": float(config["MERCURY_MASS"]),
+            "2": float(config["VENUS_MASS"]),
+            "399": float(config["EARTH_MASS"]),
+            "4": float(config["MARS_MASS"]),
+            "5": float(config["JUPITER_MASS"]),
+            "6": float(config["SATURN_MASS"]),
+            "7": float(config["URANUS_MASS"]),
+            "8": float(config["NEPTUNE_MASS"]),
+            "301": float(config["MOON_MASS"]),
         }
+
+        # Ensure bodies are strings that match the dict keys
+        self.bodies = [str(b) for b in self.bodies]
+
         self.masses = np.array([self.mass_map[b] for b in self.bodies], dtype=float)
+
+        # μ = G*M (m^3/s^2), keyed by body id (string)
+        self.mu_by_id = {b: self.G * self.mass_map[b] for b in self.mass_map}
 
     # ----------------------------
     # Time conversion (JDTDB -> ET)
@@ -92,22 +98,43 @@ class NBodyPropagator:
             out[i] = np.asarray(r_km, dtype=float) * self.KM_TO_M
         return out
 
-    def _accel_m_s2(self, et: float, r_obj_m: np.ndarray) -> np.ndarray:
+    def _accel_geo_m_s2(self, et: float, r_obj_m: np.ndarray) -> np.ndarray:
         """
-        Gravitational acceleration on the object in Earth-centered J2000, SI units.
-        NOTE: If self.bodies includes 399 (Earth), then Earth is at ~0 relative to origin
-              and contributes central gravity. That's usually what you want.
+        Acceleration of the object in an Earth-centered inertial frame (origin=399),
+        including Earth central gravity + differential 3rd-body terms.
         """
-        r_obj_m = np.asarray(r_obj_m, dtype=float).reshape(3,)
-        r_bodies_m = self._body_positions_m(et)
+        r = np.asarray(r_obj_m, dtype=float).reshape(3, )
+        rmag = np.linalg.norm(r)
 
         a = np.zeros(3, dtype=float)
-        for i in range(r_bodies_m.shape[0]):
-            r_vec = r_bodies_m[i] - r_obj_m
-            r_mag = np.linalg.norm(r_vec)
-            if r_mag < self.eps:
+
+        # --- Earth central gravity ---
+        mu_earth = self.mu_by_id['399']  # [m^3/s^2]
+        if rmag > self.eps:
+            a += -mu_earth * r / (rmag ** 3)
+
+        # --- Third-body differential terms (Sun, Moon, planets, etc.) ---
+        for bid in self.bodies:
+            if bid == '399':
                 continue
-            a += self.G * self.masses[i] * r_vec / (r_mag**3)
+
+            # r_j : body position relative to Earth, meters
+            rj_km, _ = self.spice.spkpos(bid, et, self.frame, "NONE", "399")
+            rj = np.asarray(rj_km, dtype=float) * self.KM_TO_M
+
+            mu = self.mu_by_id[bid]  # [m^3/s^2]
+
+            # term1: attraction of object toward body
+            rel = rj - r
+            relmag = np.linalg.norm(rel)
+            if relmag > self.eps:
+                a += mu * rel / (relmag ** 3)
+
+            # term2: subtract attraction of Earth toward body (indirect term)
+            rjmag = np.linalg.norm(rj)
+            if rjmag > self.eps:
+                a += -mu * rj / (rjmag ** 3)
+
         return a
 
     # ----------------------------
@@ -138,7 +165,7 @@ class NBodyPropagator:
         def dyn(et, y):
             r = y[:3]
             v = y[3:]
-            a = self._accel_m_s2(et, r)
+            a = self._accel_geo_m_s2(et, r)
             return np.hstack([v, a])
 
         et_end = float(et1s[-1])
@@ -255,7 +282,7 @@ def integrate_n_body(object_state, epoch, end_time, time_interval, type):
         mass_array = np.array([masses[body] for body in bodies] + [masses["SPACECRAFT"]])
 
     # Function to get state vectors (position, velocity) in km & km/s
-    def get_state(body, reference=0):
+    def get_state(body, reference=10):
         state, _ = spice.spkgeo(body, epoch_et, "ECLIPJ2000", reference)
         return np.array(state)
 
@@ -280,9 +307,6 @@ def integrate_n_body(object_state, epoch, end_time, time_interval, type):
     start_time = 0
     t_span = (start_time, end_time)  # Start at t=0, end at t=900s
     t_eval = np.arange(start_time, end_time, time_interval)  # 30s intervals
-    print(t_span)
-    print(t_eval.shape)
-    print(t_eval[t_eval > t_span[1]])
 
     # Define N-body equations of motion
     def nbody_derivatives(t, y):
@@ -310,7 +334,7 @@ def integrate_n_body(object_state, epoch, end_time, time_interval, type):
         return np.hstack([velocities.flatten(), accelerations.flatten()])
 
     # Solve the N-body problem
-    sol = solve_ivp(nbody_derivatives, t_span, y0, method="RK45", t_eval=t_eval)
+    sol = solve_ivp(nbody_derivatives, t_span, y0, method="DOP853", t_eval=t_eval)
 
     # Extract asteroid's trajectory
     n_bodies = len(mass_array)
