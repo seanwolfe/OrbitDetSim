@@ -401,6 +401,17 @@ class Formation:
         for j, sc_idx in enumerate(ids):
             all_sc[int(sc_idx)].boresight = boresights_eme[j, :]
 
+    def detect(self, asteroid_pos, epoch, configs):
+
+        detection_results = [sc.asteroid_in_fov_single_epoch(asteroid_pos, epoch, configs)
+                             for i, sc in enumerate(self.spacecraft)]
+
+
+        print(detection_results)
+
+        return
+
+
 
 
 

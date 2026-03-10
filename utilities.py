@@ -5954,6 +5954,152 @@ def geo_eme_to_geo_eclip_generic(x, eps=1e-12, layout="auto", hint=None):
     return out_int
 
 
+def sc_eme_ast_eme(*, sc_df, earth_ast_kms_array):
+    """
+    Batch re-epoch spacecraft states from each row epoch to corresponding anchor epochs.
+
+    Per row, performs:
+
+        GEO-EME(lpf)   -> GEO-ECLIP(lpf)
+        GEO-ECLIP(lpf) -> GEO-SECR(lpf)   using Earth_lpf from SPICE
+        GEO-SECR(lpf)  -> GEO-ECLIP(ast)  using Earth_ast from input array
+        GEO-ECLIP(ast) -> GEO-EME(ast)
+
+    Parameters
+    ----------
+    sc_df : pandas.DataFrame
+        DataFrame containing one spacecraft state per row. Must support:
+            - sc_row["Time"]
+            - _sc_row_geo_eme_state_kms(sc_row) -> (6,) state in km, km/s
+
+    earth_ast_kms_array : array-like
+        Earth states at the target/anchor epochs, in heliocentric ecliptic km, km/s.
+
+        Accepted shapes:
+            - (N,6): one Earth state per dataframe row
+            - (6,):  one Earth state broadcast to all rows
+
+    Returns
+    -------
+    x_out : ndarray, shape (N,6)
+        Re-epoched spacecraft states.
+
+    Notes
+    -----
+    This preserves the same transform sequence and behavior as your original
+    `_reepoch_sc_state_to_anchor_epoch`.
+
+    In particular, although the comment in the original mentions returning
+    ECL-at-ast, the code actually performs the final GEO-ECLIP(ast)->GEO-EME(ast)
+    conversion and returns that result.
+    """
+
+    # helpers
+    au_km = 149_597_870.700
+    AU_KM = float(au_km)
+    AU_PER_DAY_TO_KMPS = AU_KM / 86400.0
+    earth_id = 399,
+    sun_id = 10,
+    frame_eclip = "ECLIPJ2000"
+
+
+    # -------------------------
+    # Time conversions (LPF Earth only)
+    # -------------------------
+    def _timestamp_to_et(ts):
+        # ts is expected to be a pandas.Timestamp or datetime-like
+        if isinstance(ts, pd.Timestamp):
+            ts = ts.to_pydatetime()
+        s = ts.strftime("%Y-%m-%dT%H:%M:%S")
+        return float(spice.utc2et(s))
+
+    def _earth_lpf_from_spice_kms(et):
+        st, _lt = spice.spkgeo(int(earth_id), float(et), frame_eclip, int(sun_id))
+        return np.asarray(st, dtype=float).reshape(6,)
+
+    # -------------------------
+    # SC row -> GEO-EME state (km, km/s)
+    # -------------------------
+    def _sc_row_geo_eme_state_kms(row):
+        # columns labeled km/km/s but actually AU and AU/day
+        x_au = np.array(
+            [float(row["GEO_EME_X_(km)"]), float(row["GEO_EME_Y_(km)"]), float(row["GEO_EME_Z_(km)"])],
+            dtype=float,
+        )
+        v_au_per_day = np.array(
+            [float(row["GEO_EME_Vx_(km/s)"]), float(row["GEO_EME_Vy_(km/s)"]), float(row["GEO_EME_Vz_(km/s)"])],
+            dtype=float,
+        )
+        return np.concatenate([x_au * AU_KM, v_au_per_day * AU_PER_DAY_TO_KMPS], axis=0)
+
+    # -----------------------------
+    # validate / coerce dataframe size
+    # -----------------------------
+    N = len(sc_df)
+
+    earth_ast_kms_array = np.asarray(earth_ast_kms_array, dtype=float)
+
+    if earth_ast_kms_array.ndim == 1:
+        if earth_ast_kms_array.shape[0] != 6:
+            raise ValueError(
+                f"If 1D, earth_ast_kms_array must have shape (6,), got {earth_ast_kms_array.shape}"
+            )
+        earth_ast_kms_array = np.broadcast_to(earth_ast_kms_array.reshape(1, 6), (N, 6)).copy()
+
+    elif earth_ast_kms_array.ndim == 2:
+        if earth_ast_kms_array.shape != (N, 6):
+            raise ValueError(
+                f"If 2D, earth_ast_kms_array must have shape ({N}, 6), got {earth_ast_kms_array.shape}"
+            )
+    else:
+        raise ValueError(
+            f"earth_ast_kms_array must have shape (6,) or ({N},6), got {earth_ast_kms_array.shape}"
+        )
+
+    x_out = np.empty((N, 6), dtype=float)
+
+    for i, (_, sc_row) in enumerate(sc_df.iterrows()):
+        et_lpf = _timestamp_to_et(sc_row["Time"])
+        earth_lpf_kms = np.asarray(_earth_lpf_from_spice_kms(et_lpf), dtype=float).reshape(6,)
+        earth_ast_kms = earth_ast_kms_array[i].reshape(6,)
+
+        x_eme_lpf = np.asarray(_sc_row_geo_eme_state_kms(sc_row), dtype=float).reshape(6,)
+
+        # GEO-EME -> GEO-ECLIP
+        try:
+            x_ecl_lpf = geo_eme_to_geo_eclip_generic(x_eme_lpf, hint=("state",))
+        except TypeError:
+            x_ecl_lpf = geo_eme_to_geo_eclip_generic(x_eme_lpf)
+
+        x_ecl_lpf = np.asarray(x_ecl_lpf, dtype=float).reshape(6,)
+
+        # GEO-ECLIP -> GEO-SECR at LPF (Earth from SPICE)
+        x_secr = geo_eclip_to_geo_secr_generic(
+            x_ecl_lpf,
+            earth_lpf_kms,
+            obj_hint=("state",),
+            earth_hint=("state",),
+        )
+        x_secr = np.asarray(x_secr, dtype=float).reshape(6,)
+
+        # GEO-SECR -> GEO-ECLIP at AST (Earth from TABLE / input)
+        x_ecl_ast = geo_secr_to_geo_eclip_generic(
+            x_secr,
+            earth_ast_kms,
+            obj_hint=("state",),
+            earth_hint=("state",),
+        )
+        x_ecl_ast = np.asarray(x_ecl_ast, dtype=float).reshape(6,)
+
+        # GEO-ECLIP -> GEO-EME
+        try:
+            x_eme_ast = geo_eclip_to_geo_eme_generic(x_ecl_ast, hint=("state",))
+        except TypeError:
+            x_eme_ast = geo_eclip_to_geo_eme_generic(x_ecl_ast)
+
+        x_out[i, :] = np.asarray(x_eme_ast, dtype=float).reshape(6,)
+
+    return x_out
 
 def piecewise_anchor_and_propagate_spacecraft_trajs(
     *,

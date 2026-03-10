@@ -118,21 +118,55 @@ def run_runs_x_minimoons_MPI(minimoon_master, config):
             config
         )
         formation = Formation(config)
+        # old
+        # asteroid_pos = current_minimoon.orbit.loc[:, ['Synodic x', 'Synodic y', 'Synodic z']].values
+        # earth_pos = np.zeros_like(asteroid_pos)
+        # moon_pos = current_minimoon.orbit.loc[:, ['Moon Synodic x', 'Moon Synodic y', 'Moon Synodic z']].values
+        # 
+        # formation.match_spacecraft_trajectory(len(asteroid_pos[:, 0]), config)
+        # 
+        
+        # new
+        ast_traj_au_eclip = current_minimoon.orbit.loc[:, ["Geo x", "Geo y", "Geo z", "Geo vx", "Geo vy", "Geo vz"]]
+        ast_traj_au_eclip[:, :3] *= (config["AU_TO_M"] / config["KM_TO_M"])
+        ast_traj_au_eclip[:, 3:] *= (config["AU_TO_M"] / config["KM_TO_M"] / config["SECONDS_PER_DAY"])
+        ast_traj = util.geo_eclip_to_geo_eme_generic(ast_traj_au_eclip)
+        jdtdb_epochs = current_minimoon.orbit["Julian Date"]
+        formation.match_spacecraft_trajectory_full(len(ast_traj[:, 0]), config)
 
-        asteroid_pos = current_minimoon.orbit.loc[:, ['Synodic x', 'Synodic y', 'Synodic z']].values
-        earth_pos = np.zeros_like(asteroid_pos)
-        moon_pos = current_minimoon.orbit.loc[:, ['Moon Synodic x', 'Moon Synodic y', 'Moon Synodic z']].values
+        # set boresights
+        earth_helio_ae = current_minimoon.orbit.loc[:, ["Earth x (Helio)", "Earth y (Helio)", "Earth z (Helio)",
+                         "Earth vx (Helio)", "Earth vy (Helio)", "Earth vz (Helio)"]]
+        earth_helio_ae[:, :3] *= (config["AU_TO_M"] / config["KM_TO_M"])
+        earth_helio_ae[:, 3:] *= (config["AU_TO_M"] / config["KM_TO_M"] / config["SECONDS_PER_DAY"])
+        boresight_ini_secr = np.zeros_like(earth_helio_ae)
+        boresight_ini_secr[:, 0] = -1
+        boresight_ini_eclip = util.geo_secr_to_geo_eclip_generic(boresight_ini_secr, earth_helio_ae,
+                                                                 obj_hint=('time', 'position'),
+                                                                 earth_hint=('time', 'state'))
+        boresight_ini_eme = util.geo_eclip_to_geo_eme_generic(boresight_ini_eclip,
+                                                              hint=('time', 'position'))
 
-        formation.match_spacecraft_trajectory(len(asteroid_pos[:, 0]), config)
-
+        
         new_rows = []
         for jdx, spacecraft in enumerate(formation.spacecraft):
-            sc_pos = spacecraft.matched_trajectory
-
+        
+            # old
+            # sc_pos = spacecraft.matched_trajectory
+            # 
             # NEW: function now returns (base_result, ems_filtered_result)
-            visible_base, visible_ems = spacecraft.asteroid_in_fov_batch(
-                asteroid_pos, sc_pos, earth_pos, moon_pos, config
-            )
+            # visible_base, visible_ems = spacecraft.asteroid_in_fov_batch(
+            #     asteroid_pos, sc_pos, earth_pos, moon_pos, config
+            # )
+        
+            # new
+            # get s/c eme traj at ast epoch
+            sc_traj = util.sc_eme_ast_eme(spacecraft.matched_trajectory_full, earth_helio_ae)
+
+            # evaluate detection
+            visible_base, visible_ems = spacecraft.asteroid_in_fov_batch_km_geocentric(ast_traj, sc_traj,
+                                                                                       boresight_ini_eme,
+                                                                                       jdtdb_epochs, config)
 
             visible_base = np.asarray(visible_base)
             visible_ems = np.asarray(visible_ems)
@@ -1841,7 +1875,7 @@ def run_OD(config):
                 # set them
                 formation.set_spacecraft_pointings(best_attitudes)
 
-                # get (M, 6) boresights
+                # get (M, 6) b
                 best_positions = np.squeeze(sc_eme_states_kms_piecewise[best_idx, :, :])
 
                 # set them
@@ -2074,7 +2108,7 @@ def run_OD(config):
                         show_ems=True,
                         show_fov_cones=True,
                         title="3D OD Scenario Demo (EME)",
-                        slew_history=slew_history,
+                        slew_history=None,
                         slew_history_line_len=ray_length,
                         agent_orbit_tracks_xyz=[sc_eme_states_kms_piecewise[:, i, :3] for i in
                                                 range(config['num_spacecraft'])]
@@ -2195,14 +2229,44 @@ def run_OD(config):
 
                         plt.legend(loc='upper right')
 
-                    plt.show()
+
 
             #-------------------------
             # Regular OD Step
             # -------------------------
             else:
-                # perform detection with new attidudes
-                break
+                # perform detection with new attitudes
+                measurements = formation.detect(minimoon.curr_state_eme[:3], timer.curr_epoch, config)
+
+                asteroid_pos = minimoon.orbit.loc[:, ['Synodic x', 'Synodic y', 'Synodic z']].values
+                earth_pos = np.zeros_like(asteroid_pos)
+                moon_pos = minimoon.orbit.loc[:, ['Moon Synodic x', 'Moon Synodic y', 'Moon Synodic z']].values
+
+                formation.match_spacecraft_trajectory(len(asteroid_pos[:, 0]), config)
+
+                for jdx, spacecraft in enumerate(formation.spacecraft):
+                    sc_pos = spacecraft.matched_trajectory
+                    geo_eclip_p = util.geo_eme_to_geo_eclip_generic(spacecraft.boresight)
+
+                    spacecraft.boresight = np.array([-1, 0, 0])
+
+                    # NEW: function now returns (base_result, ems_filtered_result)
+                    visible_base, visible_ems = spacecraft.asteroid_in_fov_batch(
+                        asteroid_pos, sc_pos, earth_pos, moon_pos, config
+                    )
+
+                    visible_base = np.asarray(visible_base)
+                    visible_ems = np.asarray(visible_ems)
+
+                    len_vis = len(visible_base)  # total epochs
+
+                    # Extract indices (>=0)
+                    base_idx = visible_base[visible_base >= 0].astype(int)
+                    ems_idx = visible_ems[visible_ems >= 0].astype(int)
+                    print(ems_idx)
+
+                print(timer.curr_integration_index)
+
                 # --- Print status for THIS iteration (best-effort fields) ---
                 print_od_status(
                     timer=timer,
@@ -2214,6 +2278,12 @@ def run_OD(config):
                     status_every=status_every,
                     prefix=f"[OD r{rank} uid={uid}]",
                 )
+                plt.show()
+                break
+
+
+
+
 
         # At this point, the OD row is complete; prepare MASTER update
         # upd = {
