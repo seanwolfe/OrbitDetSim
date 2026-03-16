@@ -5998,8 +5998,8 @@ def sc_eme_ast_eme(*, sc_df, earth_ast_kms_array):
     au_km = 149_597_870.700
     AU_KM = float(au_km)
     AU_PER_DAY_TO_KMPS = AU_KM / 86400.0
-    earth_id = 399,
-    sun_id = 10,
+    earth_id = 399
+    sun_id = 10
     frame_eclip = "ECLIPJ2000"
 
 
@@ -6011,10 +6011,10 @@ def sc_eme_ast_eme(*, sc_df, earth_ast_kms_array):
         if isinstance(ts, pd.Timestamp):
             ts = ts.to_pydatetime()
         s = ts.strftime("%Y-%m-%dT%H:%M:%S")
-        return float(spice.utc2et(s))
+        return spice.utc2et(s)
 
     def _earth_lpf_from_spice_kms(et):
-        st, _lt = spice.spkgeo(int(earth_id), float(et), frame_eclip, int(sun_id))
+        st, _lt = spice.spkgeo(earth_id, et, frame_eclip, sun_id)
         return np.asarray(st, dtype=float).reshape(6,)
 
     # -------------------------

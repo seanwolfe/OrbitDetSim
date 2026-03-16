@@ -305,7 +305,6 @@ def epoch_normalization(epoch, z_range, configuration):
 
 
 def run(data, config, parameters):
-
     # get the collocation points
     colloc_points = sample_time_points(parameters['SAMPLING_METHOD'], data[2], parameters['TIME_DELTA'],
                                        parameters['TOTAL_POINTS'], layer_ratios=parameters['LAYER_RATIOS'], config=config)
@@ -317,8 +316,11 @@ def run(data, config, parameters):
     # get the indices where observations are
     obs_mask = np.isin(colloc_points, data[2])
     obs_indices = np.where(obs_mask)[0]
+    print("before solve")
 
     data_df, positions, velocities, nlls_start, final_positions, final_velocities, comp_time, best_bh = solve(epochs_nd_norm_reshaped_tensor, data[0], obs_indices, data[1], colloc_points, c, config, parameters, data[-1])
+
+    print("after solve")
 
     # Extract initial position/velocity
     ini_pos = data[3][0, :]  # km

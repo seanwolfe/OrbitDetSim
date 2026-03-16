@@ -127,7 +127,8 @@ def run_runs_x_minimoons_MPI(minimoon_master, config):
         # 
         
         # new
-        ast_traj_au_eclip = current_minimoon.orbit.loc[:, ["Geo x", "Geo y", "Geo z", "Geo vx", "Geo vy", "Geo vz"]]
+        ast_traj_au_eclip = np.array(current_minimoon.orbit.loc[:, ["Geo x", "Geo y", "Geo z",
+                                                                    "Geo vx", "Geo vy", "Geo vz"]])
         ast_traj_au_eclip[:, :3] *= (config["AU_TO_M"] / config["KM_TO_M"])
         ast_traj_au_eclip[:, 3:] *= (config["AU_TO_M"] / config["KM_TO_M"] / config["SECONDS_PER_DAY"])
         ast_traj = util.geo_eclip_to_geo_eme_generic(ast_traj_au_eclip)
@@ -135,11 +136,11 @@ def run_runs_x_minimoons_MPI(minimoon_master, config):
         formation.match_spacecraft_trajectory_full(len(ast_traj[:, 0]), config)
 
         # set boresights
-        earth_helio_ae = current_minimoon.orbit.loc[:, ["Earth x (Helio)", "Earth y (Helio)", "Earth z (Helio)",
-                         "Earth vx (Helio)", "Earth vy (Helio)", "Earth vz (Helio)"]]
+        earth_helio_ae = np.array(current_minimoon.orbit.loc[:, ["Earth x (Helio)", "Earth y (Helio)", "Earth z (Helio)",
+                         "Earth vx (Helio)", "Earth vy (Helio)", "Earth vz (Helio)"]])
         earth_helio_ae[:, :3] *= (config["AU_TO_M"] / config["KM_TO_M"])
         earth_helio_ae[:, 3:] *= (config["AU_TO_M"] / config["KM_TO_M"] / config["SECONDS_PER_DAY"])
-        boresight_ini_secr = np.zeros_like(earth_helio_ae)
+        boresight_ini_secr = np.zeros((len(earth_helio_ae[:, 0]), 3))
         boresight_ini_secr[:, 0] = -1
         boresight_ini_eclip = util.geo_secr_to_geo_eclip_generic(boresight_ini_secr, earth_helio_ae,
                                                                  obj_hint=('time', 'position'),
@@ -161,10 +162,10 @@ def run_runs_x_minimoons_MPI(minimoon_master, config):
         
             # new
             # get s/c eme traj at ast epoch
-            sc_traj = util.sc_eme_ast_eme(spacecraft.matched_trajectory_full, earth_helio_ae)
+            sc_traj = util.sc_eme_ast_eme(sc_df=spacecraft.matched_trajectory_full, earth_ast_kms_array=earth_helio_ae)
 
             # evaluate detection
-            visible_base, visible_ems = spacecraft.asteroid_in_fov_batch_km_geocentric(ast_traj, sc_traj,
+            visible_base, visible_ems = spacecraft.asteroid_in_fov_batch_km_geocentric(ast_traj[:, :3], sc_traj[:, :3],
                                                                                        boresight_ini_eme,
                                                                                        jdtdb_epochs, config)
 
@@ -195,6 +196,8 @@ def run_runs_x_minimoons_MPI(minimoon_master, config):
     # flush any leftovers and sync
     flush_buffer()
     comm.Barrier()
+
+    return
 
 
 def run_sim_runnumbers_MPI_getIOD(config):
@@ -1494,7 +1497,7 @@ def run_OD(config):
         setup = od_setup_from_iod(config, row, util=util, sp=sp)  # dict containing a lot of initial data
 
         # Force visualization ON (as requested)
-        ini_viz_flag = True
+        ini_viz_flag = False
         if ini_viz_flag:
 
             sid = setup["sc_detecting_id"]
@@ -1886,7 +1889,7 @@ def run_OD(config):
                 ukf.P = np.squeeze(P_ts[best_idx, :, :])
 
                 # update actual minimoon state
-                minimoon.set_state(ast_eme_traj_kms[best_idx, :3], ast_eme_traj_kms[best_idx, 3:])
+                minimoon.set_state(np.squeeze(ast_eme_traj_kms[best_idx, :]))
 
                 # get the next data collection epoch
                 timer.step(best_epoch_jdtdb, k_anchor_best, t_anchor_best)
@@ -2229,43 +2232,70 @@ def run_OD(config):
 
                         plt.legend(loc='upper right')
 
-
-
-            #-------------------------
-            # Regular OD Step
-            # -------------------------
-            else:
                 # perform detection with new attitudes
                 measurements = formation.detect(minimoon.curr_state_eme[:3], timer.curr_epoch, config)
 
-                asteroid_pos = minimoon.orbit.loc[:, ['Synodic x', 'Synodic y', 'Synodic z']].values
-                earth_pos = np.zeros_like(asteroid_pos)
-                moon_pos = minimoon.orbit.loc[:, ['Moon Synodic x', 'Moon Synodic y', 'Moon Synodic z']].values
+                # measurement update
 
-                formation.match_spacecraft_trajectory(len(asteroid_pos[:, 0]), config)
+                compare_initial_detection = False
+                if compare_initial_detection:
+                    # new
+                    ast_traj_au_eclip = np.array(minimoon.orbit.loc[:, ["Geo x", "Geo y", "Geo z",
+                                                                        "Geo vx", "Geo vy", "Geo vz"]])
+                    ast_traj_au_eclip[:, :3] *= (config["AU_TO_M"] / config["KM_TO_M"])
+                    ast_traj_au_eclip[:, 3:] *= (
+                                config["AU_TO_M"] / config["KM_TO_M"] / config["SECONDS_PER_DAY"])
+                    ast_traj = util.geo_eclip_to_geo_eme_generic(ast_traj_au_eclip)
+                    jdtdb_epochs = minimoon.orbit["Julian Date"]
+                    formation.match_spacecraft_trajectory_full(len(ast_traj[:, 0]), config)
 
-                for jdx, spacecraft in enumerate(formation.spacecraft):
-                    sc_pos = spacecraft.matched_trajectory
-                    geo_eclip_p = util.geo_eme_to_geo_eclip_generic(spacecraft.boresight)
+                    # set boresights
+                    earth_helio_ae = np.array(
+                        minimoon.orbit.loc[:, ["Earth x (Helio)", "Earth y (Helio)", "Earth z (Helio)",
+                                               "Earth vx (Helio)", "Earth vy (Helio)", "Earth vz (Helio)"]])
+                    earth_helio_ae[:, :3] *= (config["AU_TO_M"] / config["KM_TO_M"])
+                    earth_helio_ae[:, 3:] *= (config["AU_TO_M"] / config["KM_TO_M"] / config["SECONDS_PER_DAY"])
+                    boresight_ini_secr = np.zeros((len(earth_helio_ae[:, 0]), 3))
+                    boresight_ini_secr[:, 0] = -1
+                    boresight_ini_eclip = util.geo_secr_to_geo_eclip_generic(boresight_ini_secr, earth_helio_ae,
+                                                                             obj_hint=('time', 'position'),
+                                                                             earth_hint=('time', 'state'))
+                    boresight_ini_eme = util.geo_eclip_to_geo_eme_generic(boresight_ini_eclip,
+                                                                          hint=('time', 'position'))
 
-                    spacecraft.boresight = np.array([-1, 0, 0])
+                    for jdx, spacecraft in enumerate(formation.spacecraft):
+                        # new
+                        # get s/c eme traj at ast epoch
+                        sc_traj = util.sc_eme_ast_eme(sc_df=spacecraft.matched_trajectory_full,
+                                                      earth_ast_kms_array=earth_helio_ae)
 
-                    # NEW: function now returns (base_result, ems_filtered_result)
-                    visible_base, visible_ems = spacecraft.asteroid_in_fov_batch(
-                        asteroid_pos, sc_pos, earth_pos, moon_pos, config
-                    )
+                        # evaluate detection
+                        visible_base, visible_ems = spacecraft.asteroid_in_fov_batch_km_geocentric(
+                            ast_traj[:, :3],
+                            sc_traj[:, :3],
+                            boresight_ini_eme,
+                            jdtdb_epochs, config)
 
-                    visible_base = np.asarray(visible_base)
-                    visible_ems = np.asarray(visible_ems)
+                        if jdx == 2:
+                            start = 33015
+                            end = 33030
+                            print("batch check")
+                            print(boresight_ini_eme[start:end, :])
+                            print(ast_traj[start:end, :3])
+                            print(np.array(jdtdb_epochs[start:end]))
+                            print(sc_traj[start:end, :3])
 
-                    len_vis = len(visible_base)  # total epochs
+                        visible_base = np.asarray(visible_base)
+                        visible_ems = np.asarray(visible_ems)
 
-                    # Extract indices (>=0)
-                    base_idx = visible_base[visible_base >= 0].astype(int)
-                    ems_idx = visible_ems[visible_ems >= 0].astype(int)
-                    print(ems_idx)
+                        len_vis = len(visible_base)  # total epochs
 
-                print(timer.curr_integration_index)
+                        # Extract indices (>=0)
+                        base_idx = visible_base[visible_base >= 0].astype(int)
+                        ems_idx = visible_ems[visible_ems >= 0].astype(int)
+                        print(ems_idx)
+
+                    print(timer.curr_integration_index)
 
                 # --- Print status for THIS iteration (best-effort fields) ---
                 print_od_status(
@@ -2279,6 +2309,12 @@ def run_OD(config):
                     prefix=f"[OD r{rank} uid={uid}]",
                 )
                 plt.show()
+
+            #-------------------------
+            # Regular OD Step
+            # -------------------------
+            else:
+
                 break
 
 

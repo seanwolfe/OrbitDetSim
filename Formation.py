@@ -229,7 +229,6 @@ class Formation:
         closest_position_idx = np.argmin(distances)
         return closest_position_idx
 
-
     def recall_formation(self, sc1_ini_index, config):
 
         # find the total number of steps in the quasi-halo
@@ -407,7 +406,9 @@ class Formation:
                              for i, sc in enumerate(self.spacecraft)]
 
 
-        print(detection_results)
+        # make measurements from detection - perfect
+
+        # add noise
 
         return
 

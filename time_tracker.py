@@ -34,6 +34,7 @@ class SimTime:
 
     def set_attcoord_searchtimes(self):
         delta = (self.datacollect_time + self.detection_time + self.iod_time + self.attcoord_expectedtime) / 86400.0  # in days
+        delta = 0
         big_t_set_jdtdb = self.curr_epoch + (self.attcoord_searchtimes / 86400.0) + delta
         big_t_set_jdtdb = big_t_set_jdtdb[big_t_set_jdtdb <= self.end_time + 1e-15]
         self.attcoord_searchtimes_jdtdb = big_t_set_jdtdb

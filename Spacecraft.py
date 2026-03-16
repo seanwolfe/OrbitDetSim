@@ -326,7 +326,7 @@ class Spacecraft:
         #   Earth = origin
         #   Moon queried relative to Earth
         # -----------------------------
-        et = (float(jdtdb) - 2451545.0) * 86400.0
+        et = spice.unitim(jdtdb, 'JDTDB', 'ET')
 
         earth_pos_km = np.zeros(3, dtype=float)
 
@@ -343,6 +343,11 @@ class Spacecraft:
         cos_theta_h = np.cos(theta_h)
 
         b = np.asarray(self.boresight, dtype=float).reshape(3, )
+        print("single check")
+        print(b)
+        print(asteroid_position_km)
+        print(jdtdb)
+        print(sc_pos_km)
         b_norm = np.linalg.norm(b)
         if b_norm <= 1e-15:
             raise ValueError("self.boresight has zero norm.")
@@ -581,11 +586,13 @@ class Spacecraft:
         # -----------------------------
         earth_pos = np.zeros((N, 3), dtype=float)
 
-        et_list = (jdtdb - 2451545.0) * 86400.0
+        et_list = []
         moon_pos = np.empty((N, 3), dtype=float)
 
-        for i, et in enumerate(et_list):
-            moon_state_km, _ = spice.spkezr("MOON", float(et), "J2000", "NONE", "EARTH")
+        for i, jd in enumerate(jdtdb):
+            et = spice.unitim(jd, 'JDTDB', 'ET')
+            et_list.append(et)
+            moon_state_km, _ = spice.spkezr("MOON", et, "J2000", "NONE", "EARTH")
             moon_pos[i, :] = np.asarray(moon_state_km[:3], dtype=float)
 
         earth_radius_km = float(configs["EARTH_RADIUS_KM"])

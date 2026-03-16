@@ -113,7 +113,7 @@ NUMBER_OF_OBSERVATIONS: 16
 TIME_DELTA: 0.6
 TOTAL_POINTS: 250
 SAMPLING_METHOD: "uniform"
-INPUT_RANGE: (-1, 1)
+INPUT_RANGE: [-1, 1]
 HIDDEN_DIMENSION: 250
 PHYSICS_WEIGHT: 1.0e+3
 LAMBDA_DIST: 1.0e-2
@@ -128,7 +128,7 @@ G_TOLERANCE: 1.0e-15
 MIN_RHO: 0.0006684587122
 MAX_RHO: 0.06684587122
 MIN_RHO_DOT: -0.05033557046
-MAX_RHO_DOT: 0.05033557046,
+MAX_RHO_DOT: 0.05033557046
 DELTA_RHO: 6.68459e-8
 DELTA_RHO_DOT: 0.00167785234
 
@@ -155,9 +155,9 @@ error:
 
 # epoch grid to search over
 epochs:
-  dt_min: 10.0   # in seconds, first time to check
+  dt_min: 1.0   # in seconds, first time to check
   dt_max: 86400.0  # last time to check
-  n_dt: 24       # number of checks
+  n_dt: 25       # number of checks
   average_epoch_time: 5  # average time to run the att coord algorithm for one time, seconds
 
 d_mahal: 3.0

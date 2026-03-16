@@ -25,9 +25,8 @@ class Asteroid:
 
         return
 
-    def set_state(self, position, velocity):
-        self.position = position
-        self.velocity = velocity
+    def set_state(self, state):
+        self.curr_state_eme = state
 
         return
 
