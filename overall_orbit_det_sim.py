@@ -2232,11 +2232,6 @@ def run_OD(config):
 
                         plt.legend(loc='upper right')
 
-                # perform detection with new attitudes
-                measurements = formation.detect(minimoon.curr_state_eme[:3], timer.curr_epoch, config)
-
-                # measurement update
-
                 compare_initial_detection = False
                 if compare_initial_detection:
                     # new
@@ -2297,6 +2292,33 @@ def run_OD(config):
 
                     print(timer.curr_integration_index)
 
+
+            #-------------------------
+            # Regular OD Step
+            # -------------------------
+            else:
+
+                # gather and process tracklet
+                # perform detection with new attitudes
+                p_meas_k, n_meas_k, sc_states_k, ast_states_k, epochs_k, detection_res_k = formation.detect(minimoon.curr_state_eme, timer.curr_epoch, n_body_propagator, config)
+                confirm_meas = True
+                if confirm_meas:
+                    util.plot_detection_geometry_3d(
+                        perfect_meas=p_meas_k,
+                        noisy_meas=n_meas_k,
+                        sc_states=sc_states_k,
+                        ast_states=ast_states_k,
+                        detection_results=detection_res_k,
+                        epochs=epochs_k,
+                        los_stride=2,                 # plot every 2nd frame to reduce clutter
+                        use_true_range_for_los=True,  # perfect LOS ends at asteroid
+                        title="Detection Geometry",
+                        save_path=None,
+                        show=False,
+                    )
+
+                plt.show()
+
                 # --- Print status for THIS iteration (best-effort fields) ---
                 print_od_status(
                     timer=timer,
@@ -2308,12 +2330,15 @@ def run_OD(config):
                     status_every=status_every,
                     prefix=f"[OD r{rank} uid={uid}]",
                 )
-                plt.show()
 
-            #-------------------------
-            # Regular OD Step
-            # -------------------------
-            else:
+
+                # check if detections, if yes prediction, measurement (normal Kalman step)
+                    # measurement update
+                    # predictuion
+
+                # otherwise end simulation mark as lost, iteration lost etc...
+
+
 
                 break
 

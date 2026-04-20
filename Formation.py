@@ -400,17 +400,144 @@ class Formation:
         for j, sc_idx in enumerate(ids):
             all_sc[int(sc_idx)].boresight = boresights_eme[j, :]
 
-    def detect(self, asteroid_pos, epoch, configs):
+    def detect(self, asteroid_state, epoch, n_body_prop, configs):
+        """
+        Generate perfect and noisy RA/Dec measurements for each spacecraft over
+        a measurement window.
 
-        detection_results = [sc.asteroid_in_fov_single_epoch(asteroid_pos, epoch, configs)
-                             for i, sc in enumerate(self.spacecraft)]
+        Parameters
+        ----------
+        asteroid_state : array_like, shape (6,)
+            Asteroid EME/J2000 state at initial epoch [km, km/s].
+        epoch : float
+            Initial epoch in JDTDB.
+        n_body_prop : NBodyPropagator
+            Propagator instance.
+        configs : dict
+            Configuration dict containing at least:
+              - number_of_frames
+              - time_between_frames   [s]
+              - SECONDS_PER_DAY
+              - sigma_ra              [mas]
+              - sigma_dec             [mas]
+              - sigma_pointing        [mas]
 
+        Returns
+        -------
+        perfect_meas : ndarray, shape (M, N, 2)
+            Perfect [RA, Dec] measurements in radians.
+        noisy_meas : ndarray, shape (M, N, 2)
+            Noisy [RA, Dec] measurements in radians.
+        sc_states : ndarray, shape (M, N, 6)
+            Propagated spacecraft states [km, km/s].
+        ast_states : ndarray, shape (N, 6)
+            Propagated asteroid states [km, km/s].
+        epochs : ndarray, shape (N,)
+            Epoch sequence used for measurements [JDTDB].
+        detection_results : list of dict
+            Initial per-spacecraft detection results.
+        """
 
-        # make measurements from detection - perfect
+        def mas_to_rad(x_mas):
+            """Convert milliarcseconds to radians."""
+            return np.asarray(x_mas, dtype=float) * np.pi / (180.0 * 3600.0 * 1000.0)
 
-        # add noise
+        asteroid_state = np.asarray(asteroid_state, dtype=float).reshape(6,)
 
-        return
+        # ---------------------------------------------------------
+        # Initial detection check at the initial epoch
+        # ---------------------------------------------------------
+        detection_results = [
+            sc.asteroid_in_fov_single_epoch(asteroid_state[:3], epoch, configs)
+            for sc in self.spacecraft
+        ]
+
+        M = len(self.spacecraft)
+
+        # ---------------------------------------------------------
+        # Build spacecraft initial state array (M,6)
+        # ---------------------------------------------------------
+        sc_initial_states = np.zeros((M, 6), dtype=float)
+        for i, sc in enumerate(self.spacecraft):
+            sc_initial_states[i, :] = np.asarray(sc.curr_state_eme, dtype=float).reshape(6,)
+
+        # ---------------------------------------------------------
+        # Measurement sequence
+        # ---------------------------------------------------------
+        num_frames = int(configs["number_of_frames"])
+        step_days = float(configs["time_between_frames"]) / float(configs["SECONDS_PER_DAY"])
+        epochs = epoch + step_days * np.arange(num_frames, dtype=float)
+
+        # ---------------------------------------------------------
+        # Propagate asteroid and spacecraft over the same epoch grid
+        # ---------------------------------------------------------
+        # asteroid: (N,6)
+        ast_states = n_body_prop.propagate(asteroid_state, epoch, epochs)
+
+        # spacecraft: (N,M,6) from your propagator
+        sc_states_time_major = n_body_prop.propagate_multiple_objects(
+            sc_initial_states, epoch, epochs
+        )
+
+        # reorder to (M,N,6) for convenience
+        sc_states = np.transpose(sc_states_time_major, (1, 0, 2))
+
+        N = num_frames
+
+        # ---------------------------------------------------------
+        # Allocate outputs
+        # ---------------------------------------------------------
+        perfect_meas = np.full((M, N, 2), np.nan, dtype=float)
+        noisy_meas = np.full((M, N, 2), np.nan, dtype=float)
+
+        # ---------------------------------------------------------
+        # Effective noise sigmas (all inputs in mas)
+        # ---------------------------------------------------------
+        sigma_ra_rad = mas_to_rad(configs.get("sigma_ra", 0.0))
+        sigma_dec_rad = mas_to_rad(configs.get("sigma_dec", 0.0))
+        sigma_pointing_rad = mas_to_rad(configs.get("sigma_pointing", 0.0))
+
+        sigma_ra_eff = np.sqrt(sigma_ra_rad**2 + sigma_pointing_rad**2)
+        sigma_dec_eff = np.sqrt(sigma_dec_rad**2 + sigma_pointing_rad**2)
+
+        eps = 1e-12
+
+        # ---------------------------------------------------------
+        # Per-spacecraft measurement generation
+        # ---------------------------------------------------------
+        for i in range(M):
+            detected = bool(detection_results[i].get("detected", False))
+
+            # If not detected at initial epoch, keep all-NaN for this spacecraft
+            if not detected:
+                continue
+
+            # Relative position asteroid - spacecraft over all frames
+            x_rel = ast_states[:, 0] - sc_states[i, :, 0]
+            y_rel = ast_states[:, 1] - sc_states[i, :, 1]
+            z_rel = ast_states[:, 2] - sc_states[i, :, 2]
+
+            r_xy = np.hypot(x_rel, y_rel)
+            r = np.sqrt(r_xy**2 + z_rel**2)
+
+            # Perfect RA/Dec
+            ra = np.arctan2(y_rel, x_rel)
+            dec = np.arcsin(np.clip(z_rel / np.maximum(r, eps), -1.0, 1.0))
+
+            perfect_meas[i, :, 0] = ra
+            perfect_meas[i, :, 1] = dec
+
+            # Add Gaussian noise directly in RA/Dec
+            ra_noisy = ra + np.random.normal(loc=0.0, scale=sigma_ra_eff, size=N)
+            dec_noisy = dec + np.random.normal(loc=0.0, scale=sigma_dec_eff, size=N)
+
+            # Wrap RA to [-pi, pi)
+            ra_noisy = np.arctan2(np.sin(ra_noisy), np.cos(ra_noisy))
+
+            noisy_meas[i, :, 0] = ra_noisy
+            noisy_meas[i, :, 1] = dec_noisy
+
+        return perfect_meas, noisy_meas, sc_states, ast_states, epochs, detection_results
 
 
 

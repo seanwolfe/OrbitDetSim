@@ -343,11 +343,11 @@ class Spacecraft:
         cos_theta_h = np.cos(theta_h)
 
         b = np.asarray(self.boresight, dtype=float).reshape(3, )
-        print("single check")
-        print(b)
-        print(asteroid_position_km)
-        print(jdtdb)
-        print(sc_pos_km)
+        # print("single check")
+        # print(b)
+        # print(asteroid_position_km)
+        # print(jdtdb)
+        # print(sc_pos_km)
         b_norm = np.linalg.norm(b)
         if b_norm <= 1e-15:
             raise ValueError("self.boresight has zero norm.")
@@ -670,5 +670,6 @@ class Spacecraft:
         result_ems_filtered[idx2] = idx2
 
         return result_base, result_ems_filtered
+
 
 

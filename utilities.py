@@ -7326,3 +7326,463 @@ def plot_matched_trajectory_full_range(
 
     fig.tight_layout()
     return fig, axes
+
+
+def ra_dec_to_unit_vector(ra, dec):
+    """
+    Convert RA/Dec [rad] to LOS unit vector(s).
+
+    Parameters
+    ----------
+    ra : array_like
+        Right ascension in radians.
+    dec : array_like
+        Declination in radians.
+
+    Returns
+    -------
+    u : ndarray, shape (..., 3)
+        Unit vector(s).
+    """
+    ra = np.asarray(ra, dtype=float)
+    dec = np.asarray(dec, dtype=float)
+
+    cos_dec = np.cos(dec)
+    x = cos_dec * np.cos(ra)
+    y = cos_dec * np.sin(ra)
+    z = np.sin(dec)
+
+    return np.stack((x, y, z), axis=-1)
+
+
+def set_axes_equal(ax):
+    """
+    Make a 3D plot have equal axis scaling.
+    """
+    x_limits = ax.get_xlim3d()
+    y_limits = ax.get_ylim3d()
+    z_limits = ax.get_zlim3d()
+
+    x_range = abs(x_limits[1] - x_limits[0])
+    y_range = abs(y_limits[1] - y_limits[0])
+    z_range = abs(z_limits[1] - z_limits[0])
+
+    x_middle = np.mean(x_limits)
+    y_middle = np.mean(y_limits)
+    z_middle = np.mean(z_limits)
+
+    plot_radius = 0.5 * max(x_range, y_range, z_range)
+
+    ax.set_xlim3d([x_middle - plot_radius, x_middle + plot_radius])
+    ax.set_ylim3d([y_middle - plot_radius, y_middle + plot_radius])
+    ax.set_zlim3d([z_middle - plot_radius, z_middle + plot_radius])
+
+
+def plot_detection_geometry_3d(
+    perfect_meas,
+    noisy_meas,
+    sc_states,
+    ast_states,
+    detection_results,
+    epochs=None,
+    los_stride=1,
+    use_true_range_for_los=True,
+    fixed_los_length_km=None,
+    show_start_markers=True,
+    show_end_markers=True,
+    title="3D Detection Geometry",
+    save_path=None,
+    show=True,
+):
+    """
+    Plot spacecraft trajectories, asteroid trajectory, and LOS rays for detecting spacecraft.
+
+    Parameters
+    ----------
+    perfect_meas : ndarray, shape (M, N, 2)
+        Perfect [RA, Dec] measurements in radians.
+    noisy_meas : ndarray, shape (M, N, 2)
+        Noisy [RA, Dec] measurements in radians.
+    sc_states : ndarray, shape (M, N, 6)
+        Spacecraft states [km, km/s].
+    ast_states : ndarray, shape (N, 6)
+        Asteroid states [km, km/s].
+    detection_results : list of dict
+        Per-spacecraft detection dictionaries. Uses ["detected"].
+    epochs : ndarray, optional
+        Epoch array, only used for optional consistency checks or future annotation.
+    los_stride : int, optional
+        Plot LOS every `los_stride` frames to reduce clutter.
+    use_true_range_for_los : bool, optional
+        If True, LOS rays are scaled by the true spacecraft-to-asteroid range at each frame.
+    fixed_los_length_km : float or None, optional
+        Used only if use_true_range_for_los=False. Then all LOS rays get this fixed length.
+        If None and use_true_range_for_los=False, a default is chosen.
+    show_start_markers : bool, optional
+        Mark start points of trajectories.
+    show_end_markers : bool, optional
+        Mark end points of trajectories.
+    title : str, optional
+        Plot title.
+    save_path : str or None, optional
+        If given, save figure to this path.
+    show : bool, optional
+        Whether to call plt.show().
+
+    Returns
+    -------
+    fig, ax
+    """
+    perfect_meas = np.asarray(perfect_meas, dtype=float)
+    noisy_meas = np.asarray(noisy_meas, dtype=float)
+    sc_states = np.asarray(sc_states, dtype=float)
+    ast_states = np.asarray(ast_states, dtype=float)
+
+    if sc_states.ndim != 3 or sc_states.shape[2] != 6:
+        raise ValueError(f"sc_states must have shape (M, N, 6), got {sc_states.shape}")
+    if ast_states.ndim != 2 or ast_states.shape[1] != 6:
+        raise ValueError(f"ast_states must have shape (N, 6), got {ast_states.shape}")
+    if perfect_meas.shape != noisy_meas.shape:
+        raise ValueError("perfect_meas and noisy_meas must have the same shape")
+    if perfect_meas.ndim != 3 or perfect_meas.shape[2] != 2:
+        raise ValueError(f"perfect_meas must have shape (M, N, 2), got {perfect_meas.shape}")
+
+    M, N, _ = perfect_meas.shape
+
+    if sc_states.shape[:2] != (M, N):
+        raise ValueError(
+            f"sc_states first two dims must match measurements: "
+            f"expected {(M, N)}, got {sc_states.shape[:2]}"
+        )
+    if ast_states.shape[0] != N:
+        raise ValueError(
+            f"ast_states time dimension must match measurements: "
+            f"expected {N}, got {ast_states.shape[0]}"
+        )
+
+    sc_pos = sc_states[:, :, :3]   # (M, N, 3)
+    ast_pos = ast_states[:, :3]    # (N, 3)
+
+    fig = plt.figure(figsize=(11, 9))
+    ax = fig.add_subplot(111, projection="3d")
+
+    # Plot asteroid trajectory
+    ax.plot(
+        ast_pos[:, 0], ast_pos[:, 1], ast_pos[:, 2],
+        linewidth=2.5,
+        label="Asteroid trajectory"
+    )
+
+    if show_start_markers:
+        ax.scatter(ast_pos[0, 0], ast_pos[0, 1], ast_pos[0, 2], marker="o", s=50, label="Asteroid start")
+    if show_end_markers:
+        ax.scatter(ast_pos[-1, 0], ast_pos[-1, 1], ast_pos[-1, 2], marker="^", s=50, label="Asteroid end")
+
+    # Plot spacecraft trajectories
+    for i in range(M):
+        traj = sc_pos[i]
+        detected = bool(detection_results[i].get("detected", False))
+
+        label = f"SC {i} trajectory"
+        if detected:
+            label += " (detecting)"
+
+        ax.plot(traj[:, 0], traj[:, 1], traj[:, 2], linewidth=1.5, label=label)
+
+        if show_start_markers:
+            ax.scatter(traj[0, 0], traj[0, 1], traj[0, 2], marker="o", s=25)
+        if show_end_markers:
+            ax.scatter(traj[-1, 0], traj[-1, 1], traj[-1, 2], marker="^", s=25)
+
+    # Plot LOS for detecting spacecraft
+    perfect_label_used = False
+    noisy_label_used = False
+
+    for i in range(M):
+        detected = bool(detection_results[i].get("detected", False))
+        if not detected:
+            continue
+
+        for k in range(0, N, los_stride):
+            ra_p, dec_p = perfect_meas[i, k]
+            ra_n, dec_n = noisy_meas[i, k]
+
+            if np.any(np.isnan([ra_p, dec_p, ra_n, dec_n])):
+                continue
+
+            sc_k = sc_pos[i, k]
+            ast_k = ast_pos[k]
+
+            u_perfect = ra_dec_to_unit_vector(ra_p, dec_p)
+            u_noisy = ra_dec_to_unit_vector(ra_n, dec_n)
+
+            if use_true_range_for_los:
+                los_len = np.linalg.norm(ast_k - sc_k)
+            else:
+                if fixed_los_length_km is None:
+                    # fallback default based on overall scene size
+                    scene_pts = np.vstack([ast_pos, sc_pos.reshape(-1, 3)])
+                    scene_extent = np.linalg.norm(scene_pts.max(axis=0) - scene_pts.min(axis=0))
+                    los_len = 0.15 * scene_extent
+                else:
+                    los_len = float(fixed_los_length_km)
+
+            end_perfect = sc_k + los_len * u_perfect
+            end_noisy = sc_k + los_len * u_noisy
+
+            # perfect LOS
+            ax.plot(
+                [sc_k[0], end_perfect[0]],
+                [sc_k[1], end_perfect[1]],
+                [sc_k[2], end_perfect[2]],
+                linestyle="-",
+                linewidth=1.0,
+                alpha=0.9,
+                label="Perfect LOS" if not perfect_label_used else None
+            )
+            perfect_label_used = True
+
+            # noisy LOS
+            ax.plot(
+                [sc_k[0], end_noisy[0]],
+                [sc_k[1], end_noisy[1]],
+                [sc_k[2], end_noisy[2]],
+                linestyle="--",
+                linewidth=1.0,
+                alpha=0.9,
+                label="Noisy LOS" if not noisy_label_used else None
+            )
+            noisy_label_used = True
+
+    ax.set_xlabel("x [km]")
+    ax.set_ylabel("y [km]")
+    ax.set_zlabel("z [km]")
+    ax.set_title(title)
+    set_axes_equal(ax)
+    ax.legend(loc="best")
+
+    if save_path is not None:
+        plt.savefig(save_path, bbox_inches="tight")
+
+    if show:
+        plt.show()
+
+    return fig, ax
+
+def get_plane_indices(plane):
+    """
+    Map a plane specification like ('x','y') to Cartesian indices.
+    """
+    axis_map = {"x": 0, "y": 1, "z": 2}
+
+    if len(plane) != 2:
+        raise ValueError(f"plane must have length 2, got {plane}")
+
+    a0 = str(plane[0]).lower()
+    a1 = str(plane[1]).lower()
+
+    if a0 not in axis_map or a1 not in axis_map:
+        raise ValueError(f"plane entries must be in {{'x','y','z'}}, got {plane}")
+    if a0 == a1:
+        raise ValueError(f"plane axes must be different, got {plane}")
+
+    return axis_map[a0], axis_map[a1], a0, a1
+
+
+def plot_detection_geometry_2d(
+    perfect_meas,
+    noisy_meas,
+    sc_states,
+    ast_states,
+    detection_results,
+    plane=("x", "y"),
+    epochs=None,
+    los_stride=1,
+    use_true_range_for_los=True,
+    fixed_los_length_km=None,
+    show_start_markers=True,
+    show_end_markers=True,
+    title=None,
+    save_path=None,
+    show=True,
+    figsize=(9, 8),
+):
+    """
+    Plot a 2D projection of spacecraft trajectories, asteroid trajectory,
+    and LOS rays for detecting spacecraft.
+
+    Parameters
+    ----------
+    perfect_meas : ndarray, shape (M, N, 2)
+        Perfect [RA, Dec] measurements in radians.
+    noisy_meas : ndarray, shape (M, N, 2)
+        Noisy [RA, Dec] measurements in radians.
+    sc_states : ndarray, shape (M, N, 6)
+        Spacecraft states [km, km/s].
+    ast_states : ndarray, shape (N, 6)
+        Asteroid states [km, km/s].
+    detection_results : list of dict
+        Per-spacecraft detection dictionaries. Uses ["detected"].
+    plane : tuple[str, str]
+        Projection plane, e.g. ('x','y'), ('x','z'), ('y','z').
+    epochs : ndarray, optional
+        Not used directly, but kept for consistency.
+    los_stride : int
+        Plot LOS every los_stride frames.
+    use_true_range_for_los : bool
+        If True, LOS rays are scaled to the true spacecraft-to-asteroid range.
+    fixed_los_length_km : float or None
+        Used only if use_true_range_for_los=False.
+    show_start_markers : bool
+        Whether to mark trajectory starts.
+    show_end_markers : bool
+        Whether to mark trajectory ends.
+    title : str or None
+        Plot title. If None, a default based on plane is used.
+    save_path : str or None
+        If provided, save figure to this path.
+    show : bool
+        Whether to display the figure.
+    figsize : tuple
+        Matplotlib figure size.
+
+    Returns
+    -------
+    fig, ax
+    """
+    perfect_meas = np.asarray(perfect_meas, dtype=float)
+    noisy_meas = np.asarray(noisy_meas, dtype=float)
+    sc_states = np.asarray(sc_states, dtype=float)
+    ast_states = np.asarray(ast_states, dtype=float)
+
+    if sc_states.ndim != 3 or sc_states.shape[2] != 6:
+        raise ValueError(f"sc_states must have shape (M, N, 6), got {sc_states.shape}")
+    if ast_states.ndim != 2 or ast_states.shape[1] != 6:
+        raise ValueError(f"ast_states must have shape (N, 6), got {ast_states.shape}")
+    if perfect_meas.shape != noisy_meas.shape:
+        raise ValueError("perfect_meas and noisy_meas must have the same shape")
+    if perfect_meas.ndim != 3 or perfect_meas.shape[2] != 2:
+        raise ValueError(f"perfect_meas must have shape (M, N, 2), got {perfect_meas.shape}")
+
+    M, N, _ = perfect_meas.shape
+
+    if sc_states.shape[:2] != (M, N):
+        raise ValueError(
+            f"sc_states first two dims must match measurements: "
+            f"expected {(M, N)}, got {sc_states.shape[:2]}"
+        )
+    if ast_states.shape[0] != N:
+        raise ValueError(
+            f"ast_states time dimension must match measurements: "
+            f"expected {N}, got {ast_states.shape[0]}"
+        )
+
+    i0, i1, a0, a1 = get_plane_indices(plane)
+
+    sc_pos = sc_states[:, :, :3]   # (M, N, 3)
+    ast_pos = ast_states[:, :3]    # (N, 3)
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # asteroid trajectory
+    ax.plot(
+        ast_pos[:, i0], ast_pos[:, i1],
+        linewidth=2.5,
+        label="Asteroid trajectory"
+    )
+
+    if show_start_markers:
+        ax.scatter(ast_pos[0, i0], ast_pos[0, i1], marker="o", s=50, label="Asteroid start")
+    if show_end_markers:
+        ax.scatter(ast_pos[-1, i0], ast_pos[-1, i1], marker="^", s=50, label="Asteroid end")
+
+    # spacecraft trajectories
+    for m in range(M):
+        traj = sc_pos[m]
+        detected = bool(detection_results[m].get("detected", False))
+
+        label = f"SC {m} trajectory"
+        if detected:
+            label += " (detecting)"
+
+        ax.plot(traj[:, i0], traj[:, i1], linewidth=1.5, label=label)
+
+        if show_start_markers:
+            ax.scatter(traj[0, i0], traj[0, i1], marker="o", s=25)
+        if show_end_markers:
+            ax.scatter(traj[-1, i0], traj[-1, i1], marker="^", s=25)
+
+    # LOS rays
+    perfect_label_used = False
+    noisy_label_used = False
+
+    for m in range(M):
+        detected = bool(detection_results[m].get("detected", False))
+        if not detected:
+            continue
+
+        for k in range(0, N, los_stride):
+            ra_p, dec_p = perfect_meas[m, k]
+            ra_n, dec_n = noisy_meas[m, k]
+
+            if np.any(np.isnan([ra_p, dec_p, ra_n, dec_n])):
+                continue
+
+            sc_k = sc_pos[m, k]
+            ast_k = ast_pos[k]
+
+            u_perfect = ra_dec_to_unit_vector(ra_p, dec_p)
+            u_noisy = ra_dec_to_unit_vector(ra_n, dec_n)
+
+            if use_true_range_for_los:
+                los_len = np.linalg.norm(ast_k - sc_k)
+            else:
+                if fixed_los_length_km is None:
+                    scene_pts = np.vstack([ast_pos, sc_pos.reshape(-1, 3)])
+                    scene_extent = np.linalg.norm(scene_pts.max(axis=0) - scene_pts.min(axis=0))
+                    los_len = 0.15 * scene_extent
+                else:
+                    los_len = float(fixed_los_length_km)
+
+            end_perfect = sc_k + los_len * u_perfect
+            end_noisy = sc_k + los_len * u_noisy
+
+            ax.plot(
+                [sc_k[i0], end_perfect[i0]],
+                [sc_k[i1], end_perfect[i1]],
+                linestyle="-",
+                linewidth=1.0,
+                alpha=0.9,
+                label="Perfect LOS" if not perfect_label_used else None
+            )
+            perfect_label_used = True
+
+            ax.plot(
+                [sc_k[i0], end_noisy[i0]],
+                [sc_k[i1], end_noisy[i1]],
+                linestyle="--",
+                linewidth=1.0,
+                alpha=0.9,
+                label="Noisy LOS" if not noisy_label_used else None
+            )
+            noisy_label_used = True
+
+    ax.set_xlabel(f"{a0} [km]")
+    ax.set_ylabel(f"{a1} [km]")
+    ax.set_aspect("equal", adjustable="box")
+
+    if title is None:
+        title = f"Detection Geometry Projection: {a0.upper()}-{a1.upper()}"
+    ax.set_title(title)
+
+    ax.legend(loc="best")
+
+    if save_path is not None:
+        plt.savefig(save_path, bbox_inches="tight")
+
+    if show:
+        plt.show()
+
+    return fig, ax
+
+
