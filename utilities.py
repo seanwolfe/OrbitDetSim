@@ -619,6 +619,7 @@ def plot_od_scenario_3d_new(
         XX, YY, ZZ = np.meshgrid(xg, yg, zg, indexing="xy")
         grid = np.stack([XX.ravel(), YY.ravel(), ZZ.ravel()], axis=1)
 
+        print(max_points_for_scatter)
         if grid.shape[0] > int(max_points_for_scatter):
             rng = np.random.default_rng(0)
             idx = rng.choice(grid.shape[0], size=int(max_points_for_scatter), replace=False)
@@ -671,7 +672,6 @@ def plot_od_scenario_3d_new(
         Tt2 = np.asarray(true_target_traj_xyz_2, dtype=float)
         if Tt2.ndim != 2 or Tt2.shape[1] != 3:
             raise ValueError("true_target_traj_xyz_2 must be (K,3)")
-        print("here")
         ax.plot(Tt2[:, 0], Tt2[:, 1], Tt2[:, 2], lw=1.6, alpha=0.8, color="green",
                 label="True trajectory 2", linestyle='--')
 
@@ -7773,6 +7773,368 @@ def plot_detection_geometry_2d(
 
     if title is None:
         title = f"Detection Geometry Projection: {a0.upper()}-{a1.upper()}"
+    ax.set_title(title)
+
+    ax.legend(loc="best")
+
+    if save_path is not None:
+        plt.savefig(save_path, bbox_inches="tight")
+
+    if show:
+        plt.show()
+
+    return fig, ax
+
+def make_ellipsoid_points(mean_xyz, cov_xyz, d_mahal=3.0, n_u=40, n_v=20, eps=1e-12):
+    """
+    Build points for a Mahalanobis ellipsoid:
+        (x-mu)^T P^{-1} (x-mu) = d_mahal^2
+
+    Parameters
+    ----------
+    mean_xyz : (3,)
+    cov_xyz  : (3,3)
+    d_mahal  : float
+        Mahalanobis radius, e.g. 3.
+    """
+    mean_xyz = np.asarray(mean_xyz, dtype=float).reshape(3)
+    cov_xyz = np.asarray(cov_xyz, dtype=float).reshape(3, 3)
+
+    cov_xyz = 0.5 * (cov_xyz + cov_xyz.T)
+
+    # robust eigen decomposition
+    evals, evecs = np.linalg.eigh(cov_xyz)
+    evals = np.maximum(evals, eps)
+
+    radii = d_mahal * np.sqrt(evals)
+
+    u = np.linspace(0.0, 2.0 * np.pi, n_u)
+    v = np.linspace(0.0, np.pi, n_v)
+
+    x = np.outer(np.cos(u), np.sin(v))
+    y = np.outer(np.sin(u), np.sin(v))
+    z = np.outer(np.ones_like(u), np.cos(v))
+
+    sphere = np.stack([x, y, z], axis=-1)  # (n_u, n_v, 3)
+
+    # map unit sphere -> ellipsoid
+    A = evecs @ np.diag(radii)
+    ellipsoid = sphere @ A.T + mean_xyz
+
+    return ellipsoid[..., 0], ellipsoid[..., 1], ellipsoid[..., 2]
+
+
+def plot_od_trajectory_with_measurements_3d(
+    x_est_hist,
+    ast_true_hist,
+    P_est_hist,
+    noisy_meas,
+    sc_states,
+    detection_results,
+    x_pred_hist=None,   # <-- NEW
+    d_mahal=3.0,
+    los_stride=1,
+    los_scale_before=0.15,
+    los_scale_after=0.25,
+    title="OD Trajectory, Measurements, and Final Uncertainty",
+    save_path=None,
+    show=True,
+):
+    """
+    Plot:
+      - estimated trajectory
+      - predicted states (optional, marker='x')
+      - true asteroid trajectory
+      - measurement LOS lines (centered on final estimate)
+      - final estimate
+      - final covariance ellipsoid
+    """
+
+    x_est_hist = np.asarray(x_est_hist, dtype=float)
+    ast_true_hist = np.asarray(ast_true_hist, dtype=float)
+    P_est_hist = np.asarray(P_est_hist, dtype=float)
+    noisy_meas = np.asarray(noisy_meas, dtype=float)
+    sc_states = np.asarray(sc_states, dtype=float)
+
+    if x_pred_hist is not None:
+        x_pred_hist = np.asarray(x_pred_hist, dtype=float)
+
+    est_xyz = x_est_hist[:, :3]
+    true_xyz = ast_true_hist[:, :3]
+
+    final_est = est_xyz[-1]
+
+    # --- covariance ---
+    if P_est_hist.ndim == 3 and P_est_hist.shape[1:] == (6, 6):
+        P_final_xyz = P_est_hist[-1, :3, :3]
+    elif P_est_hist.ndim == 3 and P_est_hist.shape[1:] == (3, 3):
+        P_final_xyz = P_est_hist[-1]
+    else:
+        raise ValueError(f"P_est_hist must be (K,6,6) or (K,3,3), got {P_est_hist.shape}")
+
+    fig = plt.figure(figsize=(11, 9))
+    ax = fig.add_subplot(111, projection="3d")
+
+    # --- TRUE TRAJ ---
+    ax.plot(
+        true_xyz[:, 0], true_xyz[:, 1], true_xyz[:, 2],
+        linewidth=2.2,
+        label="True trajectory"
+    )
+
+    # --- EST TRAJ ---
+    ax.plot(
+        est_xyz[:, 0], est_xyz[:, 1], est_xyz[:, 2],
+        linestyle="--",
+        linewidth=2.2,
+        label="Estimated trajectory"
+    )
+
+    # --- PREDICTED STATES (NEW) ---
+    if x_pred_hist is not None and len(x_pred_hist) > 0:
+        pred_xyz = x_pred_hist[:, :3]
+        ax.scatter(
+            pred_xyz[:, 0],
+            pred_xyz[:, 1],
+            pred_xyz[:, 2],
+            marker="x",
+            s=40,
+            label="Predicted states"
+        )
+
+    # --- FINAL POINTS ---
+    ax.scatter(*final_est, s=70, label="Final estimate")
+    ax.scatter(*true_xyz[-1], s=70, marker="^", label="Final truth")
+
+    # --- ELLIPSOID ---
+    ex, ey, ez = make_ellipsoid_points(final_est, P_final_xyz, d_mahal=d_mahal)
+    ax.plot_surface(ex, ey, ez, alpha=0.22, linewidth=0)
+
+    # --- LOS (UPDATED LOGIC) ---
+    M, N, _ = noisy_meas.shape
+    los_label_used = False
+
+    for sid in range(M):
+        if not detection_results[sid].get("detected", False):
+            continue
+
+        for k in range(0, N, los_stride):
+            ra = noisy_meas[sid, k, 0]
+            dec = noisy_meas[sid, k, 1]
+
+            if not (np.isfinite(ra) and np.isfinite(dec)):
+                continue
+
+            sc_pos = sc_states[sid, k, :3]
+            u_los = ra_dec_to_unit_vector(ra, dec)
+
+            # --- USE FINAL ESTIMATE INSTEAD OF TRUTH ---
+            range_est = np.linalg.norm(final_est - sc_pos)
+            if not np.isfinite(range_est) or range_est <= 0.0:
+                continue
+
+            p0 = sc_pos + (1.0 - los_scale_before) * range_est * u_los
+            p1 = sc_pos + (1.0 + los_scale_after) * range_est * u_los
+
+            ax.plot(
+                [p0[0], p1[0]],
+                [p0[1], p1[1]],
+                [p0[2], p1[2]],
+                linewidth=1.0,
+                alpha=0.85,
+                label="Measurement LOS" if not los_label_used else None
+            )
+            los_label_used = True
+
+    # --- cosmetics ---
+    ax.set_xlabel("x [km]")
+    ax.set_ylabel("y [km]")
+    ax.set_zlabel("z [km]")
+    ax.set_title(title)
+    ax.legend(loc="best")
+    set_axes_equal(ax)
+
+    if save_path is not None:
+        plt.savefig(save_path, bbox_inches="tight")
+
+    if show:
+        plt.show()
+
+    return fig, ax
+
+
+def covariance_ellipse_2d(mean_xy, cov_xy, d_mahal=3.0, npts=200, eps=1e-12):
+    """
+    Build points for the 2D covariance ellipse:
+        (x-mu)^T P^{-1} (x-mu) = d_mahal^2
+    """
+    mean_xy = np.asarray(mean_xy, dtype=float).reshape(2)
+    cov_xy = np.asarray(cov_xy, dtype=float).reshape(2, 2)
+
+    cov_xy = 0.5 * (cov_xy + cov_xy.T)
+    evals, evecs = np.linalg.eigh(cov_xy)
+    evals = np.maximum(evals, eps)
+
+    radii = d_mahal * np.sqrt(evals)
+
+    t = np.linspace(0.0, 2.0 * np.pi, npts)
+    circle = np.stack([np.cos(t), np.sin(t)], axis=0)  # (2,npts)
+
+    A = evecs @ np.diag(radii)
+    pts = (A @ circle).T + mean_xy  # (npts,2)
+
+    return pts[:, 0], pts[:, 1]
+
+
+def plot_od_trajectory_with_measurements_2d(
+    x_est_hist,
+    ast_true_hist,
+    P_est_hist,
+    noisy_meas,
+    sc_states,
+    detection_results,
+    plane=("x", "y"),
+    x_pred_hist=None,   # NEW
+    d_mahal=3.0,
+    los_stride=1,
+    los_scale_before=0.15,
+    los_scale_after=0.25,
+    title=None,
+    save_path=None,
+    show=True,
+    figsize=(9, 8),
+):
+    """
+    2D projection of:
+      - estimated trajectory
+      - predicted states (optional, marker='x')
+      - true trajectory
+      - final estimate
+      - final covariance ellipse
+      - projected measurement LOS segments, centered using final estimate
+    """
+    x_est_hist = np.asarray(x_est_hist, dtype=float)
+    ast_true_hist = np.asarray(ast_true_hist, dtype=float)
+    P_est_hist = np.asarray(P_est_hist, dtype=float)
+    noisy_meas = np.asarray(noisy_meas, dtype=float)
+    sc_states = np.asarray(sc_states, dtype=float)
+
+    if x_pred_hist is not None:
+        x_pred_hist = np.asarray(x_pred_hist, dtype=float)
+
+    if x_est_hist.ndim != 2 or x_est_hist.shape[1] not in (3, 6):
+        raise ValueError(f"x_est_hist must be (K,3) or (K,6), got {x_est_hist.shape}")
+    if ast_true_hist.ndim != 2 or ast_true_hist.shape[1] not in (3, 6):
+        raise ValueError(f"ast_true_hist must be (K,3) or (K,6), got {ast_true_hist.shape}")
+    if P_est_hist.ndim != 3:
+        raise ValueError(f"P_est_hist must be 3D, got {P_est_hist.shape}")
+    if noisy_meas.ndim != 3 or noisy_meas.shape[2] != 2:
+        raise ValueError(f"noisy_meas must be (M,N,2), got {noisy_meas.shape}")
+    if sc_states.ndim != 3 or sc_states.shape[2] != 6:
+        raise ValueError(f"sc_states must be (M,N,6), got {sc_states.shape}")
+    if x_pred_hist is not None and (x_pred_hist.ndim != 2 or x_pred_hist.shape[1] not in (3, 6)):
+        raise ValueError(f"x_pred_hist must be (K,3) or (K,6), got {x_pred_hist.shape}")
+
+    i0, i1, a0, a1 = get_plane_indices(plane)
+
+    est_xyz = x_est_hist[:, :3]
+    true_xyz = ast_true_hist[:, :3]
+    final_est_xyz = est_xyz[-1]
+    final_est_xy = final_est_xyz[[i0, i1]]
+
+    if P_est_hist.shape[1:] == (6, 6):
+        P_final_xy = P_est_hist[-1][np.ix_([i0, i1], [i0, i1])]
+    elif P_est_hist.shape[1:] == (3, 3):
+        P_final_xy = P_est_hist[-1][np.ix_([i0, i1], [i0, i1])]
+    else:
+        raise ValueError(f"P_est_hist must be (K,6,6) or (K,3,3), got {P_est_hist.shape}")
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # True trajectory
+    ax.plot(
+        true_xyz[:, i0], true_xyz[:, i1],
+        linewidth=2.2,
+        label="True trajectory"
+    )
+
+    # Estimated trajectory
+    ax.plot(
+        est_xyz[:, i0], est_xyz[:, i1],
+        linewidth=2.2,
+        linestyle="--",
+        label="Estimated trajectory"
+    )
+
+    # Predicted states
+    if x_pred_hist is not None and len(x_pred_hist) > 0:
+        pred_xyz = x_pred_hist[:, :3]
+        ax.scatter(
+            pred_xyz[:, i0],
+            pred_xyz[:, i1],
+            marker="x",
+            s=40,
+            label="Predicted states"
+        )
+
+    # Final estimate and truth
+    ax.scatter(
+        final_est_xyz[i0], final_est_xyz[i1],
+        s=70,
+        marker="o",
+        label="Final estimate"
+    )
+    ax.scatter(
+        true_xyz[-1, i0], true_xyz[-1, i1],
+        s=70,
+        marker="^",
+        label="Final truth"
+    )
+
+    # Covariance ellipse
+    ex, ey = covariance_ellipse_2d(final_est_xy, P_final_xy, d_mahal=d_mahal)
+    ax.plot(ex, ey, linewidth=1.8, label=fr"Final {d_mahal:.0f}$\sigma$ ellipse")
+
+    # LOS segments centered using final estimate
+    M, N, _ = noisy_meas.shape
+    los_label_used = False
+
+    for sid in range(M):
+        if not detection_results[sid].get("detected", False):
+            continue
+
+        for k in range(0, N, los_stride):
+            ra = noisy_meas[sid, k, 0]
+            dec = noisy_meas[sid, k, 1]
+
+            if not (np.isfinite(ra) and np.isfinite(dec)):
+                continue
+
+            sc_pos = sc_states[sid, k, :3]
+            u_los = ra_dec_to_unit_vector(ra, dec)
+
+            range_est = np.linalg.norm(final_est_xyz - sc_pos)
+            if not np.isfinite(range_est) or range_est <= 0.0:
+                continue
+
+            p0 = sc_pos + (1.0 - los_scale_before) * range_est * u_los
+            p1 = sc_pos + (1.0 + los_scale_after) * range_est * u_los
+
+            ax.plot(
+                [p0[i0], p1[i0]],
+                [p0[i1], p1[i1]],
+                linewidth=1.0,
+                alpha=0.85,
+                label="Measurement LOS" if not los_label_used else None
+            )
+            los_label_used = True
+
+    ax.set_xlabel(f"{a0} [km]")
+    ax.set_ylabel(f"{a1} [km]")
+    ax.set_aspect("equal", adjustable="box")
+
+    if title is None:
+        title = f"OD estimate vs truth with LOS and 3σ ellipse ({a0.upper()}-{a1.upper()})"
     ax.set_title(title)
 
     ax.legend(loc="best")

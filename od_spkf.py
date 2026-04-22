@@ -247,6 +247,120 @@ def od_setup_from_iod(config, row, *, util, sp, eps=1e-12):
     return setup
 
 
+def process_tracklet_until_update_with_prior_epoch(
+    *,
+    ukf,
+    prior_epoch_jdtdb,
+    n_body_propagator,
+    epochs_k,
+    noisy_meas_k,
+    sc_states_k,
+    detection_res_k,
+):
+    """
+    Same as process_tracklet_until_update(), but explicitly takes the prior filter epoch.
+    """
+    epochs_k = np.asarray(epochs_k, dtype=float).ravel()
+    noisy_meas_k = np.asarray(noisy_meas_k, dtype=float)
+    sc_states_k = np.asarray(sc_states_k, dtype=float)
+
+    if noisy_meas_k.ndim != 3 or noisy_meas_k.shape[2] != 2:
+        raise ValueError(f"noisy_meas_k must be (M,N,2), got {noisy_meas_k.shape}")
+    if sc_states_k.ndim != 3 or sc_states_k.shape[2] != 6:
+        raise ValueError(f"sc_states_k must be (M,N,6), got {sc_states_k.shape}")
+
+    M, N, _ = noisy_meas_k.shape
+    if sc_states_k.shape[:2] != (M, N):
+        raise ValueError(
+            f"sc_states_k first dims must match noisy_meas_k: expected {(M, N)}, got {sc_states_k.shape[:2]}"
+        )
+    if epochs_k.size != N:
+        raise ValueError(f"epochs_k must have length N={N}, got {epochs_k.size}")
+
+    detecting_ids = tuple(sorted(
+        i for i, d in enumerate(detection_res_k)
+        if bool(d.get("detected", False))
+    ))
+
+    if len(detecting_ids) == 0:
+        return {
+            "had_detection": False,
+            "detecting_ids": tuple(),
+            "n_detections": 0,
+            "processed_epochs": np.array([], dtype=float),
+            "posterior_x": ukf.x.copy(),
+            "posterior_P": ukf.P.copy(),
+            "update_history": [],
+        }
+
+    t_prev = float(prior_epoch_jdtdb)
+    update_history = []
+    processed_epochs = []
+
+    for j in range(N):
+        t_meas = float(epochs_k[j])
+
+        # predict ONCE to this epoch
+        ukf.predict(
+            t_prev,
+            t_meas,
+            n_body_propagator.propagate_multiple_objects
+        )
+
+        x_prior = ukf.x.copy()
+        P_prior = ukf.P.copy()
+
+        # sequential same-epoch updates for all detecting spacecraft
+        # fixed ordering by spacecraft index for deterministic behavior
+        epoch_updates = []
+
+        for sid in detecting_ids:
+            ra_meas = noisy_meas_k[sid, j, 0]
+            dec_meas = noisy_meas_k[sid, j, 1]
+
+            if not (np.isfinite(ra_meas) and np.isfinite(dec_meas)):
+                continue
+
+            r_obs_km = sc_states_k[sid, j, :3]
+
+            z_hat = ukf.ra_dec_to_los_unitvec(ra_meas, dec_meas)
+            R_hat = ukf.build_R(ra_meas, dec_meas)
+
+            ukf.update_angles_unitvec(z_hat, r_obs_km, R_hat)
+
+            epoch_updates.append({
+                "sid": int(sid),
+                "epoch_jdtdb": t_meas,
+                "ra_rad": float(ra_meas),
+                "dec_rad": float(dec_meas),
+                "r_obs_km": np.asarray(r_obs_km, dtype=float).copy(),
+            })
+
+        if len(epoch_updates) > 0:
+            processed_epochs.append(t_meas)
+            update_history.append({
+                "frame_index": int(j),
+                "epoch_jdtdb": t_meas,
+                "x_prior": x_prior.copy(),
+                "P_prior": P_prior.copy(),
+                "updates": epoch_updates,
+                "x_post": ukf.x.copy(),
+                "P_post": ukf.P.copy(),
+            })
+
+        t_prev = t_meas
+
+    return {
+        "had_detection": True,
+        "detecting_ids": detecting_ids,
+        "n_detections": len(detecting_ids),
+        "processed_epochs": np.asarray(processed_epochs, dtype=float),
+        "posterior_x": ukf.x.copy(),
+        "posterior_P": ukf.P.copy(),
+        "update_history": update_history,
+    }
+
+
 class OD_UKF:
     """
     Skeleton UKF for orbit determination with state x=[r; v] in EME/J2000.
@@ -388,6 +502,94 @@ class OD_UKF:
         dec = np.arctan2(z, max(np.sqrt(x*x + y*y), eps))
         return ra, dec
 
+
+    @staticmethod
+    def ra_dec_to_los_unitvec(ra_rad, dec_rad):
+        """
+        Convert RA/Dec [rad] to Cartesian LOS unit vector.
+        """
+        ra = float(ra_rad)
+        dec = float(dec_rad)
+
+        cdec = np.cos(dec)
+        return np.array([
+            cdec * np.cos(ra),
+            cdec * np.sin(ra),
+            np.sin(dec)
+        ], dtype=float)
+
+
+    def predict(self, t0_jdtdb, t1_jdtdb, propagate_sigma_points_fn):
+        """
+        Same logic as predict(), but fixes the dt units issue:
+        build_Q expects dt in seconds, while epochs are in JDTDB days.
+        """
+        SEC_PER_DAY = 86400.0
+
+        t1_arr = np.asarray(t1_jdtdb, dtype=float).ravel()
+        scalar_input = (t1_arr.size == 1)
+
+        x_curr = np.asarray(self.x, dtype=float).reshape(6)
+        P_curr = np.asarray(self.P, dtype=float).reshape(6, 6)
+
+        X_out = []
+        P_out = []
+
+        t_prev = float(t0_jdtdb)
+
+        for t_next in t1_arr:
+            t_next = float(t_next)
+            dt_days = float(t_next - t_prev)
+            if dt_days < 0.0:
+                raise ValueError(
+                    f"predict_seconds_corrected expects non-decreasing epochs: "
+                    f"got dt_days={dt_days} from {t_prev} to {t_next}"
+                )
+
+            dt_sec = dt_days * SEC_PER_DAY
+
+            # Process noise for this interval, now with the correct units
+            Q = self.build_Q(dt_sec, r_eme_km=x_curr[:3], v_eme_km_s=x_curr[3:])
+
+            # Augmented sigma points
+            Xa, Wm, Wc, n, qn = self._sigma_points_augmented(x_curr, P_curr, Q)
+
+            X_state = Xa[:, :n]   # (Ns,6)
+            W_noise = Xa[:, n:]   # (Ns,6)
+
+            # Propagate state sigma points from t_prev to t_next
+            X_prop = propagate_sigma_points_fn(X_state, t_prev, t_next)  # (Ns,6)
+
+            # Additive-noise injection
+            # X_prop_noisy = X_prop + W_noise
+            X_prop_noisy = X_prop
+
+            # Mean and covariance recombination
+            x_pred = np.sum(Wm[:, None] * X_prop_noisy, axis=0)
+            P_pred = np.zeros((6, 6), dtype=float)
+            for i in range(X_prop_noisy.shape[0]):
+                dx = (X_prop_noisy[i] - x_pred).reshape(6, 1)
+                P_pred += Wc[i] * (dx @ dx.T)
+
+            x_curr = x_pred
+            P_curr = self._symmetrize(P_pred)
+            t_prev = t_next
+
+            X_out.append(x_curr.copy())
+            P_out.append(P_curr.copy())
+
+        X_out = np.stack(X_out, axis=0)
+        P_out = np.stack(P_out, axis=0)
+
+        # commit to filter state
+        self.x = X_out[-1].copy()
+        self.P = P_out[-1].copy()
+
+        if scalar_input:
+            return X_out[0], P_out[0]
+        return X_out, P_out
+
+
     # -----------------------------
     # UKF predict/update
     # -----------------------------
@@ -446,91 +648,6 @@ class OD_UKF:
             Xa[1 + i + na] = xa - S[:, i]
 
         return Xa, Wm, Wc, n, qn
-
-
-    def predict(self, t0, t1, propagate_sigma_points_fn, observer_ephem_fn=None):
-        """
-        Augmented UKF prediction.
-
-        Parameters
-        ----------
-        t0 : float
-            Initial epoch.
-        t1 : float OR array-like of float
-            Target epoch(s). If array-like, predictions are SEQUENTIAL:
-              (x,P) at each step becomes prior for next step.
-        propagate_sigma_points_fn : callable
-            Should take (X_sigma, t0, t1) and return propagated sigma points:
-              X_prop = propagate_sigma_points_fn(X_sigma, t0, t1)
-            where X_sigma is (Ns, 6) and X_prop is (Ns, 6).
-
-        Returns
-        -------
-        If t1 is scalar:
-            (x_pred, P_pred)
-        If t1 is array-like with K entries:
-            (X_pred, P_pred) where
-              X_pred has shape (K,6),
-              P_pred has shape (K,6,6)
-
-        Notes
-        -----
-        Uses additive-noise augmented UKF:
-            X_aug sigma points -> propagate state part -> add noise part -> recombine.
-        This replaces the non-augmented "P += Q(dt)" step.
-        """
-        t1_arr = np.asarray(t1, dtype=float).ravel()
-        scalar_input = (t1_arr.size == 1)
-
-        x_curr = np.asarray(self.x, dtype=float).reshape(6)
-        P_curr = np.asarray(self.P, dtype=float).reshape(6, 6)
-
-        X_out = []
-        P_out = []
-
-        t_prev = float(t0)
-
-        for t_next in t1_arr:
-            t_next = float(t_next)
-            dt = float(t_next - t_prev)
-            if dt < 0.0:
-                raise ValueError(f"predict expects non-decreasing epochs: got dt={dt} from {t_prev} to {t_next}")
-
-            # Process noise for this interval
-            Q = self.build_Q(dt, r_eme_km=x_curr[:3], v_eme_km_s=x_curr[3:])
-
-            # Augmented sigma points
-            Xa, Wm, Wc, n, qn = self._sigma_points_augmented(x_curr, P_curr, Q)
-
-            X_state = Xa[:, :n]   # (Ns,6)
-            W_noise = Xa[:, n:]   # (Ns,6)
-
-            # Propagate the state sigma points
-            X_prop = propagate_sigma_points_fn(X_state, t_prev, t_next)  # (Ns,6)
-
-            # Additive-noise injection
-            X_prop_noisy = X_prop + W_noise
-
-            # Mean and covariance
-            x_pred = np.sum(Wm[:, None] * X_prop_noisy, axis=0)
-            P_pred = np.zeros((6, 6), dtype=float)
-            for i in range(X_prop_noisy.shape[0]):
-                dx = (X_prop_noisy[i] - x_pred).reshape(6, 1)
-                P_pred += Wc[i] * (dx @ dx.T)
-
-            x_curr = x_pred
-            P_curr = self._symmetrize(P_pred)
-            t_prev = t_next
-
-            X_out.append(x_curr.copy())
-            P_out.append(P_curr.copy())
-
-        X_out = np.stack(X_out, axis=0)
-        P_out = np.stack(P_out, axis=0)
-
-        if scalar_input:
-            return X_out[0], P_out[0]
-        return X_out, P_out
 
 
     def propagate_priors(self, t0, t_grid, propagate_many_fn):

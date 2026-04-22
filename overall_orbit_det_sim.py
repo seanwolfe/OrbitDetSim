@@ -5,7 +5,7 @@ from Asteroid import Asteroid
 from Formation import Formation
 import numpy as np
 import mpi4py.rc
-from od_spkf import OD_UKF, od_setup_from_iod
+from od_spkf import OD_UKF, od_setup_from_iod, process_tracklet_until_update_with_prior_epoch
 from time_tracker import SimTime
 
 mpi4py.rc.threads = False
@@ -1806,8 +1806,8 @@ def run_OD(config):
                 # ---- integrate asteroid (needed for IOD) ----
 
                 # to visualize the possible att coord scenarios
-                viz_prop_flag = False
-                if viz_prop_flag:
+                viz_prop_flag_ini = False
+                if viz_prop_flag_ini:
                     util.plot_priors_positions_and_cov_2d(
                         x_ts,
                         P_ts,
@@ -1896,8 +1896,8 @@ def run_OD(config):
 
                 # visualize att_coord result
                 # Force visualization ON (as requested)
-                att_coord_viz_flag = True
-                if att_coord_viz_flag:
+                att_coord_viz_flag_ini = True
+                if att_coord_viz_flag_ini:
 
                     best_epoch = res_kcoverage.chosen_dt
                     best_idx = np.where(timer.attcoord_searchtimes == best_epoch)[0]
@@ -2298,9 +2298,19 @@ def run_OD(config):
             # -------------------------
             else:
 
+                #######################################################
+                # Gather Tracklet data and Detect
+                ######################################################
+
                 # gather and process tracklet
-                # perform detection with new attitudes
-                p_meas_k, n_meas_k, sc_states_k, ast_states_k, epochs_k, detection_res_k = formation.detect(minimoon.curr_state_eme, timer.curr_epoch, n_body_propagator, config)
+                p_meas_k, n_meas_k, sc_states_k, ast_states_k, epochs_k, detection_res_k = formation.detect(
+                    minimoon.curr_state_eme,
+                    timer.curr_epoch,
+                    n_body_propagator,
+                    config
+                )
+
+                # optional visualization block unchanged
                 confirm_meas = True
                 if confirm_meas:
                     util.plot_detection_geometry_3d(
@@ -2310,14 +2320,604 @@ def run_OD(config):
                         ast_states=ast_states_k,
                         detection_results=detection_res_k,
                         epochs=epochs_k,
-                        los_stride=2,                 # plot every 2nd frame to reduce clutter
-                        use_true_range_for_los=True,  # perfect LOS ends at asteroid
+                        los_stride=2,
+                        use_true_range_for_los=True,
                         title="Detection Geometry",
                         save_path=None,
                         show=False,
                     )
+                    two_d_too = True
+                    if two_d_too:
+                        plane = ("x", "y")
+                        plane_str = "".join(plane)
+                        util.plot_detection_geometry_2d(
+                            perfect_meas=p_meas_k,
+                            noisy_meas=n_meas_k,
+                            sc_states=sc_states_k,
+                            ast_states=ast_states_k,
+                            detection_results=detection_res_k,
+                            plane=plane,
+                            los_stride=2,
+                            save_path=None,
+                            show=False,
+                        )
 
-                plt.show()
+                # -------------------------
+                # Prediction + UKF update only
+                # -------------------------
+                od_time_start = time.time()
+                od_meas_result = process_tracklet_until_update_with_prior_epoch(
+                    ukf=ukf,
+                    prior_epoch_jdtdb=timer.curr_epoch,
+                    n_body_propagator=n_body_propagator,
+                    epochs_k=epochs_k,
+                    noisy_meas_k=n_meas_k,
+                    sc_states_k=sc_states_k,
+                    detection_res_k=detection_res_k,
+                )
+                od_time = time.time() - od_time_start
+
+                had_detection = od_meas_result["had_detection"]
+                detecting_ids = od_meas_result["detecting_ids"]
+                n_detections = od_meas_result["n_detections"]
+                processed_epochs = od_meas_result["processed_epochs"]
+
+                # posterior is already committed into ukf.x, ukf.P by the helper
+                x_post_k = od_meas_result["posterior_x"]
+                P_post_k = od_meas_result["posterior_P"]
+                update_history_k = od_meas_result["update_history"]
+
+                # optional: keep track of who was detecting at this OD step
+                formation.currently_detecting = detecting_ids
+
+                # stop here for now; timer/logging/loop control comes later
+                # print(f"[OD] had_detection={had_detection}")
+                # print(f"[OD] detecting_ids={detecting_ids}")
+                # print(f"[OD] n_detections={n_detections}")
+                # print(f"[OD] processed_epochs={processed_epochs}")
+                # print(f"[OD] x_post_k={x_post_k}")
+
+                ast_eme_state_kms_during_detection = minimoon.curr_state_eme
+
+                update_history = od_meas_result["update_history"]
+                processed_epochs = od_meas_result["processed_epochs"]
+
+                x_est_hist = np.array([entry["x_post"] for entry in update_history])  # (K,6)
+                P_est_hist = np.array([entry["P_post"] for entry in update_history])  # (K,6,6)
+                x_pred_hist = np.array([entry["x_prior"] for entry in update_history])
+                P_pred_hist = np.array([entry["P_prior"] for entry in update_history])
+
+                ast_eme_traj_kms_during_detection = n_body_propagator.propagate(
+                    ast_eme_state_kms_during_detection,
+                    timer.curr_epoch,
+                    processed_epochs
+                )
+
+                propped_initial_state = n_body_propagator.propagate(x_est_hist[0], timer.curr_epoch, processed_epochs)
+
+                view_update = True
+                if view_update and len(update_history) > 0:
+                    fig, ax = util.plot_od_trajectory_with_measurements_3d(
+                        x_est_hist=x_est_hist,
+                        ast_true_hist=ast_eme_traj_kms_during_detection,
+                        P_est_hist=P_est_hist,
+                        noisy_meas=n_meas_k,
+                        sc_states=sc_states_k,
+                        detection_results=detection_res_k,
+                        x_pred_hist=propped_initial_state,
+                        d_mahal=3.0,
+                        los_stride=2,
+                        los_scale_before=0.015,
+                        los_scale_after=0.025,
+                        title="OD estimate vs truth with LOS and 3σ ellipsoid",
+                        save_path=None,
+                        show=False,
+                    )
+                    show_two_d = True
+                    if show_two_d:
+                        fig, ax = util.plot_od_trajectory_with_measurements_2d(
+                            x_est_hist=x_est_hist,
+                            ast_true_hist=ast_eme_traj_kms_during_detection,
+                            P_est_hist=P_est_hist,
+                            noisy_meas=n_meas_k,
+                            sc_states=sc_states_k,
+                            detection_results=detection_res_k,
+                            plane=("x", "y"),
+                            x_pred_hist=propped_initial_state,
+                            d_mahal=3.0,
+                            los_stride=2,
+                            los_scale_before=0.015,
+                            los_scale_after=0.025,
+                            title="OD estimate vs truth with LOS and 3σ ellipse",
+                            save_path=None,
+                            show=False,
+                        )
+
+
+
+                # -----------------------------------------------------
+                # Perform Attitude Coordination - with uncertainty growth
+                # -------------------------------------------------------
+                attcoord_startime = time.time()
+
+                # define epochs we want to look at - from current epoch (after detection to desired window)
+                timer.set_attcoord_searchtimes(od_time=od_time)
+
+                # perform unscented transform
+                x_ts, P_ts = ukf.propagate_priors(
+                    epochs_k[-1],
+                    timer.attcoord_searchtimes_jdtdb,
+                    n_body_propagator.propagate_multiple_objects
+                )
+
+                # because we want a different integration epoch to start from for every hour investigated
+                sc_eme_states_kms_piecewise, anchor_info = util.piecewise_anchor_and_propagate_spacecraft_trajs(
+                    formation=formation, minimoon=minimoon, timer=timer,
+                    t_targets_jdtdb=timer.attcoord_searchtimes_jdtdb,
+                    n_body_propagator=n_body_propagator, return_anchor_info=True
+                )
+
+                # propagate formation to each epoch if we just did it smoothly
+                # sc_eme_states_kms = formation.get_spacecraft_states()  # current sc state at detection instant
+                # sc_eme_trajs_kms = n_body_propagator.propagate_multiple_objects(sc_eme_states_kms, timer.curr_epoch,
+                #                                                                 timer.attcoord_searchtimes_jdtdb)
+
+                # propagate asteroid true to each epoch
+                ast_eme_state_kms = minimoon.curr_state_eme
+                ast_eme_traj_kms = n_body_propagator.propagate(ast_eme_state_kms, timer.curr_epoch,
+                                                               timer.attcoord_searchtimes_jdtdb)
+                #
+                ast_truth_original_eclip = np.array(minimoon.orbit.loc[:, ["Geo x", "Geo y", "Geo z", "Geo vx",
+                                                                           "Geo vy", "Geo vz"]])
+                ast_truth_original_eclip[:, :3] *= config['AU_TO_M'] / 1000
+                ast_truth_original_eclip[:, 3:] *= config['AU_TO_M'] / 1000 / config['SECONDS_PER_DAY']
+                ast_truth_original_eme = util.geo_eclip_to_geo_eme_generic(ast_truth_original_eclip,
+                                                                           hint=("time", "state"))
+
+                #
+                # ---- integrate asteroid (needed for IOD) ----
+
+                # to visualize the possible att coord scenarios
+                viz_prop_flag = False
+                if viz_prop_flag:
+                    util.plot_priors_positions_and_cov_2d(
+                        x_ts,
+                        P_ts,
+                        # sc_trajs_km=sc_eme_trajs_kms,  # (K,M,6) or (K,M,3)
+                        sc_trajs_km2=sc_eme_states_kms_piecewise,
+                        stride=config['two_d_prop']['stride'],
+                        n_std=config['two_d_prop']['stride'],
+                        planes=("xy", "xz", "yz"),
+                        title_prefix="Asteroid prior + spacecraft"
+                    )
+
+                    util.plot_matched_trajectory_full_range(formation=formation, idx_start=0, idx_stop=2400,
+                                                            frame="GEO_EME", plot_3d=True, plot_xy=False)
+
+                # perform attitude coord.
+                # get various required inputs
+                sc_pointings_eme = formation.get_spacecraft_pointings()  # where sc are pointing
+
+                # assumption: all s/c have similar slew characteristics
+                sc0 = formation.spacecraft[0]
+                theta_h_rad = util.fov_deg2_to_half_angle_rad(sc0.fov)  # width of sc FOV
+                tau_max = sc0.reaction_wheel_torque
+                h_max = sc0.reaction_wheel_momentum
+                m_m = sc0.mass
+                l_m = sc0.length
+                m_t = sc0.telescope_mass
+                d_t = sc0.telescope_diameter
+                z_0 = sc0.telescope_offset
+                I_max = (1 / 6) * m_m * (l_m / 2) ** 2 + (1 / 2) * m_t * (d_t / 2) ** 2 + m_t * z_0 ** 2
+                alpha_max = 1.63 * tau_max / I_max
+                omega_max = 1.63 * h_max / I_max
+
+                if len(formation.currently_detecting) == 1:
+                    res_kcoverage, result_mean, result_kcoverage_series, result_mean_series, mean_time = attitude_coordination.step(
+                        sc_eme_states_kms_piecewise[:, :, :3],
+                        sc_pointings_eme,
+                        x_ts[:, :3],
+                        P_ts[:, :3, :3],
+                        timer.attcoord_searchtimes,
+                        theta_h_rad,
+                        alpha_max,
+                        omega_max,
+                        d_M=config['d_mahal'],
+                        use_fixed_agent=True,
+                        fixed_agent_idx=int(formation.currently_detecting[0]),
+                        fixed_agent_u=sc_pointings_eme[int(formation.currently_detecting[0]), :],
+                        coverage_point=ast_eme_traj_kms[:, :3])
+                elif len(formation.currently_detecting) > 1:
+                    res_kcoverage, result_mean, result_kcoverage_series, result_mean_series, mean_time = attitude_coordination.step(
+                        sc_eme_states_kms_piecewise[:, :, :3],
+                        sc_pointings_eme,
+                        x_ts[:, :3],
+                        P_ts[:, :3, :3],
+                        timer.attcoord_searchtimes,
+                        theta_h_rad,
+                        alpha_max,
+                        omega_max,
+                        d_M=config['d_mahal'],
+                        use_fixed_agent=False,
+                        coverage_point=ast_eme_traj_kms[:, :3])
+                else:
+                    raise NotImplementedError("No detections...object lost")
+
+
+                attcoord_endtime = time.time()
+
+                # set the att coordination time, the step also does the mean coverage method for comparison, don't count
+                timer.set_attcoord_time(attcoord_endtime - attcoord_startime - mean_time)
+
+                # set the desired slew time from att coor result
+                timer.set_slew_time(res_kcoverage.chosen_dt)
+
+                best_epoch = res_kcoverage.chosen_dt
+                best_idx = int(np.where(timer.attcoord_searchtimes == best_epoch)[0][0])
+                best_epoch_jdtdb = float(timer.attcoord_searchtimes_jdtdb[best_idx])
+                k_anchor_best = int(anchor_info["anchor_k_of_t"][best_idx])
+                t_anchor_best = float(anchor_info["anchor_epoch_of_t"][best_idx])
+
+                # update formation
+                # get (M, 3) boresights from resultant optimization
+                best_attitudes = res_kcoverage.u_cmd
+
+                # set them
+                formation.set_spacecraft_pointings(best_attitudes)
+
+                # get (M, 6) b
+                best_positions = np.squeeze(sc_eme_states_kms_piecewise[best_idx, :, :])
+
+                # set them
+                formation.set_spacecraft_states(best_positions)
+
+                # update minimoon estimat update minimoon belief
+                ukf.x = np.squeeze(x_ts[best_idx, :])
+                ukf.P = np.squeeze(P_ts[best_idx, :, :])
+
+                # update actual minimoon state
+                minimoon.set_state(np.squeeze(ast_eme_traj_kms[best_idx, :]))
+
+                # get the next data collection epoch
+                timer.step(best_epoch_jdtdb, k_anchor_best, t_anchor_best)
+
+                # visualize att_coord result
+                # Force visualization ON (as requested)
+                att_coord_viz_flag = True
+                if att_coord_viz_flag:
+
+                    best_epoch = res_kcoverage.chosen_dt
+                    best_idx = np.where(timer.attcoord_searchtimes == best_epoch)[0]
+
+                    # Common viz params
+                    theta_h_rad = util.fov_deg2_to_half_angle_rad(config["fov"])
+                    ems_center_xy = np.array(config["ems"]["p_em"][:2])
+                    ems_center_xyz = np.array(config["ems"]["p_em"])
+                    ems_radius = config["ems"]['R_em']
+                    ray_length = config['ray_length']
+
+                    # Pull states/vectors from setup
+                    sc_eme_ae_kms = np.squeeze(sc_eme_states_kms_piecewise[best_idx, :, :3])
+                    sc_pointing_eme_cartesian = res_kcoverage.u_cmd
+                    ang_eme = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_eme_cartesian)
+                    ast_truth_eme = np.squeeze(ast_eme_traj_kms[best_idx, :3])
+
+                    ast_iod_eme = np.squeeze(x_ts[best_idx, :3])
+                    P_cart_eme = np.squeeze(P_ts[best_idx, :3, :3])
+
+                    # Ensure truth shapes are (6,) if they came back as (1,6)
+                    ast_truth_eme = np.asarray(ast_truth_eme).reshape(-1)
+
+                    #################################################
+                    # 2D Visualizations
+                    #################################################
+
+                    # ---- EME 2D ----
+
+                    best_idx = int(np.where(timer.attcoord_searchtimes == best_epoch)[0][0])
+                    T = len(timer.attcoord_searchtimes)
+
+                    two_d_pot = False
+                    if two_d_pot:
+                        def is_valid(idx):
+                            J = result_kcoverage_series[idx]["J"]
+                            return not (J is None or (isinstance(J, float) and math.isnan(J)))
+
+                        # Start with preferred candidates
+                        cands = [best_idx, max(0, best_idx - 1), min(T - 1, best_idx + 1)]
+
+                        selected = []
+
+                        # First pass: try preferred ones if valid
+                        for c in cands:
+                            if c not in selected and is_valid(c):
+                                selected.append(c)
+
+                        # Second pass: scan whole timeline to fill up to 3 valid ones
+                        if len(selected) < 3:
+                            for c in range(T):
+                                if len(selected) >= 3:
+                                    break
+                                if c not in selected and is_valid(c):
+                                    selected.append(c)
+
+                        # Final safety: if somehow still short (very pathological case),
+                        # allow invalid ones just so plotting doesn't crash
+                        if len(selected) < 3:
+                            for c in range(T):
+                                if len(selected) >= 3:
+                                    break
+                                if c not in selected:
+                                    selected.append(c)
+
+                        planes = [((0, 1), "XY"), ((0, 2), "XZ"), ((1, 2), "YZ")]
+
+                        def cov2_from_cov3(P3, axes):
+                            i, j = axes
+                            return P3[np.ix_([i, j], [i, j])]
+
+                        def angles_in_plane(u_cmd_xyz, axes):
+                            a, b = axes
+                            u = np.asarray(u_cmd_xyz, dtype=float)  # (M,3)
+                            u2 = u[:, [a, b]]  # (M,2)
+                            return np.arctan2(u2[:, 1], u2[:, 0])  # (M,)
+
+                        for idx in selected:
+                            epoch = timer.attcoord_searchtimes[idx]
+
+                            # --- states at this epoch ---
+                            sc_xyz = np.asarray(sc_eme_states_kms_piecewise[idx, :, :3], dtype=float)  # (M,3)
+                            ast_truth = np.asarray(ast_eme_traj_kms[idx, :3], dtype=float).reshape(3, )
+                            ast_mean = np.asarray(x_ts[idx, :3], dtype=float).reshape(3, )
+                            P3 = np.asarray(P_ts[idx, :3, :3], dtype=float).reshape(3, 3)
+
+                            # --- per-epoch optimal pointing command from opt_series ---
+                            u_cmd_xyz = np.asarray(result_kcoverage_series[idx]["u"], dtype=float)  # (M,3)
+
+                            # --- current pointing (for dotted line / slew display) ---
+                            u_curr_xyz = np.asarray(sc_pointings_eme, dtype=float)  # (M,3)
+
+                            fig, axes = plt.subplots(1, 3, figsize=(8, 14))
+                            fig.suptitle(f"2D Projections @ epoch {epoch}", y=0.99)
+
+                            for ax, (axpair, name) in zip(axes, planes):
+                                agents_2d = sc_xyz[:, list(axpair)]
+                                u_curr_2d = u_curr_xyz[:, list(axpair)]
+                                mean_2d = ast_mean[list(axpair)]
+                                truth_2d = ast_truth[list(axpair)]
+                                cov_2d = cov2_from_cov3(P3, axpair)
+
+                                mean_traj_2d = np.asarray(x_ts[:, :3], dtype=float)[:, list(axpair)]
+                                truth_traj_2d = np.asarray(ast_eme_traj_kms[:, :3], dtype=float)[:, list(axpair)]
+
+                                ems_center_2d = np.asarray(ems_center_xyz, dtype=float)[list(axpair)]
+                                ang_2d = angles_in_plane(u_cmd_xyz, axpair)
+
+                                util.plot_od_scenario_2d(
+                                    t_label=f"{epoch} ({name})",
+                                    agents_xy=agents_2d,
+                                    pointing_angles_rad=ang_2d,
+                                    theta_h_rad=theta_h_rad,
+                                    ray_length=ray_length * 2,
+                                    u_curr_agents_xy=u_curr_2d,
+                                    boresight_line_len=ray_length * 0.1,
+                                    target_mean_xy=mean_2d,
+                                    target_mean_xy_traj=mean_traj_2d,
+                                    target_cov_xy=cov_2d,
+                                    d_mahal=config['d_mahal'],
+                                    true_target_xy=truth_2d,
+                                    true_target_xy_traj=truth_traj_2d,
+                                    ems_center_xy=ems_center_2d,
+                                    ems_radius=ems_radius,
+                                    xlim=config['two_d_prop']['xlim'], ylim=config['two_d_prop']['ylim'],
+                                    agent_orbit_tracks_xy=None,
+                                    ax=ax,  # requires the small ax= edit in util.plot_od_scenario_2d
+                                    title=None
+                                )
+
+                            plt.tight_layout()
+                    #################################################
+                    # 3D Visualizations
+                    #################################################
+
+                    # ---- EME 3D ----
+                    agents_xyz = sc_eme_ae_kms
+                    target_cov_xyz = P_cart_eme
+
+                    def build_slew_history_from_opt_series(opt_series, ids, *, key_u="u", normalize=True):
+                        """
+                        opt_series: list[dict] where each dict has key 'u' = (M,3) boresight array for that step/restart
+                        ids: list of spacecraft indices to extract, e.g. [0,1]
+                        Returns: dict[int, (K,3)] mapping sc_id -> history boresight vectors over time (K=len(opt_series))
+                        """
+                        ids = [int(i) for i in ids]
+                        out = {i: [] for i in ids}
+
+                        for row_idx, row in enumerate(opt_series):
+                            if key_u not in row:
+                                raise KeyError(f"Row {row_idx} missing key '{key_u}'")
+                            U = np.asarray(row[key_u], dtype=float)
+
+                            if U.ndim != 2 or U.shape[1] != 3:
+                                raise ValueError(f"Row {row_idx} '{key_u}' must be (M,3), got {U.shape}")
+
+                            M = U.shape[0]
+                            for i in ids:
+                                if not (0 <= i < M):
+                                    raise IndexError(f"Row {row_idx}: id {i} out of range for M={M}")
+                                out[i].append(U[i].copy())
+
+                        # stack + optional normalize
+                        for i in ids:
+                            Ui = np.asarray(out[i], dtype=float)  # (K,3)
+                            if Ui.size == 0:
+                                Ui = Ui.reshape(0, 3)
+
+                            if normalize and Ui.shape[0] > 0:
+                                n = np.linalg.norm(Ui, axis=1, keepdims=True)
+                                n = np.maximum(n, 1e-12)
+                                Ui = Ui / n
+
+                            out[i] = Ui
+
+                        return out
+
+                    ids = config['three_d_prop'].get('history_ids')
+                    if ids is None:
+                        ids = list(range(config['num_spacecraft']))
+
+                    slew_history = build_slew_history_from_opt_series(res_kcoverage.extra["history"], ids)
+
+                    fig, ax = util.plot_od_scenario_3d_new(
+                        t_label=best_epoch,
+                        agents_xyz=agents_xyz,
+                        u_opt_agents_xyz=sc_pointing_eme_cartesian,
+                        theta_h_rad=theta_h_rad,
+                        ray_length=ray_length,
+                        u_curr_agents_xyz=sc_pointings_eme,
+                        boresight_line_len=ray_length * 0.1,
+                        u_init_agents_xyz=None,
+                        init_boresight_line_len=ray_length * 1.5,
+                        xlim=config['three_d_prop']['xlim'], ylim=config['three_d_prop']['ylim'],
+                        zlim=config['three_d_prop']['zlim'],
+                        Nx=config['three_d_prop']['Nx'], Ny=config['three_d_prop']['Ny'],
+                        Nz=config['three_d_prop']['Nz'],
+                        max_points_for_scatter=config['three_d_prop']['max_points'] - 790000,
+                        target_mean_xyz=ast_iod_eme[:3],
+                        target_cov_xyz=target_cov_xyz,
+                        d_mahal=config['d_mahal'],
+                        true_target_xyz=ast_truth_eme[:3],
+                        target_mean_traj_xyz=x_ts[:, :3],
+                        true_target_traj_xyz=ast_eme_traj_kms[:, :3],
+                        true_target_traj_xyz_2=ast_truth_original_eme[:, :3],
+                        ems_center_xyz=ems_center_xyz,
+                        ems_radius=ems_radius,
+                        show_coverage=True,
+                        show_uncertainty=True,
+                        show_truth=True,
+                        show_ems=True,
+                        show_fov_cones=True,
+                        title="3D OD Scenario Demo (EME)",
+                        slew_history=None,
+                        slew_history_line_len=ray_length,
+                        agent_orbit_tracks_xyz=[sc_eme_states_kms_piecewise[:, i, :3] for i in
+                                                range(config['num_spacecraft'])]
+                    )
+
+                    # cost function visualization
+                    util.plot_attcoord_costs_from_series(
+                        result_kcoverage_series,
+                        title="Dual coverage score vs objective (best per epoch)"
+                    )
+
+                    # theta and phi progression over optimization
+                    thetas, phis = util.plot_theta_phi_over_history(res_kcoverage.extra["history"],
+                                                                    int(config["num_spacecraft"]),
+                                                                    deg=True)
+
+                    # map of cost vs. optimization - works for m=2 and fixed
+                    # --- NEW: theta/phi grid for ONE free agent (fixed-mode, M=2) --
+                    viz_cost_map = False
+                    if viz_cost_map:
+
+                        # pick which agent is fixed and which is free
+                        idx_fix = formation.currently_detecting
+                        idx_free = 1 - idx_fix
+
+                        # fixed boresight (use whatever you are holding fixed in the optimizer)
+                        u_fix = sc_pointings_eme[idx_fix]  # or your stored detection LOS unit vector
+
+                        TH_free_deg, PH_free_deg, J_grid = compute_J_grid_theta_phi_single_free(
+                            ast_iod_eme[:3], target_cov_xyz, agents_xyz, sc_pointings_eme, theta_h_rad,
+                            idx_fix=idx_fix,
+                            u_fix=u_fix,
+                            idx_free=idx_free,
+                            theta_range_rad=(-0.5 * np.pi, 0.5 * np.pi),
+                            phi_range_rad=(0.0, 2 * np.pi),
+                            d_M=config['d_mahal'], kappa_sigma=config['optimizer_att_coord']['kappa_sigma'],
+                            lambda_k1=config['optimizer_att_coord']['lambda_k1'],
+                            n_mc=config['opt_map']['n_mc'],
+                            n_grid_theta=config['opt_map']['n_grid_theta'],
+                            n_grid_phi=config['opt_map']['n_grid_phi'],
+                        )
+
+                        # 3D surface: theta_free vs phi_free vs J
+                        fig3d = plt.figure(figsize=(9, 6))
+                        ax3d = fig3d.add_subplot(111, projection="3d")
+                        ax3d.plot_surface(
+                            TH_free_deg, PH_free_deg, J_grid,
+                            rstride=config['opt_map']['rstride'], cstride=config['opt_map']['cstride'],
+                            linewidth=config['opt_map']['linewidth_3d'], alpha=config['opt_map']['alpha']
+                        )
+                        ax3d.set_xlabel(rf'$\theta_{{{idx_free}}}$ (deg)')
+                        ax3d.set_ylabel(rf'$\phi_{{{idx_free}}}$ (deg)')
+                        ax3d.set_zlabel(r'$J_t$')
+                        ax3d.set_title(rf'$J_t(\theta,\phi)$ for free agent {idx_free} (fixed agent {idx_fix})')
+                        plt.tight_layout()
+
+                        # contour plot
+                        plt.figure(figsize=(7, 5.5))
+                        cs = plt.contourf(TH_free_deg, PH_free_deg, J_grid, levels=config['opt_map']['levels'])
+                        plt.colorbar(cs, label=r'$J_t$')
+                        plt.xlabel(rf'$\theta_{{{idx_free}}}$ (deg)')
+                        plt.ylabel(rf'$\phi_{{{idx_free}}}$ (deg)')
+                        plt.title(rf'$J_t(\theta,\phi)$ for free agent {idx_free} (fixed agent {idx_fix})')
+                        plt.grid(alpha=0.3)
+
+                        # ---- overlay optimizer paths from history (theta, phi) for the free agent ----
+                        restart_indices = sorted({entry["restart"] for entry in res_kcoverage.extra["history"]})
+
+                        colors = ['white', 'yellow', 'cyan', 'magenta', 'green', 'orange']
+                        markers = ['o', 's', '^', 'D', 'x', '+']
+
+                        for k, r in enumerate(restart_indices):
+                            path_entries = [entry for entry in res_kcoverage.extra["history"] if entry["restart"] == r]
+                            if not path_entries:
+                                continue
+
+                            theta_path_deg = []
+                            phi_path_deg = []
+
+                            for entry in path_entries:
+                                # In fixed-mode you likely store x_free for the reduced vector,
+                                # but some rows also store full x with NaNs for fixed agent.
+                                if entry.get("use_fixed_agent", False) and ("x_free" in entry) and (
+                                        entry.get("idx_fix", None) is not None):
+                                    # x_free packs only the non-fixed agents in order of free_idx.
+                                    # For M=2 there is exactly one free agent, so:
+                                    xk = np.asarray(entry["x_free"], dtype=float).ravel()
+                                    th = xk[0]
+                                    ph = xk[1]
+                                else:
+                                    # fallback: original/full x: [th0,ph0, th1,ph1, th2,ph2, ...]
+                                    xk = np.asarray(entry["x"], dtype=float).ravel()
+                                    th = xk[2 * idx_free]
+                                    ph = xk[2 * idx_free + 1]
+
+                                theta_path_deg.append(np.rad2deg(th))
+                                phi_path_deg.append(np.rad2deg(ph))
+
+                            theta_path_deg = np.asarray(theta_path_deg)
+                            phi_path_deg = np.asarray(phi_path_deg)
+
+                            col = colors[k % len(colors)]
+                            m = markers[k % len(markers)]
+
+                            label = f"Trial {r}"
+                            if r == 0:
+                                label += " (warm start)"
+
+                            plt.plot(
+                                theta_path_deg, phi_path_deg,
+                                linestyle='-',
+                                marker=m,
+                                color=col,
+                                lw=config['opt_map']['linewidth_2d'],
+                                ms=config['opt_map']['marker_size'],
+                                label=label
+                            )
+
+                        plt.legend(loc='upper right')
 
                 # --- Print status for THIS iteration (best-effort fields) ---
                 print_od_status(
@@ -2326,18 +2926,12 @@ def run_OD(config):
                     minimoon=minimoon,  # will try minimoon.curr_state_eme as "truth"
                     formation=formation,  # will show formation.currently_detecting if present
                     x_true=None,  # override if you have a better truth at this epoch
-                    n_detections=None,  # <-- fill in if/when you track detections
+                    n_detections=n_detections,  # <-- fill in if/when you track detections
                     status_every=status_every,
                     prefix=f"[OD r{rank} uid={uid}]",
                 )
 
-
-                # check if detections, if yes prediction, measurement (normal Kalman step)
-                    # measurement update
-                    # predictuion
-
-                # otherwise end simulation mark as lost, iteration lost etc...
-
+                plt.show()
 
 
                 break
