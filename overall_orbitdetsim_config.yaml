@@ -188,17 +188,25 @@ ems:
 ###################################
 # Running the overall OD algorithm
 ##################################
+od_diagnostics:
+    log_inner_kf: True
+    log_attcoord_candidates: True
+    log_optimizer_history: True
+    outer_loop_dir: "overall_od_results/outer_loop"
+    detail_root_dir: "overall_od_results/detailed"
+
 base_seed: 1765220306
 num_od_runs: 1
 od_file_dir: 'OD_results'
 od_duration_days: 3000
-od_max_steps: 1000
+od_max_steps: 10
 od_status_every: 1
 iod_cov_topo_std: [4.4, 2.31, 1.28e+6, 3.27e-5, 2.44e-5, 1.09]  # ra, dec, rho, ra dot, dec dot, rho dot (deg, km, deg/s, km/s)
 INCLUDE_EMS_EXCLUSION: 1
-radial_process_noise: 1.0e-28  # radial noise in RTN frame (km/s^2)^2
-track_process_noise: 1.0e-26  # along track noise in RTN frame (km/s^2)2
-normal_process_noise: 1.0e-28  # normal to track noise in RTN frame (km/s^2)2
+radial_process_noise: 1.0e-20  # radial noise in RTN frame (km/s^2)^2 /s
+track_process_noise: 1.0e-20  # along track noise in RTN frame (km/s^2)^2 /s
+normal_process_noise: 1.0e-20  # normal to track noise in RTN frame (km/s^2)^2 / s
+sigma_meas_noise: 1.0e+6  # measurement uncertainty in mas
 
 # weight values for SPKF portion
 alpha_ukf: 0.1                                     # alpha beta kappa together determine spread of sigmapoints

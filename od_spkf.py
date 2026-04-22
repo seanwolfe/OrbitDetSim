@@ -389,6 +389,7 @@ class OD_UKF:
         sigma_ra=1.0,                      # in meas_units
         sigma_dec=1.0,                     # in meas_units
         sigma_pointing=0.0,                # in meas_units
+        sigma_meas=0.0,
         ukf_alpha=1e-3,
         ukf_beta=2.0,
         ukf_kappa=0.0,
@@ -402,6 +403,7 @@ class OD_UKF:
         self.sigma_ra = float(sigma_ra)
         self.sigma_dec = float(sigma_dec)
         self.sigma_pointing = float(sigma_pointing)
+        self.sigma_meas = float(sigma_meas)
 
         self.alpha = float(ukf_alpha)
         self.beta = float(ukf_beta)
@@ -453,7 +455,7 @@ class OD_UKF:
                       [Q_rv, Q_vv]])
         return Q
 
-    def build_R(self, ra_rad, dec_rad, *, sigma_ra=None, sigma_dec=None, sigma_pointing=None, units=None):
+    def build_R(self, ra_rad, dec_rad, *, sigma_ra=None, sigma_dec=None, sigma_pointing=None, sigma_meas=None, units=None):
         if sigma_ra is None:
             sigma_ra = self.sigma_ra
         if sigma_dec is None:
@@ -462,14 +464,22 @@ class OD_UKF:
             sigma_pointing = self.sigma_pointing
         if units is None:
             units = self.meas_units
+        if sigma_meas is None:
+            sigma_meas = self.sigma_meas
 
-        s_ra, s_dec, s_pt = self._sigmas_to_rad(sigma_ra, sigma_dec, sigma_pointing, units)
 
-        s_ra2 = s_ra**2 + s_pt**2
-        s_de2 = s_dec**2 + s_pt**2
+        if sigma_meas is None:
+            s_ra, s_dec, s_pt = self._sigmas_to_rad(sigma_ra, sigma_dec, sigma_pointing, units)
 
-        R_ang = np.array([[s_ra2, 0.0],
-                          [0.0,  s_de2]], dtype=float)
+            s_ra2 = s_ra**2 + s_pt**2
+            s_de2 = s_dec**2 + s_pt**2
+
+            R_ang = np.array([[s_ra2, 0.0],
+                              [0.0,  s_de2]], dtype=float)
+        else:
+            s_meas, _, _ = self._sigmas_to_rad(sigma_meas, sigma_meas, sigma_meas, units)  # re use for conveniece
+            R_ang = np.array([[s_meas ** 2, 0.0],
+                              [0.0, s_meas ** 2]], dtype=float)
 
         c = np.cos(dec_rad)
         s = np.sin(dec_rad)
@@ -625,6 +635,7 @@ class OD_UKF:
         Pa = np.zeros((na, na), dtype=float)
         Pa[:n, :n] = P
         Pa[n:, n:] = Q
+        print(np.diagonal(Q))
 
         lam = self.alpha**2 * (na + self.kappa) - na
         c = na + lam
@@ -636,6 +647,8 @@ class OD_UKF:
 
         # Cholesky with jitter fallback
         Pa = self._symmetrize(Pa)
+
+        print(np.diagonal(Pa))
         try:
             S = np.linalg.cholesky(c * Pa)
         except np.linalg.LinAlgError:

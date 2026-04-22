@@ -619,7 +619,6 @@ def plot_od_scenario_3d_new(
         XX, YY, ZZ = np.meshgrid(xg, yg, zg, indexing="xy")
         grid = np.stack([XX.ravel(), YY.ravel(), ZZ.ravel()], axis=1)
 
-        print(max_points_for_scatter)
         if grid.shape[0] > int(max_points_for_scatter):
             rng = np.random.default_rng(0)
             idx = rng.choice(grid.shape[0], size=int(max_points_for_scatter), replace=False)
@@ -2513,10 +2512,11 @@ def plot_priors_positions_and_cov_2d(
             P2 = Ppos[np.ix_([a, b], [a, b])]
 
             ex, ey = _cov_ellipse_2d(P2, n_std=float(n_std))
-            ax.plot(mu[a] + ex, mu[b] + ey)
+            ax.plot(mu[a] + ex, mu[b] + ey, label=f"{k}")
 
         ax.set_xlabel(f"{pl[0]} (km)")
         ax.set_ylabel(f"{pl[1]} (km)")
+        ax.legend()
         ax.set_title(f"{title_prefix}: mean + {n_std}σ ellipses in {pl.upper()} plane")
 
         if equal_aspect:
@@ -2524,7 +2524,6 @@ def plot_priors_positions_and_cov_2d(
 
         ax.grid(True)
 
-    plt.show()
 
 
 
@@ -6215,7 +6214,7 @@ def piecewise_anchor_and_propagate_spacecraft_trajs(
     def _timestamp_to_et(ts):
         # ts is expected to be a pandas.Timestamp or datetime-like
         if isinstance(ts, pd.Timestamp):
-            ts = ts.to_pydatetime()
+            ts = ts.to_pydatetime(warn=False)
         s = ts.strftime("%Y-%m-%dT%H:%M:%S")
         return float(spice.utc2et(s))
 

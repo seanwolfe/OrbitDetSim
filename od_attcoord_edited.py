@@ -8,6 +8,7 @@ try:
 except Exception:
     SCIPY_OK = False
 import itertools
+from scipy.special import expit
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from typing import Dict, Any, Tuple, Optional, List
@@ -53,7 +54,7 @@ def u_from_cap(u_curr, theta, phi):
 
 
 def sigmoid(z):
-    return 1.0 / (1.0 + np.exp(-z))
+    return expit(z)
 
 
 def softplus(z, beta=1.0):
@@ -945,7 +946,7 @@ def optimize_pointing_lbfgs_joint(
 
     infeasible_mask = theta_upper < theta_lower
     if np.any(infeasible_mask):
-        print(f"Infeasible: slew limit smaller than required to reach ellipsoid {np.rad2deg(theta_upper)}, {np.rad2deg(theta_lower)}.")
+        # print(f"Infeasible: slew limit smaller than required to reach ellipsoid {np.rad2deg(theta_upper)}, {np.rad2deg(theta_lower)}.")
         # NOTE: now returning 5 values
         return None, None, 0.0, [], np.inf
 
