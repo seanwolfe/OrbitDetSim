@@ -7,7 +7,7 @@ import numpy as np
 import mpi4py.rc
 from od_spkf import OD_UKF, od_setup_from_iod, process_tracklet_until_update_with_prior_epoch
 from time_tracker import SimTime
-
+import copy
 mpi4py.rc.threads = False
 from mpi4py import MPI
 import spiceypy as sp
@@ -1753,15 +1753,16 @@ def run_OD(config_global):
     for m_idx in my_indices:
         row = df_master.iloc[m_idx]
 
-        # setup for ems inclusion vs not (even detections that were occluded by ems but still in fov were processed)
-        config = config_global.copy()
-        if row['OCCLUDED_BY_EMS']:
-            config["ems"]['R_em'] = 0.0
-            config['alpha_s_deg'] = 0.0
+        config = copy.deepcopy(config_global)
+
+        occluded = int(row["OCCLUDED_BY_EMS"]) == 1
+
+        if occluded:
+            config["ems"]["R_em"] = 0.0
+            config["ems"]["alpha_s_deg"] = 0.0
             print("Doing OD without EMS Exclusion...")
         else:
             print("Doing OD with EMS Exclusion")
-
 
         saved_as_str = str(row.get("IOD_DATA_SAVED_AS", "") or "")
         uid = uid_from_saved_as(saved_as_str, m_idx)
