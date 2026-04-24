@@ -12,6 +12,7 @@ length: 0.5  # m
 telescope_mass: 5  # kg
 telescope_diameter: 0.28  # m
 telescope_offset: 0.3  # m
+telescope_length: 0.3
 # sigma_ra: 981  # right ascension measurement uncertainty - mas
 # sigma_dec: 939  # declination measurement uncertainty - mas
 # sigma_pointing: 7200  # pointing uncertainty - mas

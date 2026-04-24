@@ -2093,8 +2093,9 @@ def run_OD(config_global):
                     l_m = sc0.length
                     m_t = sc0.telescope_mass
                     d_t = sc0.telescope_diameter
+                    l_t = sc0.telescope_length
                     z_0 = sc0.telescope_offset
-                    I_max = (1 / 6) * m_m * (l_m / 2) ** 2 + (1 / 2) * m_t * (d_t / 2) ** 2 + m_t * z_0 ** 2
+                    I_max = (1 / 6) * m_m * (l_m) ** 2 + (1 /12) * m_t * (3*(d_t / 2) ** 2 + l_t ** 2) + m_t * z_0 ** 2
                     alpha_max = 1.63 * tau_max / I_max
                     omega_max = 1.63 * h_max / I_max
 
@@ -2755,8 +2756,10 @@ def run_OD(config_global):
                     l_m = sc0.length
                     m_t = sc0.telescope_mass
                     d_t = sc0.telescope_diameter
+                    l_t = sc0.telescope_length
                     z_0 = sc0.telescope_offset
-                    I_max = (1 / 6) * m_m * (l_m / 2) ** 2 + (1 / 2) * m_t * (d_t / 2) ** 2 + m_t * z_0 ** 2
+                    I_max = (1 / 6) * m_m * (l_m) ** 2 + (1 / 12) * m_t * (
+                                3 * (d_t / 2) ** 2 + l_t ** 2) + m_t * z_0 ** 2
                     alpha_max = 1.63 * tau_max / I_max
                     omega_max = 1.63 * h_max / I_max
 
