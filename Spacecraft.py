@@ -392,9 +392,10 @@ class Spacecraft:
         # -----------------------------
         # EMS exclusion sphere
         # -----------------------------
-        p_em_km = np.asarray(configs.get("p_em", [0.0, 0.0, 0.0]), dtype=float).reshape(3, )
-        R_em_km = float(configs.get("R_em", 0.0))
-        alpha_s_deg = float(configs.get("alpha_s_deg", 0.0))
+        ems_conf = configs.get("ems", {})
+        p_em_km = np.asarray(ems_conf.get("p_em", [0.0, 0.0, 0.0]), dtype=float).reshape(3, )
+        R_em_km = float(ems_conf.get("R_em", 0.0))
+        alpha_s_deg = 0.0
 
         occluded_ems = False
         sep_ems_rad = None
@@ -631,9 +632,10 @@ class Spacecraft:
         # -----------------------------
         # EMS exclusion sphere
         # -----------------------------
-        p_em_km = np.asarray(configs.get("p_em", [0.0, 0.0, 0.0]), dtype=float).reshape(3, )
-        R_em_km = float(configs.get("R_em", 0.0))
-        alpha_s_deg = float(configs.get("alpha_s_deg", 0.0))
+        ems_conf = configs.get("ems", {})
+        p_em_km = np.asarray(ems_conf.get("p_em", [0.0, 0.0, 0.0]), dtype=float).reshape(3, )
+        R_em_km = float(ems_conf.get("R_em", 0.0))
+        alpha_s_deg = 0.0
 
         if R_em_km <= 0.0:
             result_ems_filtered = result_base.copy()

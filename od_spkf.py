@@ -635,7 +635,7 @@ class OD_UKF:
         Pa = np.zeros((na, na), dtype=float)
         Pa[:n, :n] = P
         Pa[n:, n:] = Q
-        print(np.diagonal(Q))
+        # print(np.diagonal(Q))
 
         lam = self.alpha**2 * (na + self.kappa) - na
         c = na + lam
@@ -648,7 +648,7 @@ class OD_UKF:
         # Cholesky with jitter fallback
         Pa = self._symmetrize(Pa)
 
-        print(np.diagonal(Pa))
+        # print(np.diagonal(Pa))
         try:
             S = np.linalg.cholesky(c * Pa)
         except np.linalg.LinAlgError:

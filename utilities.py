@@ -6875,7 +6875,7 @@ def sc_eme_ast_eme(*, sc_df, earth_ast_kms_array):
     def _timestamp_to_et(ts):
         # ts is expected to be a pandas.Timestamp or datetime-like
         if isinstance(ts, pd.Timestamp):
-            ts = ts.to_pydatetime()
+            ts = ts.to_pydatetime(warn=False)
         s = ts.strftime("%Y-%m-%dT%H:%M:%S")
         return spice.utc2et(s)
 
@@ -8256,48 +8256,26 @@ def plot_detection_geometry_3d(
     fixed_los_length_km=None,
     show_start_markers=True,
     show_end_markers=True,
+
+    # EMS sphere
+    ems_center_xyz=None,
+    ems_radius=None,
+    show_ems=True,
+    ems_alpha=0.10,
+    show_ems_wires=True,
+
     title="3D Detection Geometry",
     save_path=None,
     show=True,
 ):
     """
-    Plot spacecraft trajectories, asteroid trajectory, and LOS rays for detecting spacecraft.
+    Plot spacecraft trajectories, asteroid trajectory, LOS rays, and optional EMS sphere.
 
-    Parameters
-    ----------
-    perfect_meas : ndarray, shape (M, N, 2)
-        Perfect [RA, Dec] measurements in radians.
-    noisy_meas : ndarray, shape (M, N, 2)
-        Noisy [RA, Dec] measurements in radians.
-    sc_states : ndarray, shape (M, N, 6)
-        Spacecraft states [km, km/s].
-    ast_states : ndarray, shape (N, 6)
-        Asteroid states [km, km/s].
-    detection_results : list of dict
-        Per-spacecraft detection dictionaries. Uses ["detected"].
-    epochs : ndarray, optional
-        Epoch array, only used for optional consistency checks or future annotation.
-    los_stride : int, optional
-        Plot LOS every `los_stride` frames to reduce clutter.
-    use_true_range_for_los : bool, optional
-        If True, LOS rays are scaled by the true spacecraft-to-asteroid range at each frame.
-    fixed_los_length_km : float or None, optional
-        Used only if use_true_range_for_los=False. Then all LOS rays get this fixed length.
-        If None and use_true_range_for_los=False, a default is chosen.
-    show_start_markers : bool, optional
-        Mark start points of trajectories.
-    show_end_markers : bool, optional
-        Mark end points of trajectories.
-    title : str, optional
-        Plot title.
-    save_path : str or None, optional
-        If given, save figure to this path.
-    show : bool, optional
-        Whether to call plt.show().
-
-    Returns
-    -------
-    fig, ax
+    Requires helpers:
+        ra_dec_to_unit_vector
+        set_axes_equal
+        _sphere_surface
+        _plot_three_sphere_circles
     """
     perfect_meas = np.asarray(perfect_meas, dtype=float)
     noisy_meas = np.asarray(noisy_meas, dtype=float)
@@ -8326,25 +8304,36 @@ def plot_detection_geometry_3d(
             f"expected {N}, got {ast_states.shape[0]}"
         )
 
-    sc_pos = sc_states[:, :, :3]   # (M, N, 3)
-    ast_pos = ast_states[:, :3]    # (N, 3)
+    sc_pos = sc_states[:, :, :3]
+    ast_pos = ast_states[:, :3]
 
     fig = plt.figure(figsize=(11, 9))
     ax = fig.add_subplot(111, projection="3d")
 
-    # Plot asteroid trajectory
+    # ---- asteroid trajectory ----
     ax.plot(
         ast_pos[:, 0], ast_pos[:, 1], ast_pos[:, 2],
         linewidth=2.5,
-        label="Asteroid trajectory"
+        label="Asteroid trajectory",
     )
 
     if show_start_markers:
-        ax.scatter(ast_pos[0, 0], ast_pos[0, 1], ast_pos[0, 2], marker="o", s=50, label="Asteroid start")
-    if show_end_markers:
-        ax.scatter(ast_pos[-1, 0], ast_pos[-1, 1], ast_pos[-1, 2], marker="^", s=50, label="Asteroid end")
+        ax.scatter(
+            ast_pos[0, 0], ast_pos[0, 1], ast_pos[0, 2],
+            marker="o",
+            s=50,
+            label="Asteroid start",
+        )
 
-    # Plot spacecraft trajectories
+    if show_end_markers:
+        ax.scatter(
+            ast_pos[-1, 0], ast_pos[-1, 1], ast_pos[-1, 2],
+            marker="^",
+            s=50,
+            label="Asteroid end",
+        )
+
+    # ---- spacecraft trajectories ----
     for i in range(M):
         traj = sc_pos[i]
         detected = bool(detection_results[i].get("detected", False))
@@ -8353,14 +8342,52 @@ def plot_detection_geometry_3d(
         if detected:
             label += " (detecting)"
 
-        ax.plot(traj[:, 0], traj[:, 1], traj[:, 2], linewidth=1.5, label=label)
+        ax.plot(
+            traj[:, 0], traj[:, 1], traj[:, 2],
+            linewidth=1.5,
+            label=label,
+        )
 
         if show_start_markers:
-            ax.scatter(traj[0, 0], traj[0, 1], traj[0, 2], marker="o", s=25)
-        if show_end_markers:
-            ax.scatter(traj[-1, 0], traj[-1, 1], traj[-1, 2], marker="^", s=25)
+            ax.scatter(
+                traj[0, 0], traj[0, 1], traj[0, 2],
+                marker="o",
+                s=25,
+            )
 
-    # Plot LOS for detecting spacecraft
+        if show_end_markers:
+            ax.scatter(
+                traj[-1, 0], traj[-1, 1], traj[-1, 2],
+                marker="^",
+                s=25,
+            )
+
+    # ---- EMS sphere ----
+    if show_ems and (ems_center_xyz is not None) and (ems_radius is not None) and float(ems_radius) > 0:
+        c = np.asarray(ems_center_xyz, dtype=float).reshape(3,)
+        R = float(ems_radius)
+
+        _sphere_surface(
+            ax,
+            c,
+            R,
+            alpha=float(ems_alpha),
+            color="orange",
+        )
+
+        if show_ems_wires:
+            A_sphere = np.eye(3) * R
+            _plot_three_principal_ellipses(
+                ax,
+                c,
+                A_sphere,
+                color="orange",
+                lw=1.1,
+                alpha=0.65,
+                label="EMS wires",
+            )
+
+    # ---- LOS rays for detecting spacecraft ----
     perfect_label_used = False
     noisy_label_used = False
 
@@ -8386,7 +8413,6 @@ def plot_detection_geometry_3d(
                 los_len = np.linalg.norm(ast_k - sc_k)
             else:
                 if fixed_los_length_km is None:
-                    # fallback default based on overall scene size
                     scene_pts = np.vstack([ast_pos, sc_pos.reshape(-1, 3)])
                     scene_extent = np.linalg.norm(scene_pts.max(axis=0) - scene_pts.min(axis=0))
                     los_len = 0.15 * scene_extent
@@ -8396,7 +8422,6 @@ def plot_detection_geometry_3d(
             end_perfect = sc_k + los_len * u_perfect
             end_noisy = sc_k + los_len * u_noisy
 
-            # perfect LOS
             ax.plot(
                 [sc_k[0], end_perfect[0]],
                 [sc_k[1], end_perfect[1]],
@@ -8404,11 +8429,10 @@ def plot_detection_geometry_3d(
                 linestyle="-",
                 linewidth=1.0,
                 alpha=0.9,
-                label="Perfect LOS" if not perfect_label_used else None
+                label="Perfect LOS" if not perfect_label_used else None,
             )
             perfect_label_used = True
 
-            # noisy LOS
             ax.plot(
                 [sc_k[0], end_noisy[0]],
                 [sc_k[1], end_noisy[1]],
@@ -8416,14 +8440,39 @@ def plot_detection_geometry_3d(
                 linestyle="--",
                 linewidth=1.0,
                 alpha=0.9,
-                label="Noisy LOS" if not noisy_label_used else None
+                label="Noisy LOS" if not noisy_label_used else None,
             )
             noisy_label_used = True
+
+    # ---- include EMS in limits before equalizing axes ----
+    if show_ems and (ems_center_xyz is not None) and (ems_radius is not None) and float(ems_radius) > 0:
+        c = np.asarray(ems_center_xyz, dtype=float).reshape(3,)
+        R = float(ems_radius)
+
+        ems_extreme_pts = c.reshape(1, 3) + np.array([
+            [ R, 0.0, 0.0],
+            [-R, 0.0, 0.0],
+            [0.0,  R, 0.0],
+            [0.0, -R, 0.0],
+            [0.0, 0.0,  R],
+            [0.0, 0.0, -R],
+        ])
+
+        all_pts = np.vstack([
+            ast_pos,
+            sc_pos.reshape(-1, 3),
+            ems_extreme_pts,
+        ])
+
+        ax.set_xlim(all_pts[:, 0].min(), all_pts[:, 0].max())
+        ax.set_ylim(all_pts[:, 1].min(), all_pts[:, 1].max())
+        ax.set_zlim(all_pts[:, 2].min(), all_pts[:, 2].max())
 
     ax.set_xlabel("x [km]")
     ax.set_ylabel("y [km]")
     ax.set_zlabel("z [km]")
     ax.set_title(title)
+
     set_axes_equal(ax)
     ax.legend(loc="best")
 
@@ -8434,6 +8483,7 @@ def plot_detection_geometry_3d(
         plt.show()
 
     return fig, ax
+
 
 def get_plane_indices(plane):
     """

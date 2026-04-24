@@ -62,7 +62,7 @@ def run_runs_x_minimoons_MPI(minimoon_master, config):
     # ------------- output directory -----------
     base_dir = os.path.dirname(base_out) or "."
     base_name = os.path.basename(base_out)
-    out_dir = os.path.join(base_dir, f"spacecraft_{num_sc}")
+    out_dir = os.path.join(base_dir, "visible_dir", f"spacecraft_{num_sc}")
 
     if rank == 0:
         os.makedirs(out_dir, exist_ok=True)
@@ -457,6 +457,7 @@ def run_sim_runnumbers_MPI_getIOD(config):
 
         # ---------- rank 0 reads & prepares detected rows, then splits ----------
         if rank == 0:
+            print(file_i)
             run_data = util.read_master(file_i, config)
 
             # Expecting new columns from visible files:
@@ -1261,7 +1262,7 @@ def run_IOD(config):
 
 
 
-def run_OD(config):
+def run_OD(config_global):
     """
     Stage 4: Orbit Determination (OD)
 
@@ -1287,7 +1288,7 @@ def run_OD(config):
     size = comm.Get_size()
 
     # Paths & MASTER
-    iod_dir = util._iod_dir(config)
+    iod_dir = util._iod_dir(config_global)
     master_fn = os.path.join(iod_dir, "MASTER_IOD.csv")
     if rank == 0 and not os.path.exists(master_fn):
         print(f"[Stage: OD] No MASTER_IOD.csv at {master_fn} -> skip")
@@ -1613,7 +1614,7 @@ def run_OD(config):
     # ---------------------------------------------------------
     # Diagnostics config
     # ---------------------------------------------------------
-    diag_cfg = config.get("od_diagnostics", {})
+    diag_cfg = config_global.get("od_diagnostics", {})
     log_inner_kf = bool(diag_cfg.get("log_inner_kf", False))
     log_attcoord = bool(diag_cfg.get("log_attcoord_candidates", False))
     log_optimizer = bool(diag_cfg.get("log_optimizer_history", False))
@@ -1627,8 +1628,8 @@ def run_OD(config):
     df_master = pd.read_csv(master_fn)
 
     # OD config
-    od_duration_days = float(config.get('od_duration_days', 1.0))
-    od_max_steps = config.get('od_max_steps', None)
+    od_duration_days = float(config_global.get('od_duration_days', 1.0))
+    od_max_steps = config_global.get('od_max_steps', None)
     od_max_steps = int(od_max_steps) if (od_max_steps is not None) else None
 
     # Columns we’ll add/update in MASTER
@@ -1646,7 +1647,7 @@ def run_OD(config):
     # ---------------------------------------------------------
     # Diagnostics headers
     # ---------------------------------------------------------
-    num_sc = int(config["num_spacecraft"])
+    num_sc = int(config_global["num_spacecraft"])
 
     outer_header = [
         "run_uid",
@@ -1751,6 +1752,16 @@ def run_OD(config):
     # ---------------------------------------------------------
     for m_idx in my_indices:
         row = df_master.iloc[m_idx]
+
+        # setup for ems inclusion vs not (even detections that were occluded by ems but still in fov were processed)
+        config = config_global.copy()
+        if row['OCCLUDED_BY_EMS']:
+            config["ems"]['R_em'] = 0.0
+            config['alpha_s_deg'] = 0.0
+            print("Doing OD without EMS Exclusion...")
+        else:
+            print("Doing OD with EMS Exclusion")
+
 
         saved_as_str = str(row.get("IOD_DATA_SAVED_AS", "") or "")
         uid = uid_from_saved_as(saved_as_str, m_idx)
@@ -2312,7 +2323,7 @@ def run_OD(config):
                             agent_orbit_tracks_xyz=[sc_eme_states_kms_piecewise[:, i, :3] for i in range(config['num_spacecraft'])]
                         )
 
-                        plot_cost_diagnosis = False
+                        plot_cost_diagnosis = True
                         if plot_cost_diagnosis:
                             util.plot_attcoord_costs_from_series(
                                 result_kcoverage_series,
@@ -2415,7 +2426,7 @@ def run_OD(config):
 
                             plt.legend(loc='upper right')
 
-                        plt.show()
+
 
                 #-------------------------
                 # Regular OD Step
@@ -2436,6 +2447,8 @@ def run_OD(config):
                     # optional visualization block unchanged
                     confirm_meas = True
                     if confirm_meas:
+                        ems_center_xyz = np.array(config["ems"]["p_em"])
+                        ems_radius = config["ems"]['R_em']
                         util.plot_detection_geometry_3d(
                             perfect_meas=p_meas_k,
                             noisy_meas=n_meas_k,
@@ -2445,11 +2458,17 @@ def run_OD(config):
                             epochs=epochs_k,
                             los_stride=2,
                             use_true_range_for_los=True,
+                            # EMS sphere
+                            ems_center_xyz=ems_center_xyz,
+                            ems_radius=ems_radius,
+                            show_ems=True,
+                            ems_alpha=0.10,
+                            show_ems_wires=True,
                             title="Detection Geometry",
                             save_path=None,
                             show=False,
                         )
-                        two_d_too = True
+                        two_d_too = False
                         if two_d_too:
                             plane = ("x", "y")
                             plane_str = "".join(plane)
@@ -2464,6 +2483,9 @@ def run_OD(config):
                                 save_path=None,
                                 show=False,
                             )
+
+                    print(detection_res_k)
+                    plt.show()
 
                     # -------------------------
                     # Prediction + UKF update only
@@ -3217,7 +3239,7 @@ def run_OD(config):
 
                             plt.legend(loc='upper right')
 
-                    plt.show()
+                    # plt.show()
 
                 # ---------------------------------------------------------
                 # Outer-loop diagnostics row

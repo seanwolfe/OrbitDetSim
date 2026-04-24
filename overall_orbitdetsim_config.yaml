@@ -73,9 +73,9 @@ save_format: 'csv' # csv or parquet, also needs to be specified when expecting t
 #####################################################
 # Getting IOD data parameters
 ####################################################
-visible_files_folder: "results"
+visible_files_folder: "results/visible_dir"
 visible_file_columns: ['values', "total_length", 'spacecraft_1_ini_pos']
-IOD_folder_path: "data_IOD"
+IOD_folder_path: "results/iod_results"
 IOD_data_columns: ["EPOCH(JDTDB)", "HELIO_X(AU)", "HELIO_Y(AU)", "HELIO_Z(AU)", "HELIO_VX(AU/D)", "HELIO_VY(AU/D)",
                    "HELIO_VZ(AU/D)", "SC_HELIO_X(AU)", "SC_HELIO_Y(AU)", "SC_HELIO_Z(AU)", "SC_HELIO_VX(AU/D)",
                    "SC_HELIO_VY(AU/D)", "SC_HELIO_VZ(AU/D)", 'SIN_RA', 'COS_RA', 'SIN_DEC']
@@ -179,7 +179,7 @@ optimizer_att_coord:
 ems:
   p_em: [0.0, 0.0, 0.0]
   R_em: 0.5e+6
-  alpha_s_deg: 1
+  alpha_s_deg: 5
   lambda_em: 1
   beta_zeta: 115.0
 
@@ -192,8 +192,8 @@ od_diagnostics:
     log_inner_kf: True
     log_attcoord_candidates: True
     log_optimizer_history: True
-    outer_loop_dir: "overall_od_results/outer_loop"
-    detail_root_dir: "overall_od_results/detailed"
+    outer_loop_dir: "results/outer_loop"
+    detail_root_dir: "results/detailed"
 
 base_seed: 1765220306
 num_od_runs: 1
