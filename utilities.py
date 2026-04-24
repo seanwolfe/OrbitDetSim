@@ -6,6 +6,7 @@ from Formation import Formation
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from skimage.measure import marching_cubes
 from mpl_toolkits.mplot3d import proj3d
 import ast
 import spiceypy as spice
@@ -320,7 +321,7 @@ def plot_theta_phi_over_history(history, M, *, deg=True, title=None):
 # -------------------------
 # Main plotting function (3D)
 # -------------------------
-def plot_od_scenario_3d_new(
+def plot_od_scenario_3d_old(
         *,
         # epoch/meta
         t_label=None,
@@ -772,7 +773,873 @@ def plot_od_scenario_3d_new(
 
 
 
+def _normalize_rows(U, eps=1e-12):
+    U = np.asarray(U, dtype=float)
+    n = np.linalg.norm(U, axis=1, keepdims=True)
+    return U / np.maximum(n, eps)
 
+
+def _as_3(x):
+    if x is None:
+        return None
+    return np.asarray(x, dtype=float).reshape(3,)
+
+
+def _annotate3d(ax, text, xyz, *, dx=0, dy=0, fontsize=9, color="black"):
+    x, y, z = map(float, xyz)
+    x2, y2, _ = proj3d.proj_transform(x, y, z, ax.get_proj())
+    ax.annotate(
+        text,
+        xy=(x2, y2),
+        xytext=(dx, dy),
+        textcoords="offset points",
+        ha="left",
+        va="bottom",
+        fontsize=fontsize,
+        color=color,
+    )
+
+
+def _orthonormal_basis_from_axis(u):
+    u = np.asarray(u, dtype=float).reshape(3,)
+    u = u / max(np.linalg.norm(u), 1e-12)
+
+    ref = np.array([0.0, 0.0, 1.0])
+    if abs(np.dot(u, ref)) > 0.95:
+        ref = np.array([0.0, 1.0, 0.0])
+
+    e1 = np.cross(u, ref)
+    e1 = e1 / max(np.linalg.norm(e1), 1e-12)
+    e2 = np.cross(u, e1)
+    e2 = e2 / max(np.linalg.norm(e2), 1e-12)
+
+    return u, e1, e2
+
+
+def plot_fov_cone_surface(
+        ax,
+        apex,
+        axis,
+        theta_h_rad,
+        length,
+        *,
+        n_circle=64,
+        n_len=20,
+        color="lightskyblue",
+        alpha=0.12,
+        edge_alpha=0.30,
+        label=None,
+):
+    apex = np.asarray(apex, dtype=float).reshape(3,)
+    u, e1, e2 = _orthonormal_basis_from_axis(axis)
+
+    s = np.linspace(0.0, float(length), int(n_len))
+    phi = np.linspace(0.0, 2*np.pi, int(n_circle))
+
+    S, Phi = np.meshgrid(s, phi, indexing="ij")
+    R = S * np.tan(float(theta_h_rad))
+
+    X = apex[0] + S*u[0] + R*np.cos(Phi)*e1[0] + R*np.sin(Phi)*e2[0]
+    Y = apex[1] + S*u[1] + R*np.cos(Phi)*e1[1] + R*np.sin(Phi)*e2[1]
+    Z = apex[2] + S*u[2] + R*np.cos(Phi)*e1[2] + R*np.sin(Phi)*e2[2]
+
+    ax.plot_surface(
+        X, Y, Z,
+        rstride=1,
+        cstride=1,
+        linewidth=0,
+        color=color,
+        alpha=alpha,
+        shade=False,
+    )
+
+    base = apex + float(length)*u
+    rb = float(length) * np.tan(float(theta_h_rad))
+    circ = np.stack([
+        base[0] + rb*np.cos(phi)*e1[0] + rb*np.sin(phi)*e2[0],
+        base[1] + rb*np.cos(phi)*e1[1] + rb*np.sin(phi)*e2[1],
+        base[2] + rb*np.cos(phi)*e1[2] + rb*np.sin(phi)*e2[2],
+    ], axis=1)
+
+    ax.plot(
+        circ[:, 0], circ[:, 1], circ[:, 2],
+        color=color,
+        alpha=edge_alpha,
+        lw=1.0,
+        label=label,
+    )
+
+
+def _sphere_surface(ax, c, R, *, alpha=0.10, n_u=26, n_v=13, color="orange"):
+    u = np.linspace(0, 2*np.pi, n_u)
+    v = np.linspace(0, np.pi, n_v)
+    uu, vv = np.meshgrid(u, v, indexing="xy")
+
+    X = c[0] + R*np.cos(uu)*np.sin(vv)
+    Y = c[1] + R*np.sin(uu)*np.sin(vv)
+    Z = c[2] + R*np.cos(vv)
+
+    ax.plot_surface(
+        X, Y, Z,
+        rstride=1,
+        cstride=1,
+        linewidth=0,
+        alpha=alpha,
+        color=color,
+        shade=False,
+    )
+
+
+def _ellipsoid_surface(ax, mu, P, d, *, alpha=0.10, n_u=26, n_v=13, color="tab:red"):
+    w, V = np.linalg.eigh(P)
+    w = np.clip(w, 0.0, None)
+    Aell = (V * (np.sqrt(w) * float(d))) @ V.T
+
+    u = np.linspace(0, 2*np.pi, n_u)
+    v = np.linspace(0, np.pi, n_v)
+    uu, vv = np.meshgrid(u, v, indexing="xy")
+
+    qx = np.cos(uu) * np.sin(vv)
+    qy = np.sin(uu) * np.sin(vv)
+    qz = np.cos(vv)
+
+    X = mu[0] + Aell[0, 0]*qx + Aell[0, 1]*qy + Aell[0, 2]*qz
+    Y = mu[1] + Aell[1, 0]*qx + Aell[1, 1]*qy + Aell[1, 2]*qz
+    Z = mu[2] + Aell[2, 0]*qx + Aell[2, 1]*qy + Aell[2, 2]*qz
+
+    ax.plot_surface(
+        X, Y, Z,
+        rstride=1,
+        cstride=1,
+        linewidth=0,
+        alpha=alpha,
+        color=color,
+        shade=False,
+    )
+
+    return Aell
+
+
+def _plot_three_principal_ellipses(
+        ax,
+        c,
+        A3x3,
+        *,
+        n=240,
+        color="orange",
+        lw=1.0,
+        alpha=0.6,
+        label=None,
+):
+    t = np.linspace(0, 2*np.pi, n)
+
+    q12 = np.stack([np.cos(t), np.sin(t), 0*t], axis=1)
+    q13 = np.stack([np.cos(t), 0*t, np.sin(t)], axis=1)
+    q23 = np.stack([0*t, np.cos(t), np.sin(t)], axis=1)
+
+    for k, q in enumerate([q12, q13, q23]):
+        P = c.reshape(1, 3) + (q @ A3x3.T)
+        ax.plot(
+            P[:, 0], P[:, 1], P[:, 2],
+            color=color,
+            lw=lw,
+            alpha=alpha,
+            label=label if k == 0 else None,
+        )
+
+
+def _collect_bounds(arrays):
+    valid = []
+    for arr in arrays:
+        if arr is None:
+            continue
+        arr = np.asarray(arr, dtype=float)
+        if arr.ndim == 1 and arr.size == 3:
+            valid.append(arr.reshape(1, 3))
+        elif arr.ndim == 2 and arr.shape[1] == 3 and arr.size > 0:
+            valid.append(arr)
+
+    if not valid:
+        raise ValueError("No valid arrays provided for bounds.")
+
+    P = np.vstack(valid)
+    return P[:, 0], P[:, 1], P[:, 2]
+
+
+def plot_coverage_isosurface(
+        ax,
+        mask_grid,
+        xg,
+        yg,
+        zg,
+        *,
+        threshold=0.5,
+        color="tab:green",
+        alpha=0.25,
+        label="Coverage volume",
+):
+    """
+    Plot an isosurface from a binary 3D mask.
+
+    mask_grid should be boolean or 0/1 float with shape matching:
+        XX, YY, ZZ = np.meshgrid(xg, yg, zg, indexing="xy")
+
+    So mask_grid.shape == XX.shape == (len(yg), len(xg), len(zg)).
+    """
+
+    mask = np.asarray(mask_grid, dtype=float)
+
+    if np.count_nonzero(mask) == 0:
+        return
+
+    if np.count_nonzero(mask) == mask.size:
+        print(f"{label}: mask fills entire grid; expand bounds to see boundary.")
+        return
+
+    dx = float(xg[1] - xg[0]) if len(xg) > 1 else 1.0
+    dy = float(yg[1] - yg[0]) if len(yg) > 1 else 1.0
+    dz = float(zg[1] - zg[0]) if len(zg) > 1 else 1.0
+
+    verts, faces, _, _ = marching_cubes(
+        mask,
+        level=float(threshold),
+        spacing=(dy, dx, dz),
+    )
+
+    # marching_cubes returns verts in array-index order: y, x, z
+    verts_xyz = np.column_stack([
+        verts[:, 1] + xg[0],
+        verts[:, 0] + yg[0],
+        verts[:, 2] + zg[0],
+    ])
+
+    mesh = Poly3DCollection(
+        verts_xyz[faces],
+        alpha=float(alpha),
+        facecolor=color,
+        edgecolor="none",
+    )
+
+    ax.add_collection3d(mesh)
+
+    # legend proxy
+    ax.plot([], [], [], color=color, alpha=float(alpha), lw=6, label=label)
+
+
+def inside_each_cone_3d(grid, agents_xyz, boresights_xyz, theta_h_rad, max_range):
+    G = np.asarray(grid, dtype=float)
+    A = np.asarray(agents_xyz, dtype=float)
+    U = _normalize_rows(np.asarray(boresights_xyz, dtype=float))
+
+    cos_th = np.cos(float(theta_h_rad))
+    inside = np.zeros((G.shape[0], A.shape[0]), dtype=bool)
+
+    for i in range(A.shape[0]):
+        r = G - A[i]
+        dist = np.linalg.norm(r, axis=1)
+
+        valid = (dist > 1e-12) & (dist <= float(max_range))
+
+        rhat = np.zeros_like(r)
+        rhat[valid] = r[valid] / dist[valid, None]
+
+        cosang = rhat @ U[i]
+        inside[:, i] = valid & (cosang >= cos_th)
+
+    return inside
+
+
+def plot_od_scenario_3d_new(
+        *,
+        t_label=None,
+
+        # agents
+        agents_xyz,
+        u_opt_agents_xyz,
+        theta_h_rad,
+        ray_length=10.0,
+
+        # current boresights
+        u_curr_agents_xyz=None,
+        boresight_line_len=3.0,
+
+        # optimizer initial boresights
+        u_init_agents_xyz=None,
+        init_boresight_line_len=None,
+
+        # short per-agent tracks/windows
+        agent_orbit_tracks_xyz=None,
+
+        # NEW: one shared/full spacecraft orbit curve, shape (K,3)
+        spacecraft_orbit_xyz=None,
+
+        # bounds
+        xlim=None,
+        ylim=None,
+        zlim=None,
+
+        # target uncertainty + truth
+        target_mean_xyz=None,
+        target_cov_xyz=None,
+        d_mahal=2.0,
+        true_target_xyz=None,
+
+        # trajectories
+        target_mean_traj_xyz=None,
+        true_target_traj_xyz=None,
+        true_target_traj_xyz_2=None,
+
+        # EMS sphere
+        ems_center_xyz=None,
+        ems_radius=None,
+
+        # main toggles
+        show_uncertainty=True,
+        show_truth=True,
+        show_ems=True,
+        show_fov_cones=True,
+        show_legend=True,
+
+        # trajectory toggles
+        show_target_mean_traj=True,
+        show_true_target_traj=True,
+        show_true_target_traj_2=True,
+
+        # boresight / label toggles
+        show_init_boresights=True,
+        show_current_boresights=True,
+        show_slew_angle_annotations=True,
+        show_agent_name_annotations=True,
+
+        # orbit toggles
+        show_agent_orbit_tracks=True,
+        show_spacecraft_orbit=True,
+        show_coverage=True,
+
+        Nx=60,
+        Ny=60,
+        Nz=40,
+
+        # coverage display
+        show_pair_coverage=True,
+        show_triple_coverage=True,
+        pair_only_exact=True,
+
+        pair_coverage_alpha=0.25,
+        triple_coverage_alpha=0.35,
+
+        # FOV styling
+        fov_style="surface",   # "surface", "wire", "both"
+        fov_surface_alpha=0.12,
+        fov_surface_color="lightskyblue",
+        fov_n_rays=8,
+        fov_n_circle=64,
+        fov_n_len=20,
+
+        # styling
+        title=None,
+        label_fontsize=9,
+        label_offset_px=10,
+        slew_label_offset_px=16,
+        fill_alpha=0.10,
+        sparse_wire=True,
+
+        init_boresight_lw=1.5,
+        init_boresight_alpha=0.95,
+
+        # slew history
+        slew_history=None,
+        slew_history_line_len=None,
+        slew_history_lw=1.8,
+        slew_history_alpha=0.85,
+        slew_history_cmap="viridis",
+        slew_history_every=1,
+        slew_history_colorbar=True,
+        slew_history_colorbar_label="Slew history step",
+        slew_history_norm_mode="per_agent",
+):
+    A = np.asarray(agents_xyz, dtype=float)
+    if A.ndim != 2 or A.shape[1] != 3:
+        raise ValueError("agents_xyz must be (M,3)")
+
+    M = A.shape[0]
+
+    Uopt = np.asarray(u_opt_agents_xyz, dtype=float).reshape(M, 3)
+    Uopt = _normalize_rows(Uopt)
+
+    if fov_style not in ("surface", "wire", "both"):
+        raise ValueError("fov_style must be 'surface', 'wire', or 'both'")
+
+    # ---- bounds ----
+    if (xlim is None) or (ylim is None) or (zlim is None):
+        bound_arrays = [
+            A,
+            target_mean_xyz,
+            true_target_xyz,
+            ems_center_xyz,
+            target_mean_traj_xyz,
+            true_target_traj_xyz,
+            true_target_traj_xyz_2,
+            spacecraft_orbit_xyz,
+        ]
+
+        if agent_orbit_tracks_xyz is not None:
+            bound_arrays.extend(agent_orbit_tracks_xyz)
+
+        xall, yall, zall = _collect_bounds(bound_arrays)
+
+        pad = 2.0
+        if xlim is None:
+            xlim = (float(np.min(xall) - pad), float(np.max(xall) + pad))
+        if ylim is None:
+            ylim = (float(np.min(yall) - pad), float(np.max(yall) + pad))
+        if zlim is None:
+            zlim = (float(np.min(zall) - pad), float(np.max(zall) + pad))
+
+    fig = plt.figure(figsize=(9, 7))
+    ax = fig.add_subplot(111, projection="3d")
+
+    if show_coverage:
+        if (target_mean_xyz is not None) and (target_cov_xyz is not None):
+            mu = np.asarray(target_mean_xyz, dtype=float).reshape(3, )
+            P = np.asarray(target_cov_xyz, dtype=float).reshape(3, 3)
+
+            w, V = np.linalg.eigh(P)
+            w = np.clip(w, 0.0, None)
+            Aell = (V * (np.sqrt(w) * float(d_mahal))) @ V.T
+            half = np.sum(np.abs(Aell), axis=1)
+
+            xlim_cov = (float(mu[0] - half[0]), float(mu[0] + half[0]))
+            ylim_cov = (float(mu[1] - half[1]), float(mu[1] + half[1]))
+            zlim_cov = (float(mu[2] - half[2]), float(mu[2] + half[2]))
+
+            xg = np.linspace(xlim_cov[0], xlim_cov[1], int(Nx))
+            yg = np.linspace(ylim_cov[0], ylim_cov[1], int(Ny))
+            zg = np.linspace(zlim_cov[0], zlim_cov[1], int(Nz))
+        else:
+            xg = np.linspace(xlim[0], xlim[1], int(Nx))
+            yg = np.linspace(ylim[0], ylim[1], int(Ny))
+            zg = np.linspace(zlim[0], zlim[1], int(Nz))
+
+        XX, YY, ZZ = np.meshgrid(xg, yg, zg, indexing="xy")
+        grid = np.stack([XX.ravel(), YY.ravel(), ZZ.ravel()], axis=1)
+
+        inside = inside_each_cone_3d(
+            grid,
+            A,
+            Uopt,
+            theta_h_rad,
+            max_range=ray_length,
+        )
+
+        coverage_count = np.sum(inside, axis=1)
+
+        pair_colors = [
+            "tab:green",
+            "tab:purple",
+            "tab:brown",
+            "tab:pink",
+            "tab:olive",
+            "tab:cyan",
+        ]
+
+        color_idx = 0
+
+        # exact double coverage, separated by spacecraft pair
+        for i in range(M):
+            for j in range(i + 1, M):
+                pair_mask_flat = inside[:, i] & inside[:, j] & (coverage_count == 2)
+
+                if not np.any(pair_mask_flat):
+                    continue
+
+                pair_mask_grid = pair_mask_flat.reshape(XX.shape)
+
+                plot_coverage_isosurface(
+                    ax,
+                    pair_mask_grid,
+                    xg,
+                    yg,
+                    zg,
+                    threshold=0.5,
+                    color=pair_colors[color_idx % len(pair_colors)],
+                    alpha=0.25,
+                    label=f"A{i}-A{j} exact double coverage",
+                )
+
+                color_idx += 1
+
+        # triple-or-more coverage, not assigned to pairs
+        triple_mask_flat = coverage_count >= 3
+
+        if np.any(triple_mask_flat):
+            triple_mask_grid = triple_mask_flat.reshape(XX.shape)
+
+            plot_coverage_isosurface(
+                ax,
+                triple_mask_grid,
+                xg,
+                yg,
+                zg,
+                threshold=0.5,
+                color="red",
+                alpha=0.35,
+                label="3+ coverage",
+            )
+
+    # ---- slew history ----
+    if slew_history is not None:
+        if isinstance(slew_history, dict):
+            hist_map = dict(slew_history)
+        else:
+            hist_map = {int(k): v for (k, v) in slew_history}
+
+        Lhist = float(boresight_line_len) if slew_history_line_len is None else float(slew_history_line_len)
+        cmap = cm.get_cmap(slew_history_cmap)
+
+        if slew_history_norm_mode not in ("per_agent", "global"):
+            raise ValueError("slew_history_norm_mode must be 'per_agent' or 'global'")
+
+        norm_global = None
+        if slew_history_norm_mode == "global":
+            maxK = 0
+            for _, Uh in hist_map.items():
+                Uh = np.asarray(Uh, dtype=float)
+                K = Uh.shape[0]
+                Kd = (K + max(int(slew_history_every), 1) - 1) // max(int(slew_history_every), 1)
+                maxK = max(maxK, Kd)
+            norm_global = mcolors.Normalize(vmin=0, vmax=max(0, maxK - 1))
+
+        for sc_id, Uh in hist_map.items():
+            sc_id = int(sc_id)
+            if not (0 <= sc_id < M):
+                continue
+
+            Uh = np.asarray(Uh, dtype=float)
+            if Uh.ndim != 2 or Uh.shape[1] != 3:
+                raise ValueError(f"slew_history[{sc_id}] must be (K,3)")
+
+            Uh = Uh[::max(int(slew_history_every), 1)]
+            if Uh.shape[0] == 0:
+                continue
+
+            Uh = _normalize_rows(Uh)
+
+            norm = (
+                mcolors.Normalize(vmin=0, vmax=max(0, Uh.shape[0] - 1))
+                if slew_history_norm_mode == "per_agent"
+                else norm_global
+            )
+
+            p0 = A[sc_id]
+            for k in range(Uh.shape[0]):
+                col = cmap(norm(k))
+                pend = p0 + Uh[k] * Lhist
+                ax.plot(
+                    [p0[0], pend[0]],
+                    [p0[1], pend[1]],
+                    [p0[2], pend[2]],
+                    color=col,
+                    lw=float(slew_history_lw),
+                    alpha=float(slew_history_alpha),
+                    label=f"Slew history A{sc_id}" if k == 0 else None,
+                )
+
+        if bool(slew_history_colorbar):
+            sm = cm.ScalarMappable(
+                norm=norm_global if slew_history_norm_mode == "global" else mcolors.Normalize(vmin=0, vmax=1),
+                cmap=cmap,
+            )
+            sm.set_array([])
+            cbar = fig.colorbar(sm, ax=ax, pad=0.02, fraction=0.04)
+            cbar.set_label(str(slew_history_colorbar_label))
+            if slew_history_norm_mode == "per_agent":
+                cbar.set_ticks([0.0, 1.0])
+                cbar.set_ticklabels(["early", "late"])
+
+    # ---- NEW: shared/full spacecraft orbit ----
+    if show_spacecraft_orbit and spacecraft_orbit_xyz is not None:
+        orb = np.asarray(spacecraft_orbit_xyz, dtype=float)
+        if orb.ndim != 2 or orb.shape[1] != 3:
+            raise ValueError("spacecraft_orbit_xyz must be (K,3)")
+
+        ax.plot(
+            orb[:, 0], orb[:, 1], orb[:, 2],
+            color="tab:blue",
+            linestyle="-.",
+            lw=1.4,
+            alpha=0.55,
+            label="Spacecraft orbit",
+        )
+
+    # ---- short per-agent orbit/track windows ----
+    if show_agent_orbit_tracks and agent_orbit_tracks_xyz is not None:
+        for i, trk in enumerate(agent_orbit_tracks_xyz):
+            if trk is None:
+                continue
+            trk = np.asarray(trk, dtype=float)
+            if trk.ndim != 2 or trk.shape[1] != 3:
+                raise ValueError(f"agent_orbit_tracks_xyz[{i}] must be (K,3)")
+
+            ax.plot(
+                trk[:, 0], trk[:, 1], trk[:, 2],
+                lw=1.2,
+                alpha=0.7,
+                color="blue",
+                label="Agent short track" if i == 0 else None,
+            )
+
+    # ---- target trajectories ----
+    if show_target_mean_traj and target_mean_traj_xyz is not None:
+        Tm = np.asarray(target_mean_traj_xyz, dtype=float)
+        if Tm.ndim != 2 or Tm.shape[1] != 3:
+            raise ValueError("target_mean_traj_xyz must be (K,3)")
+
+        ax.plot(
+            Tm[:, 0], Tm[:, 1], Tm[:, 2],
+            lw=1.6,
+            alpha=0.8,
+            color="tab:red",
+            label="IOD mean trajectory",
+        )
+
+    if show_true_target_traj and true_target_traj_xyz is not None:
+        Tt = np.asarray(true_target_traj_xyz, dtype=float)
+        if Tt.ndim != 2 or Tt.shape[1] != 3:
+            raise ValueError("true_target_traj_xyz must be (K,3)")
+
+        ax.plot(
+            Tt[:, 0], Tt[:, 1], Tt[:, 2],
+            lw=1.6,
+            alpha=0.8,
+            color="green",
+            linestyle=":",
+            label="True trajectory",
+        )
+
+    if show_true_target_traj_2 and true_target_traj_xyz_2 is not None:
+        Tt2 = np.asarray(true_target_traj_xyz_2, dtype=float)
+        if Tt2.ndim != 2 or Tt2.shape[1] != 3:
+            raise ValueError("true_target_traj_xyz_2 must be (K,3)")
+
+        ax.plot(
+            Tt2[:, 0], Tt2[:, 1], Tt2[:, 2],
+            lw=1.6,
+            alpha=0.8,
+            color="green",
+            linestyle="--",
+            label="True trajectory 2",
+        )
+
+    # ---- initial optimizer boresights ----
+    if show_init_boresights and u_init_agents_xyz is not None:
+        Ui = np.asarray(u_init_agents_xyz, dtype=float)
+        if Ui.shape != (M, 3):
+            raise ValueError("u_init_agents_xyz must be (M,3) matching agents")
+
+        Ui = _normalize_rows(Ui)
+        Linit = float(ray_length) if init_boresight_line_len is None else float(init_boresight_line_len)
+
+        for i in range(M):
+            p_end = A[i] + Ui[i] * Linit
+            ax.plot(
+                [A[i, 0], p_end[0]],
+                [A[i, 1], p_end[1]],
+                [A[i, 2], p_end[2]],
+                linestyle="-",
+                color="black",
+                lw=float(init_boresight_lw),
+                alpha=float(init_boresight_alpha),
+                label="Initial optimizer pointing" if i == 0 else None,
+            )
+
+    # ---- FOV cones + agents ----
+    if show_fov_cones:
+        for i in range(M):
+            if fov_style in ("surface", "both"):
+                plot_fov_cone_surface(
+                    ax,
+                    A[i],
+                    Uopt[i],
+                    theta_h_rad,
+                    float(ray_length),
+                    n_circle=int(fov_n_circle),
+                    n_len=int(fov_n_len),
+                    color=fov_surface_color,
+                    alpha=float(fov_surface_alpha),
+                    label="Agent FOV volume" if i == 0 else None,
+                )
+
+            if fov_style in ("wire", "both"):
+                plot_fov_cone(
+                    ax,
+                    A[i],
+                    Uopt[i],
+                    theta_h_rad,
+                    float(ray_length),
+                    n_rays=int(fov_n_rays),
+                    n_circle=int(fov_n_circle),
+                    alpha=0.75,
+                    lw=1.0,
+                    color="tab:blue",
+                    label="Agent FOV wire" if i == 0 else None,
+                )
+
+            ax.scatter(
+                A[i, 0], A[i, 1], A[i, 2],
+                s=40,
+                color="tab:blue",
+                label="Agent position" if i == 0 else None,
+            )
+
+    # ---- current boresights + slew angle labels ----
+    if show_current_boresights and u_curr_agents_xyz is not None:
+        Uc = np.asarray(u_curr_agents_xyz, dtype=float)
+        if Uc.shape != (M, 3):
+            raise ValueError("u_curr_agents_xyz must be (M,3) matching agents")
+
+        Uc = _normalize_rows(Uc)
+
+        for i in range(M):
+            p_end = A[i] + Uc[i] * float(boresight_line_len)
+
+            ax.plot(
+                [A[i, 0], p_end[0]],
+                [A[i, 1], p_end[1]],
+                [A[i, 2], p_end[2]],
+                linestyle=":",
+                color="black",
+                lw=1.2,
+                label="Current boresight" if i == 0 else None,
+            )
+
+            if show_slew_angle_annotations:
+                dot = float(np.clip(np.dot(Uc[i], Uopt[i]), -1.0, 1.0))
+                slew_deg = float(np.degrees(np.arccos(dot)))
+
+                dx = int(slew_label_offset_px * (1 if i % 2 == 0 else -1))
+                dy = int(slew_label_offset_px * (1 if (i // 2) % 2 == 0 else -1))
+
+                _annotate3d(
+                    ax,
+                    f"{slew_deg:.1f}°",
+                    p_end,
+                    dx=dx,
+                    dy=dy,
+                    fontsize=label_fontsize,
+                    color="black",
+                )
+
+    # ---- agent labels ----
+    if show_agent_name_annotations:
+        for i in range(M):
+            dx = int(label_offset_px * (1 if i % 2 == 0 else -1))
+            dy = int(label_offset_px * (1 if (i // 2) % 2 == 0 else -1))
+
+            _annotate3d(
+                ax,
+                f"A{i}",
+                A[i],
+                dx=dx,
+                dy=dy,
+                fontsize=label_fontsize,
+                color="tab:blue",
+            )
+
+    # ---- uncertainty ellipsoid ----
+    if show_uncertainty and target_mean_xyz is not None and target_cov_xyz is not None:
+        mu = np.asarray(target_mean_xyz, dtype=float).reshape(3,)
+        P = np.asarray(target_cov_xyz, dtype=float).reshape(3, 3)
+
+        ax.scatter(
+            mu[0], mu[1], mu[2],
+            marker="x",
+            s=50,
+            linewidths=2,
+            label="Target mean",
+            color="tab:red",
+        )
+
+        Aell = _ellipsoid_surface(
+            ax,
+            mu,
+            P,
+            float(d_mahal),
+            alpha=float(fill_alpha),
+            color="tab:red",
+        )
+
+        if sparse_wire:
+            _plot_three_principal_ellipses(
+                ax,
+                mu,
+                Aell,
+                color="tab:red",
+                lw=1.1,
+                alpha=0.65,
+                label="Uncertainty wires",
+            )
+
+    # ---- true current marker ----
+    if show_truth and true_target_xyz is not None:
+        tr = np.asarray(true_target_xyz, dtype=float).reshape(3,)
+
+        ax.scatter(
+            tr[0], tr[1], tr[2],
+            s=40,
+            color="green",
+            marker="o",
+            label="True position",
+        )
+
+    # ---- EMS sphere ----
+    if show_ems and ems_center_xyz is not None and ems_radius is not None and float(ems_radius) > 0:
+        c = np.asarray(ems_center_xyz, dtype=float).reshape(3,)
+        R = float(ems_radius)
+
+        _sphere_surface(
+            ax,
+            c,
+            R,
+            alpha=float(fill_alpha),
+            n_u=26,
+            n_v=13,
+            color="orange",
+        )
+
+        if sparse_wire:
+            A_sphere = np.eye(3) * R
+            _plot_three_principal_ellipses(
+                ax,
+                c,
+                A_sphere,
+                color="orange",
+                lw=1.1,
+                alpha=0.65,
+                label="EMS wires",
+            )
+
+    # ---- axes ----
+    ax.set_xlim(xlim)
+    ax.set_ylim(ylim)
+    ax.set_zlim(zlim)
+
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_zlabel("z")
+
+    if title is None:
+        title = f"Scenario @ {t_label}" if t_label is not None else "Scenario (3D)"
+    ax.set_title(title)
+
+    ax.grid(alpha=0.25)
+
+    set_axes_equal_3d(ax)
+
+    if show_legend:
+        ax.legend(loc="upper right")
+
+    return fig, ax
 
 
 def plot_od_scenario_3d(

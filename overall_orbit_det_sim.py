@@ -2277,7 +2277,7 @@ def run_OD(config):
                             ids = list(range(config['num_spacecraft']))
                         slew_history = build_slew_history_from_opt_series(res_kcoverage.extra["history"], ids)
 
-                        fig, ax = util.plot_od_scenario_3d_new(
+                        fig, ax = util.plot_od_scenario_3d_old(
                             t_label=best_epoch,
                             agents_xyz=agents_xyz,
                             u_opt_agents_xyz=sc_pointing_eme_cartesian,
@@ -3042,11 +3042,11 @@ def run_OD(config):
                             boresight_line_len=ray_length * 0.1,
                             u_init_agents_xyz=None,
                             init_boresight_line_len=ray_length * 1.5,
+                            agent_orbit_tracks_xyz=[sc_eme_states_kms_piecewise[:, i, :3] for i in
+                                                    range(config['num_spacecraft'])],
+                            spacecraft_orbit_xyz=None,
                             xlim=config['three_d_prop']['xlim'], ylim=config['three_d_prop']['ylim'],
                             zlim=config['three_d_prop']['zlim'],
-                            Nx=config['three_d_prop']['Nx'], Ny=config['three_d_prop']['Ny'],
-                            Nz=config['three_d_prop']['Nz'],
-                            max_points_for_scatter=config['three_d_prop']['max_points'] - 790000,
                             target_mean_xyz=ast_iod_eme[:3],
                             target_cov_xyz=target_cov_xyz,
                             d_mahal=config['d_mahal'],
@@ -3056,15 +3056,63 @@ def run_OD(config):
                             true_target_traj_xyz_2=ast_truth_original_eme[:, :3],
                             ems_center_xyz=ems_center_xyz,
                             ems_radius=ems_radius,
-                            show_coverage=True,
                             show_uncertainty=True,
-                            show_truth=True,
+                            show_truth=True,  # green circle
                             show_ems=True,
                             show_fov_cones=True,
-                            title="3D OD Scenario Demo (EME)",
+                            show_legend=True,
+                            show_target_mean_traj=True,
+                            show_true_target_traj=True,
+                            show_true_target_traj_2=False,
+                            show_init_boresights=False,
+                            show_current_boresights=False,
+                            show_slew_angle_annotations=False,
+                            show_agent_name_annotations=True,
+                            show_agent_orbit_tracks=True,
+                            show_spacecraft_orbit=False,
+                            show_coverage=True,
+
+                            Nx=60,
+                            Ny=60,
+                            Nz=40,
+
+                            # coverage display
+                            show_pair_coverage=True,
+                            show_triple_coverage=True,
+                            pair_only_exact=True,
+
+                            pair_coverage_alpha=0.25,
+                            triple_coverage_alpha=0.35,
+
+                            # FOV styling
+                            fov_style="surface",  # "surface", "wire", "both"
+                            fov_surface_alpha=0.12,
+                            fov_surface_color="lightskyblue",
+                            fov_n_rays=2,
+                            fov_n_circle=64,
+                            fov_n_len=20,
+
+                            # styling
+                            title=None,
+                            label_fontsize=9,
+                            label_offset_px=10,
+                            slew_label_offset_px=16,
+                            fill_alpha=0.10,
+                            sparse_wire=True,
+
+                            init_boresight_lw=1.5,
+                            init_boresight_alpha=0.95,
+
+                            # slew history
                             slew_history=None,
-                            slew_history_line_len=ray_length,
-                            agent_orbit_tracks_xyz=[sc_eme_states_kms_piecewise[:, i, :3] for i in range(config['num_spacecraft'])]
+                            slew_history_line_len=None,
+                            slew_history_lw=1.8,
+                            slew_history_alpha=0.85,
+                            slew_history_cmap="viridis",
+                            slew_history_every=1,
+                            slew_history_colorbar=True,
+                            slew_history_colorbar_label="Slew history step",
+                            slew_history_norm_mode="per_agent",
                         )
 
                         cost_func_plots = False
