@@ -5,7 +5,7 @@ from Asteroid import Asteroid
 from Formation import Formation
 import numpy as np
 import mpi4py.rc
-from od_spkf import OD_UKF, od_setup_from_iod, process_tracklet_until_update_with_prior_epoch
+from od_spkf_adaptiveR_Pinjection import OD_UKF, od_setup_from_iod, process_tracklet_until_update_with_prior_epoch
 from time_tracker import SimTime
 import copy
 mpi4py.rc.threads = False
@@ -1809,6 +1809,7 @@ def run_OD(config_global):
             beta = config['beta_ukf']
             kappa = config['kappa_ukf']
             epsilon = config['epsilon_ukf']
+            adaptive_R_config = config['adaptive_R']
 
             # ---------------------------------------------
             # build objects
@@ -1823,7 +1824,12 @@ def run_OD(config_global):
                 sigma_ra=ra_noise,
                 sigma_dec=dec_noise,
                 sigma_pointing=pointing_noise,
-                sigma_meas=meas_noise,
+                sigma_meas=None,  # do not use unless you want to artificially inflate R
+                adaptive_R_window=adaptive_R_config['window'],
+                adaptive_R_min_samples=adaptive_R_config['min_samples'],
+                adaptive_R_psd_floor=adaptive_R_config['psd_floor'],
+                sigma_rho_single_obs_km=adaptive_R_config['single_obs_rho'],
+                sigma_rhodot_single_obs_km_s=adaptive_R_config['single_obs_rhodot'],
                 ukf_alpha=alpha,
                 ukf_beta=beta,
                 ukf_kappa=kappa,
@@ -3021,6 +3027,28 @@ def run_OD(config_global):
 
                         agents_xyz = sc_eme_ae_kms
                         target_cov_xyz = P_cart_eme
+
+                        def range_sigma_from_cov(P_eci, r_obj, r_obs):
+                            """
+                            P_eci : 6x6 or 3x3 covariance in inertial frame
+                            r_obj : object inertial position, shape (3,)
+                            r_obs : observer inertial position, shape (3,)
+
+                            Returns range standard deviation and variance.
+                            """
+                            P_r = P_eci[:3, :3] if P_eci.shape == (6, 6) else P_eci
+
+                            rho_vec = np.asarray(r_obj) - np.asarray(r_obs)
+                            rho_hat = rho_vec / np.linalg.norm(rho_vec)
+
+                            var_rho = rho_hat @ P_r @ rho_hat
+                            sigma_rho = np.sqrt(max(var_rho, 0.0))
+
+                            return sigma_rho, var_rho
+
+                        sigma_rho, var_rho = range_sigma_from_cov(P_cart_eme, ast_iod_eme[:3],
+                                                                  agents_xyz[formation.currently_detecting[0]])
+                        print(sigma_rho, var_rho)
 
                         def build_slew_history_from_opt_series(opt_series, ids, *, key_u="u", normalize=True):
                             ids = [int(i) for i in ids]
