@@ -20,7 +20,7 @@ import gc
 import glob
 import datetime as dt
 import matplotlib.pyplot as plt
-from od_attcoord_edited import AttitudeCoordinator, compute_J_grid_theta_phi_single_free
+from od_attcoord_coverage_mode_v2 import AttitudeCoordinator, compute_J_grid_theta_phi_single_free
 import math
 import time
 from datetime import datetime
@@ -3141,7 +3141,7 @@ def run_OD(config_global):
                             slew_history_norm_mode="per_agent",
                         )
 
-                        cost_func_plots = False
+                        cost_func_plots = True
                         if cost_func_plots:
                             util.plot_attcoord_costs_from_series(
                                 result_kcoverage_series,
