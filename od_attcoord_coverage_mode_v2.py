@@ -13,7 +13,7 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from typing import Dict, Any, Tuple, Optional, List
 from dataclasses import dataclass
-
+import utilities as util
 
 
 # -----------------------------
@@ -589,7 +589,7 @@ def objective_joint(x, p_hat, P_p, p_agents, u_curr_agents,
     return obj
 
 
-def init_theta_phi_boundary_projection(
+def init_theta_phi_boundary_projection_old(
     p_hat,
     P_p,
     p_agents,
@@ -931,6 +931,682 @@ def init_theta_phi_boundary_projection(
     return x0
 
 
+def init_theta_phi_boundary_projection(
+    p_hat,
+    P_p,
+    p_agents,
+    u_curr_agents,
+    theta_lower,
+    theta_upper,
+    theta_h,
+    d_M,
+    kappa_sigma,
+    lambda_k1,
+    y_cached,
+    p_em,
+    R_em,
+    alpha_s,
+    seed,
+    jitter,
+    eps=1e-10,
+    n_boundary_candidates=2,
+    coverage_mode="exact2_plus_k1",
+    *,
+    detecting_idx=None,
+    detecting_u=None,
+    detecting_mode="mean",
+    n_uncertainty_candidates=64,
+    n_los_candidates=64,
+    return_log=False,
+):
+    """
+    Sequential warm-start initializer.
+
+    Logic:
+      0. Assign detecting spacecraft first, if detecting_idx is given.
+      1. For each unassigned spacecraft, try pointing at mean.
+      2. For remaining spacecraft, try uncertainty candidates near mean first.
+      3. For remaining spacecraft, try points along detecting spacecraft LOS.
+      4. For remaining spacecraft, generate EMS-boundary candidates and choose
+         the best J_t combination.
+
+    If return_log=True, returns:
+        x0, candidate_log
+
+    Otherwise returns:
+        x0
+    """
+
+    rng = np.random.default_rng(seed=seed)
+    jitter_values = np.deg2rad(jitter)
+
+    p_hat = np.asarray(p_hat, dtype=float).reshape(3,)
+    P_p = np.asarray(P_p, dtype=float).reshape(3, 3)
+    p_agents = np.asarray(p_agents, dtype=float)
+    u_curr_agents = np.asarray(u_curr_agents, dtype=float)
+    theta_lower = np.asarray(theta_lower, dtype=float)
+    theta_upper = np.asarray(theta_upper, dtype=float)
+
+    M = p_agents.shape[0]
+    x0 = np.zeros(2 * M, dtype=float)
+    n_mc = y_cached.shape[0]
+    candidate_log = []
+
+    try:
+        P_inv = np.linalg.inv(P_p)
+    except np.linalg.LinAlgError:
+        P_inv = np.linalg.pinv(P_p)
+
+    def _unit(v):
+        v = np.asarray(v, dtype=float)
+        n = float(np.linalg.norm(v))
+        if n < eps:
+            return None
+        return v / n
+
+    def _finish():
+        for ii in range(M):
+            x0[2 * ii] = theta_init[ii]
+            x0[2 * ii + 1] = phi_init[ii] % (2 * np.pi)
+        if return_log:
+            return x0, candidate_log
+        return x0
+
+    def keepout_safe_single_local(p_i, u_i):
+        if p_em is None or float(R_em) <= 0.0:
+            return True
+
+        r_vec = p_em - p_i
+        r_norm = np.linalg.norm(r_vec)
+        if r_norm < R_em + eps:
+            return False
+
+        v_em = r_vec / r_norm
+        gamma = np.arccos(np.clip(np.dot(u_i, v_em), -1.0, 1.0))
+        alpha_em = np.arcsin(np.clip(R_em / r_norm, -1.0, 1.0))
+
+        return gamma >= (theta_h + alpha_em + alpha_s)
+
+    def u_to_theta_phi(u_des, u_curr, e1, e2):
+        u_des = _unit(u_des)
+        if u_des is None:
+            return None, None
+
+        a = float(np.dot(u_des, u_curr))
+        b1 = float(np.dot(u_des, e1))
+        b2 = float(np.dot(u_des, e2))
+        s = float(np.sqrt(b1*b1 + b2*b2))
+
+        theta = float(np.arctan2(s, a))
+        phi = float(np.arctan2(b2, b1)) % (2*np.pi)
+
+        return theta, phi
+
+    def theta_phi_to_u(theta, phi, u_curr, e1, e2):
+        phi = float(phi) % (2*np.pi)
+        u = (
+            np.cos(theta) * u_curr
+            + np.sin(theta) * (np.cos(phi) * e1 + np.sin(phi) * e2)
+        )
+        return u / max(np.linalg.norm(u), eps)
+
+    def ray_intersects_ellipsoid(p0, u, mu, P_inv, d):
+        u = _unit(u)
+        if u is None:
+            return False
+
+        w = p0 - mu
+
+        a = float(u.T @ P_inv @ u)
+        b = float(2.0 * (u.T @ P_inv @ w))
+        c = float(w.T @ P_inv @ w - d**2)
+
+        if abs(a) < eps:
+            if abs(b) < eps:
+                return False
+            t = -c / b
+            return t >= 0.0
+
+        disc = b*b - 4.0*a*c
+        if disc < 0.0:
+            return False
+
+        sdisc = float(np.sqrt(max(disc, 0.0)))
+        t1 = (-b - sdisc) / (2.0*a)
+        t2 = (-b + sdisc) / (2.0*a)
+
+        return (t1 >= 0.0) or (t2 >= 0.0)
+
+    def try_point_to_point(i, p_target, stage, log_candidate=True):
+        p_i = p_agents[i]
+        u_curr = u_curr_norm[i]
+        e1 = e1_list[i]
+        e2 = e2_list[i]
+
+        u_des = _unit(p_target - p_i)
+        if u_des is None:
+            return False, None, None, None
+
+        theta, phi = u_to_theta_phi(u_des, u_curr, e1, e2)
+        if theta is None:
+            return False, None, None, None
+
+        slew_ok = (
+            theta >= theta_lower[i] - 1e-12
+            and theta <= theta_upper[i] + 1e-12
+        )
+
+        if not slew_ok:
+            if log_candidate:
+                candidate_log.append({
+                    "stage": stage,
+                    "sc_idx": int(i),
+                    "p_target": np.asarray(p_target, dtype=float).copy(),
+                    "u": u_des.copy(),
+                    "accepted": False,
+                    "reason": "slew_infeasible",
+                })
+            return False, None, None, None
+
+        theta = float(np.clip(theta, theta_lower[i], theta_upper[i]))
+        u_i = theta_phi_to_u(theta, phi, u_curr, e1, e2)
+
+        ems_ok = keepout_safe_single_local(p_i, u_i)
+
+        if log_candidate:
+            candidate_log.append({
+                "stage": stage,
+                "sc_idx": int(i),
+                "p_target": np.asarray(p_target, dtype=float).copy(),
+                "u": u_i.copy(),
+                "accepted": False,
+                "reason": "ems_infeasible" if not ems_ok else "candidate",
+            })
+
+        if not ems_ok:
+            return False, None, None, None
+
+        return True, u_i, theta, phi
+
+    def accept_candidate(i, u_i, theta_i, phi_i, stage):
+        u_init[i] = u_i
+        theta_init[i] = theta_i
+        phi_init[i] = phi_i
+        assigned[i] = True
+
+        # Mark latest matching candidate as accepted.
+        for kk in range(len(candidate_log) - 1, -1, -1):
+            row = candidate_log[kk]
+            if row.get("sc_idx") == int(i) and row.get("stage") == stage:
+                row["accepted"] = True
+                row["reason"] = "accepted"
+                break
+
+    def detector_boresight_projected_candidates(
+            p_hat, P_p, p_det, u_det, theta_h, d_M,
+            n_candidates=64,
+            n_shell=1200,
+            seed=0,
+            eps=1e-12,
+    ):
+        rng = np.random.default_rng(seed)
+
+        u_det = np.asarray(u_det, dtype=float).reshape(3, )
+        u_det = u_det / max(np.linalg.norm(u_det), eps)
+
+        Lp = np.linalg.cholesky(P_p)
+
+        dirs = rng.normal(size=(n_shell, 3))
+        dirs /= np.maximum(np.linalg.norm(dirs, axis=1, keepdims=True), eps)
+
+        # shell points are enough to estimate the far projected endpoint
+        p_shell = p_hat[None, :] + (Lp @ (d_M * dirs).T).T
+
+        r = p_shell - p_det[None, :]
+        r_norm = np.linalg.norm(r, axis=1, keepdims=True)
+        r_unit = r / np.maximum(r_norm, eps)
+
+        # only consider ellipsoid boundary points visible inside detecting FOV
+        visible = (r_unit @ u_det) >= np.cos(theta_h)
+
+        if not np.any(visible):
+            return np.empty((0, 3))
+
+        s_vals_shell = (p_shell[visible] - p_det[None, :]) @ u_det
+        s_vals_shell = s_vals_shell[s_vals_shell >= 0.0]
+
+        if s_vals_shell.size == 0:
+            return np.empty((0, 3))
+
+        s_max = float(np.max(s_vals_shell))
+
+        # candidates evenly along detector boresight from detector to projected far endpoint
+        s_raw = np.linspace(0.0, s_max, int(max(2, n_candidates)))
+        p_candidates = p_det[None, :] + s_raw[:, None] * u_det[None, :]
+
+        # choose closest to mean first
+        order = np.argsort(np.linalg.norm(p_candidates - p_hat[None, :], axis=1))
+        return p_candidates[order]
+    # --------------------------------------------------
+    # Precompute local bases
+    # --------------------------------------------------
+    u_curr_norm = np.zeros_like(u_curr_agents, dtype=float)
+    e1_list = np.zeros_like(u_curr_agents, dtype=float)
+    e2_list = np.zeros_like(u_curr_agents, dtype=float)
+
+    for i in range(M):
+        u_curr = _unit(u_curr_agents[i])
+        if u_curr is None:
+            u_curr = np.array([0.0, 0.0, 1.0], dtype=float)
+
+        u_curr_norm[i] = u_curr
+        e1, e2 = orthonormal_basis_from_u(u_curr)
+        e1_list[i] = e1
+        e2_list[i] = e2
+
+    u_init = np.zeros_like(u_curr_agents, dtype=float)
+    theta_init = np.zeros(M, dtype=float)
+    phi_init = np.zeros(M, dtype=float)
+    assigned = np.zeros(M, dtype=bool)
+
+    # --------------------------------------------------
+    # Step 0: assign detecting spacecraft
+    # --------------------------------------------------
+    if detecting_idx is not None:
+        detecting_idx = int(detecting_idx)
+
+        if not (0 <= detecting_idx < M):
+            raise ValueError(f"detecting_idx out of range: {detecting_idx} for M={M}")
+
+        if detecting_u is not None:
+            u_det_cmd = _unit(np.asarray(detecting_u, dtype=float).reshape(3,))
+        elif detecting_mode == "current":
+            u_det_cmd = u_curr_norm[detecting_idx]
+        else:
+            u_det_cmd = _unit(p_hat - p_agents[detecting_idx])
+
+        if u_det_cmd is None:
+            u_det_cmd = u_curr_norm[detecting_idx]
+
+        theta, phi = u_to_theta_phi(
+            u_det_cmd,
+            u_curr_norm[detecting_idx],
+            e1_list[detecting_idx],
+            e2_list[detecting_idx],
+        )
+
+        if theta is None:
+            theta = 0.0
+            phi = 0.0
+
+        theta = float(np.clip(theta, theta_lower[detecting_idx], theta_upper[detecting_idx]))
+        u_det_cmd = theta_phi_to_u(
+            theta,
+            phi,
+            u_curr_norm[detecting_idx],
+            e1_list[detecting_idx],
+            e2_list[detecting_idx],
+        )
+
+        u_init[detecting_idx] = u_det_cmd
+        theta_init[detecting_idx] = theta
+        phi_init[detecting_idx] = phi
+        assigned[detecting_idx] = True
+
+        candidate_log.append({
+            "stage": "detector",
+            "sc_idx": int(detecting_idx),
+            "p_target": p_hat.copy(),
+            "u": u_det_cmd.copy(),
+            "accepted": True,
+            "reason": "detecting_spacecraft_assigned",
+        })
+
+    # --------------------------------------------------
+    # Step 1: mean candidate
+    # --------------------------------------------------
+    for i in range(M):
+        if assigned[i]:
+            continue
+
+        ok, u_i, theta_i, phi_i = try_point_to_point(i, p_hat, stage="mean")
+
+        if ok:
+            jitter_i = float(rng.choice(jitter_values))
+            theta_j = float(np.clip(theta_i + jitter_i, theta_lower[i], theta_upper[i]))
+            u_j = theta_phi_to_u(theta_j, phi_i, u_curr_norm[i], e1_list[i], e2_list[i])
+
+            if keepout_safe_single_local(p_agents[i], u_j):
+                theta_i = theta_j
+                u_i = u_j
+
+            accept_candidate(i, u_i, theta_i, phi_i, stage="mean")
+
+    if np.all(assigned):
+        return _finish()
+
+    # --------------------------------------------------
+    # Step 2: uncertainty candidates near mean first
+    # --------------------------------------------------
+    try:
+        Lp = np.linalg.cholesky(P_p)
+    except np.linalg.LinAlgError:
+        Lp = np.linalg.cholesky(P_p + 1e-12 * np.eye(3))
+
+    rng_unc = np.random.default_rng(seed + 456)
+
+    n_unc = int(max(1, n_uncertainty_candidates))
+    y_unc = sample_uniform_ball(n_unc, radius=d_M, dim=3, rng=rng_unc)
+    y_unc = np.vstack([np.zeros((1, 3)), y_unc])
+
+    p_unc = (Lp @ y_unc.T).T + p_hat[None, :]
+    dist_unc = np.linalg.norm(p_unc - p_hat[None, :], axis=1)
+    p_unc = p_unc[np.argsort(dist_unc)]
+
+    for i in range(M):
+        if assigned[i]:
+            continue
+
+        best = None
+        best_dist = np.inf
+
+        for p_cand in p_unc:
+            ok, u_i, theta_i, phi_i = try_point_to_point(
+                i,
+                p_cand,
+                stage="uncertainty",
+                log_candidate=True,
+            )
+
+            if not ok:
+                continue
+
+            if not ray_intersects_ellipsoid(p_agents[i], u_i, p_hat, P_inv, d_M):
+                candidate_log[-1]["reason"] = "ray_misses_ellipsoid"
+                continue
+
+            dmean = float(np.linalg.norm(p_cand - p_hat))
+
+            if dmean < best_dist:
+                best = (u_i, theta_i, phi_i)
+                best_dist = dmean
+
+        if best is not None:
+            u_i, theta_i, phi_i = best
+            accept_candidate(i, u_i, theta_i, phi_i, stage="uncertainty")
+
+    if np.all(assigned):
+        return _finish()
+
+    # --------------------------------------------------
+    # Step 3: detecting spacecraft LOS candidates
+    # --------------------------------------------------
+    if detecting_idx is not None:
+        p_det = p_agents[detecting_idx]
+
+        if detecting_u is not None:
+            u_det = _unit(np.asarray(detecting_u, dtype=float).reshape(3, ))
+        else:
+            u_det = _unit(p_hat - p_det)
+
+        if u_det is not None:
+            if np.dot(u_det, p_hat - p_det) < 0.0:
+                u_det = -u_det
+
+            p_los_candidates = detector_boresight_projected_candidates(
+                p_hat,
+                P_p,
+                p_det,
+                u_det,
+                theta_h,
+                d_M,
+                n_candidates=n_los_candidates,
+                n_shell=max(4 * n_los_candidates, 1200),
+                seed=seed + 789,
+            )
+
+            for i in range(M):
+                if assigned[i]:
+                    continue
+
+                best = None
+                best_dist = np.inf
+
+                for p_los in p_los_candidates:
+                    ok, u_i, theta_i, phi_i = try_point_to_point(
+                        i,
+                        p_los,
+                        stage="los",
+                        log_candidate=True,
+                    )
+
+                    if not ok:
+                        continue
+
+                    dmean = float(np.linalg.norm(p_los - p_hat))
+
+                    if dmean < best_dist:
+                        best = (u_i, theta_i, phi_i)
+                        best_dist = dmean
+
+                if best is not None:
+                    u_i, theta_i, phi_i = best
+                    accept_candidate(i, u_i, theta_i, phi_i, stage="los")
+
+    if np.all(assigned):
+        return _finish()
+
+    # --------------------------------------------------
+    # Step 4: EMS boundary fallback for remaining spacecraft
+    # --------------------------------------------------
+    candidate_u_list = []
+    N = int(max(1, n_boundary_candidates))
+
+    for i in range(M):
+        if assigned[i]:
+            candidate_u_list.append([u_init[i]])
+            continue
+
+        p_i = p_agents[i]
+        u_curr = u_curr_norm[i]
+
+        u_i_star = _unit(p_hat - p_i)
+        if u_i_star is None:
+            u_i_star = u_curr
+
+        # If no EMS is active, keep mean/current fallback.
+        if p_em is None or float(R_em) <= 0.0:
+            candidate_u_list.append([u_i_star])
+            candidate_log.append({
+                "stage": "fallback",
+                "sc_idx": int(i),
+                "p_target": p_hat.copy(),
+                "u": u_i_star.copy(),
+                "accepted": False,
+                "reason": "no_ems_active",
+            })
+            continue
+
+        r_vec = p_em - p_i
+        r_norm = np.linalg.norm(r_vec)
+
+        if r_norm < R_em + eps:
+            candidate_u_list.append([u_i_star])
+            continue
+
+        v_em = r_vec / r_norm
+        alpha_em = np.arcsin(np.clip(R_em / r_norm, -1.0, 1.0))
+        gamma_bound = float(theta_h + alpha_em + alpha_s)
+
+        if gamma_bound >= np.pi - 1e-6:
+            candidate_u_list.append([u_i_star])
+            continue
+
+        if keepout_safe_single_local(p_i, u_i_star):
+            candidate_u_list.append([u_i_star])
+            candidate_log.append({
+                "stage": "fallback",
+                "sc_idx": int(i),
+                "p_target": p_hat.copy(),
+                "u": u_i_star.copy(),
+                "accepted": False,
+                "reason": "mean_safe_in_fallback",
+            })
+            continue
+
+        cos_gb = float(np.cos(gamma_bound))
+        sin_gb = float(np.sin(gamma_bound))
+
+        e1_em, e2_em = orthonormal_basis_from_u(v_em)
+
+        cproj = float(np.dot(u_i_star, v_em))
+        v_perp = u_i_star - cproj * v_em
+        n_perp = float(np.linalg.norm(v_perp))
+
+        if n_perp < eps:
+            psi0 = 0.0
+        else:
+            v_perp_hat = v_perp / n_perp
+            psi0 = float(
+                np.arctan2(
+                    np.dot(v_perp_hat, e2_em),
+                    np.dot(v_perp_hat, e1_em),
+                )
+            )
+
+        all_dirs = []
+
+        for k in range(N):
+            psi = psi0 + 2.0 * np.pi * (k / N)
+            u_b = (
+                cos_gb * v_em
+                + sin_gb * (np.cos(psi) * e1_em + np.sin(psi) * e2_em)
+            )
+            u_b = u_b / max(np.linalg.norm(u_b), eps)
+
+            theta_b, phi_b = u_to_theta_phi(
+                u_b,
+                u_curr_norm[i],
+                e1_list[i],
+                e2_list[i],
+            )
+
+            if theta_b is None:
+                continue
+
+            if theta_b < theta_lower[i] - 1e-6 or theta_b > theta_upper[i] + 1e-6:
+                candidate_log.append({
+                    "stage": "ems",
+                    "sc_idx": int(i),
+                    "p_target": p_i + u_b,
+                    "u": u_b.copy(),
+                    "accepted": False,
+                    "reason": "slew_infeasible",
+                })
+                continue
+
+            all_dirs.append(u_b)
+
+            candidate_log.append({
+                "stage": "ems",
+                "sc_idx": int(i),
+                "p_target": p_i + u_b,
+                "u": u_b.copy(),
+                "accepted": False,
+                "reason": "candidate",
+            })
+
+        if len(all_dirs) == 0:
+            candidate_u_list.append([u_i_star])
+            continue
+
+        hit_dirs = []
+        for u_b in all_dirs:
+            if ray_intersects_ellipsoid(p_i, u_b, p_hat, P_inv, d_M):
+                hit_dirs.append(u_b)
+
+        candidate_u_list.append(hit_dirs if len(hit_dirs) > 0 else all_dirs)
+
+    # --------------------------------------------------
+    # Evaluate remaining combinations with J_t
+    # --------------------------------------------------
+    best_J = -np.inf
+    best_u = None
+
+    index_ranges = [range(len(candidate_u_list[i])) for i in range(M)]
+
+    for choice in itertools.product(*index_ranges):
+        u_trial = np.zeros_like(u_curr_agents, dtype=float)
+
+        for i, idx in enumerate(choice):
+            u_trial[i] = candidate_u_list[i][idx]
+
+        J_val = J_t_dual_coverage(
+            p_hat,
+            P_p,
+            p_agents,
+            u_trial,
+            theta_h,
+            d_M=d_M,
+            kappa_sigma=kappa_sigma,
+            lambda_k1=lambda_k1,
+            n_mc=n_mc,
+            y_samples_cached=y_cached,
+            coverage_mode=coverage_mode,
+        )
+
+        if J_val > best_J:
+            best_J = float(J_val)
+            best_u = u_trial.copy()
+
+    if best_u is None:
+        best_u = np.zeros_like(u_curr_agents)
+
+        for i in range(M):
+            if assigned[i]:
+                best_u[i] = u_init[i]
+            else:
+                ok, u_i, _, _ = try_point_to_point(
+                    i,
+                    p_hat,
+                    stage="fallback",
+                    log_candidate=True,
+                )
+                best_u[i] = u_i if ok else u_curr_norm[i]
+
+    # --------------------------------------------------
+    # Convert best_u to x0
+    # --------------------------------------------------
+    for i in range(M):
+        theta_i, phi_i = u_to_theta_phi(
+            best_u[i],
+            u_curr_norm[i],
+            e1_list[i],
+            e2_list[i],
+        )
+
+        if theta_i is None:
+            theta_i = 0.0
+            phi_i = 0.0
+
+        theta_i = float(np.clip(theta_i, theta_lower[i], theta_upper[i]))
+
+        jitter_i = float(rng.choice(jitter_values))
+        theta_j = float(np.clip(theta_i + jitter_i, theta_lower[i], theta_upper[i]))
+        u_j = theta_phi_to_u(theta_j, phi_i, u_curr_norm[i], e1_list[i], e2_list[i])
+
+        if keepout_safe_single_local(p_agents[i], u_j):
+            theta_i = theta_j
+
+        x0[2*i] = theta_i
+        x0[2*i + 1] = phi_i % (2*np.pi)
+
+
+
+    if return_log:
+        return x0, candidate_log
+    return x0
+
 
 def estimate_theta_bounds_from_ellipsoid(p_hat, P_p, p_agents, u_curr_agents,
                                          d_M, n_shell=400, seed=12345):
@@ -1169,12 +1845,30 @@ def optimize_pointing_lbfgs_joint(
     best_cost = np.inf
 
     # Initialize a sensible start (full), then slice if using fixed agent
-    x0_full = init_theta_phi_boundary_projection(
+    x0_full, candidate_log = init_theta_phi_boundary_projection(
         p_hat, P_p, p_agents, u_curr_agents,
         theta_lower, theta_upper, theta_h,
         d_M, kappa_sigma, lambda_k1, y_cached, p_em,
         R_em, alpha_s, seed, jitter, n_boundary_candidates=num_candidates,
-        coverage_mode=coverage_mode
+        coverage_mode=coverage_mode, detecting_idx=idx_fix, detecting_u=u_fix, detecting_mode='current',
+        n_uncertainty_candidates=num_candidates, n_los_candidates=num_candidates, return_log=True
+    )
+
+    debug_ini_flag = False
+    if debug_ini_flag:
+        util.plot_init_candidate_geometry(
+        p_hat,
+        P_p,
+        p_agents,
+        u_curr_agents,
+        theta_h,
+        d_M,
+        p_em=p_em,
+        R_em=R_em,
+        detecting_idx=idx_fix,
+        detecting_u=u_fix,
+        candidate_log=candidate_log,
+        show=False,
     )
 
     if not use_fixed:

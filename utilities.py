@@ -9064,3 +9064,328 @@ def plot_od_trajectory_with_measurements_2d(
     return fig, ax
 
 
+def plot_init_candidate_geometry(
+    p_hat,
+    P_p,
+    p_agents,
+    u_curr_agents,
+    theta_h,
+    d_M,
+    *,
+    p_em=None,
+    R_em=0.0,
+    detecting_idx=None,
+    detecting_u=None,
+    candidate_log=None,
+    ellipsoid_alpha=0.18,
+    cone_length=None,
+    candidate_ray_length=None,
+    n_ellipsoid=40,
+    title="Warm-start initialization geometry",
+    ax=None,
+    show=True,
+):
+    """
+    Visualize attitude-coordination warm-start geometry.
+
+    Plots:
+      - EMS sphere
+      - uncertainty ellipsoid
+      - mean p_hat
+      - spacecraft positions
+      - detecting spacecraft FOV cone and boresight
+      - evaluated candidate target points, shaped by spacecraft index
+        and colored by assignment stage
+
+    candidate_log entries should look like:
+        {
+            "stage": "mean" | "uncertainty" | "los" | "ems",
+            "sc_idx": int,
+            "p_target": np.ndarray shape (3,),
+            "u": np.ndarray shape (3,),
+            "accepted": bool,
+        }
+    """
+
+
+
+    p_hat = np.asarray(p_hat, dtype=float).reshape(3,)
+    P_p = np.asarray(P_p, dtype=float).reshape(3, 3)
+    p_agents = np.asarray(p_agents, dtype=float)
+    u_curr_agents = np.asarray(u_curr_agents, dtype=float)
+
+    M = p_agents.shape[0]
+
+    if candidate_log is None:
+        candidate_log = []
+
+    if cone_length is None:
+        ranges = np.linalg.norm(p_agents - p_hat[None, :], axis=1)
+        cone_length = float(np.nanmedian(ranges))
+
+    if candidate_ray_length is None:
+        candidate_ray_length = cone_length
+
+    # ---------- helpers ----------
+    def unit(v, eps=1e-12):
+        v = np.asarray(v, dtype=float)
+        n = float(np.linalg.norm(v))
+        if n < eps:
+            return None
+        return v / n
+
+    def basis_from_u(u):
+        u = unit(u)
+        if u is None:
+            u = np.array([0.0, 0.0, 1.0])
+        a = np.array([1.0, 0.0, 0.0])
+        if abs(np.dot(a, u)) > 0.9:
+            a = np.array([0.0, 1.0, 0.0])
+        e1 = a - np.dot(a, u) * u
+        e1 = e1 / np.linalg.norm(e1)
+        e2 = np.cross(u, e1)
+        e2 = e2 / np.linalg.norm(e2)
+        return e1, e2
+
+    def plot_sphere(ax, center, radius, alpha=0.15):
+        uu = np.linspace(0, 2*np.pi, 48)
+        vv = np.linspace(0, np.pi, 24)
+        x = center[0] + radius * np.outer(np.cos(uu), np.sin(vv))
+        y = center[1] + radius * np.outer(np.sin(uu), np.sin(vv))
+        z = center[2] + radius * np.outer(np.ones_like(uu), np.cos(vv))
+        ax.plot_surface(x, y, z, alpha=alpha, linewidth=0)
+
+    def plot_ellipsoid(ax, center, P, d):
+        vals, vecs = np.linalg.eigh(P)
+        vals = np.maximum(vals, 0.0)
+        radii = d * np.sqrt(vals)
+
+        u = np.linspace(0, 2*np.pi, n_ellipsoid)
+        v = np.linspace(0, np.pi, n_ellipsoid)
+
+        xs = np.outer(np.cos(u), np.sin(v))
+        ys = np.outer(np.sin(u), np.sin(v))
+        zs = np.outer(np.ones_like(u), np.cos(v))
+
+        xyz = np.stack([xs, ys, zs], axis=-1)
+        xyz_scaled = xyz @ np.diag(radii) @ vecs.T
+        xyz_scaled += center.reshape(1, 1, 3)
+
+        ax.plot_surface(
+            xyz_scaled[:, :, 0],
+            xyz_scaled[:, :, 1],
+            xyz_scaled[:, :, 2],
+            alpha=ellipsoid_alpha,
+            linewidth=0,
+        )
+
+    def plot_cone(ax, apex, u, half_angle, length, n=48, alpha=0.12):
+        u = unit(u)
+        if u is None:
+            return
+
+        e1, e2 = basis_from_u(u)
+        r = length * np.tan(half_angle)
+
+        phis = np.linspace(0, 2*np.pi, n)
+        circle = (
+            apex[None, :]
+            + length * u[None, :]
+            + r * np.cos(phis)[:, None] * e1[None, :]
+            + r * np.sin(phis)[:, None] * e2[None, :]
+        )
+
+        verts = []
+        for k in range(n - 1):
+            verts.append([apex, circle[k], circle[k + 1]])
+
+        poly = Poly3DCollection(verts, alpha=alpha)
+        ax.add_collection3d(poly)
+
+        ax.plot(
+            [apex[0], apex[0] + length*u[0]],
+            [apex[1], apex[1] + length*u[1]],
+            [apex[2], apex[2] + length*u[2]],
+            linewidth=2,
+        )
+
+    def set_equal_axes(ax):
+        pts = [p_agents, p_hat.reshape(1, 3)]
+
+        if p_em is not None and R_em > 0.0:
+            pts.append(np.asarray(p_em, dtype=float).reshape(1, 3))
+
+        for item in candidate_log:
+            if item.get("p_target") is not None:
+                pts.append(np.asarray(item["p_target"], dtype=float).reshape(1, 3))
+
+        pts = np.vstack(pts)
+        mins = np.nanmin(pts, axis=0)
+        maxs = np.nanmax(pts, axis=0)
+        center = 0.5 * (mins + maxs)
+        span = float(np.max(maxs - mins))
+        if span <= 0:
+            span = 1.0
+
+        pad = 0.25 * span
+        half = 0.5 * span + pad
+
+        ax.set_xlim(center[0] - half, center[0] + half)
+        ax.set_ylim(center[1] - half, center[1] + half)
+        ax.set_zlim(center[2] - half, center[2] + half)
+
+    # ---------- plot ----------
+    if ax is None:
+        fig = plt.figure(figsize=(10, 8))
+        ax = fig.add_subplot(111, projection="3d")
+    else:
+        fig = ax.figure
+
+    # EMS
+    if p_em is not None and float(R_em) > 0.0:
+        plot_sphere(ax, np.asarray(p_em, dtype=float).reshape(3,), float(R_em), alpha=0.12)
+
+    # uncertainty ellipsoid + mean
+    plot_ellipsoid(ax, p_hat, P_p, d_M)
+    ax.scatter(p_hat[0], p_hat[1], p_hat[2], marker="*", s=160, label="Mean")
+
+    # spacecraft
+    for i in range(M):
+        ax.scatter(
+            p_agents[i, 0],
+            p_agents[i, 1],
+            p_agents[i, 2],
+            marker="^",
+            s=80,
+            label=f"SC {i}" if i == 0 else None,
+        )
+        ax.text(
+            p_agents[i, 0],
+            p_agents[i, 1],
+            p_agents[i, 2],
+            f" SC{i}",
+        )
+
+    # detecting FOV
+    if detecting_idx is not None:
+        detecting_idx = int(detecting_idx)
+
+        if detecting_u is None:
+            u_det = unit(p_hat - p_agents[detecting_idx])
+        else:
+            u_det = unit(detecting_u)
+
+        if u_det is not None:
+            plot_cone(
+                ax,
+                p_agents[detecting_idx],
+                u_det,
+                theta_h,
+                cone_length,
+                alpha=0.10,
+            )
+
+            end = p_agents[detecting_idx] + cone_length * u_det
+            ax.plot(
+                [p_agents[detecting_idx, 0], end[0]],
+                [p_agents[detecting_idx, 1], end[1]],
+                [p_agents[detecting_idx, 2], end[2]],
+                linewidth=2,
+                label="Detecting boresight",
+            )
+
+    # candidate styles
+    stage_colors = {
+        "mean": "tab:green",
+        "uncertainty": "tab:blue",
+        "los": "tab:orange",
+        "ems": "tab:red",
+        "fallback": "tab:purple",
+    }
+
+    sc_markers = ["o", "s", "D", "P", "X", "v", "^", "<", ">"]
+
+    for item in candidate_log:
+        sc_idx = int(item.get("sc_idx", 0))
+        stage = item.get("stage", "fallback")
+        accepted = bool(item.get("accepted", False))
+
+        p_tgt = item.get("p_target", None)
+        u = item.get("u", None)
+
+        if p_tgt is None:
+            if u is None:
+                continue
+            u = unit(u)
+            if u is None:
+                continue
+            p_tgt = p_agents[sc_idx] + candidate_ray_length * u
+        else:
+            p_tgt = np.asarray(p_tgt, dtype=float).reshape(3,)
+
+        marker = sc_markers[sc_idx % len(sc_markers)]
+        color = stage_colors.get(stage, "k")
+        size = 90 if accepted else 35
+        alpha = 1.0 if accepted else 0.35
+
+        ax.scatter(
+            p_tgt[0],
+            p_tgt[1],
+            p_tgt[2],
+            marker=marker,
+            s=size,
+            alpha=alpha,
+            color=color,
+        )
+
+        if accepted:
+            ax.text(
+                p_tgt[0],
+                p_tgt[1],
+                p_tgt[2],
+                f" {stage}:SC{sc_idx}",
+                color=color,
+            )
+
+        if u is not None:
+            u = unit(u)
+            if u is not None:
+                p0 = p_agents[sc_idx]
+                p1 = p0 + candidate_ray_length * u
+                ax.plot(
+                    [p0[0], p1[0]],
+                    [p0[1], p1[1]],
+                    [p0[2], p1[2]],
+                    color=color,
+                    alpha=0.25 if not accepted else 0.75,
+                    linewidth=1.0 if not accepted else 1.8,
+                )
+
+    ax.set_title(title)
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_zlabel("z")
+    set_equal_axes(ax)
+
+    # manual legend proxies
+    from matplotlib.lines import Line2D
+
+    legend_items = [
+        Line2D([0], [0], marker="*", linestyle="None", markersize=12, label="Mean"),
+        Line2D([0], [0], marker="^", linestyle="None", markersize=8, label="Spacecraft"),
+        Line2D([0], [0], color="k", linewidth=2, label="Detecting FOV/boresight"),
+    ]
+
+    for stage, color in stage_colors.items():
+        legend_items.append(
+            Line2D([0], [0], marker="o", color=color, linestyle="None", label=stage)
+        )
+
+    ax.legend(handles=legend_items, loc="best")
+
+    if show:
+        plt.show()
+
+    return fig, ax
+
+

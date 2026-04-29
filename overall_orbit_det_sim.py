@@ -1856,7 +1856,7 @@ def run_OD(config_global):
             )
 
             formation.set_spacecraft_pointings(setup["frames"]["sc_pointing_eme_cartesian"])
-            formation.currently_detecting = int(setup["sc_detecting_id"])
+            formation.currently_detecting = tuple([int(setup["sc_detecting_id"])])
 
             timer = SimTime(
                 config,
@@ -2117,8 +2117,8 @@ def run_OD(config_global):
                         omega_max,
                         d_M=config['d_mahal'],
                         use_fixed_agent=True,
-                        fixed_agent_idx=formation.currently_detecting,
-                        fixed_agent_u=sc_pointings_eme[formation.currently_detecting, :],
+                        fixed_agent_idx=int(formation.currently_detecting[0]),
+                        fixed_agent_u=sc_pointings_eme[int(formation.currently_detecting[0]), :],
                         coverage_point=ast_eme_traj_kms[:, :3]
                     )
 
@@ -2155,7 +2155,7 @@ def run_OD(config_global):
                     detecting_ids_str = str(int(setup["sc_detecting_id"]))
 
                     # visualize att_coord result
-                    att_coord_viz_flag_ini = True
+                    att_coord_viz_flag_ini = False
                     if att_coord_viz_flag_ini:
                         best_epoch = res_kcoverage.chosen_dt
                         best_idx = np.where(timer.attcoord_searchtimes == best_epoch)[0]
@@ -2266,6 +2266,28 @@ def run_OD(config_global):
                         agents_xyz = sc_eme_ae_kms
                         target_cov_xyz = P_cart_eme
 
+                        def range_sigma_from_cov(P_eci, r_obj, r_obs):
+                            """
+                            P_eci : 6x6 or 3x3 covariance in inertial frame
+                            r_obj : object inertial position, shape (3,)
+                            r_obs : observer inertial position, shape (3,)
+
+                            Returns range standard deviation and variance.
+                            """
+                            P_r = P_eci[:3, :3] if P_eci.shape == (6, 6) else P_eci
+
+                            rho_vec = np.asarray(r_obj) - np.asarray(r_obs)
+                            rho_hat = rho_vec / np.linalg.norm(rho_vec)
+
+                            var_rho = rho_hat @ P_r @ rho_hat
+                            sigma_rho = np.sqrt(max(var_rho, 0.0))
+
+                            return sigma_rho, var_rho
+
+                        sigma_rho, var_rho = range_sigma_from_cov(P_cart_eme, ast_iod_eme[:3],
+                                                                  agents_xyz[int(formation.currently_detecting[0])])
+                        print(sigma_rho, var_rho)
+
                         def build_slew_history_from_opt_series(opt_series, ids, *, key_u="u", normalize=True):
                             ids = [int(i) for i in ids]
                             out = {i: [] for i in ids}
@@ -2326,7 +2348,7 @@ def run_OD(config_global):
                             show_ems=True,
                             show_fov_cones=True,
                             title="3D OD Scenario Demo (EME)",
-                            slew_history=None,
+                            slew_history=slew_history,
                             slew_history_line_len=ray_length,
                             agent_orbit_tracks_xyz=[sc_eme_states_kms_piecewise[:, i, :3] for i in range(config['num_spacecraft'])]
                         )
@@ -2346,7 +2368,7 @@ def run_OD(config_global):
 
                         viz_cost_map = False
                         if viz_cost_map:
-                            idx_fix = formation.currently_detecting
+                            idx_fix = int(formation.currently_detecting[0])
                             idx_free = 1 - idx_fix
                             u_fix = sc_pointings_eme[idx_fix]
 
@@ -2453,7 +2475,7 @@ def run_OD(config_global):
                     )
 
                     # optional visualization block unchanged
-                    confirm_meas = True
+                    confirm_meas = False
                     if confirm_meas:
                         ems_center_xyz = np.array(config["ems"]["p_em"])
                         ems_radius = config["ems"]['R_em']
@@ -2744,14 +2766,16 @@ def run_OD(config_global):
                             title_prefix="Asteroid prior + spacecraft"
                         )
 
-                        util.plot_matched_trajectory_full_range(
-                            formation=formation,
-                            idx_start=0,
-                            idx_stop=2400,
-                            frame="GEO_EME",
-                            plot_3d=True,
-                            plot_xy=False
-                        )
+                        plot_matched_flag = False
+                        if plot_matched_flag:
+                            util.plot_matched_trajectory_full_range(
+                                formation=formation,
+                                idx_start=0,
+                                idx_stop=2400,
+                                frame="GEO_EME",
+                                plot_3d=True,
+                                plot_xy=False
+                            )
 
                     sc_pointings_eme = formation.get_spacecraft_pointings()
 
@@ -2913,7 +2937,7 @@ def run_OD(config_global):
                                 _append_row(optimizer_csv_path, row_opt, optimizer_header)
 
                     # visualize att_coord result
-                    att_coord_viz_flag = True
+                    att_coord_viz_flag = False
                     if att_coord_viz_flag:
                         best_epoch = res_kcoverage.chosen_dt
                         best_idx = np.where(timer.attcoord_searchtimes == best_epoch)[0]
@@ -3158,8 +3182,8 @@ def run_OD(config_global):
                             init_boresight_alpha=0.95,
 
                             # slew history
-                            slew_history=None,
-                            slew_history_line_len=None,
+                            slew_history=slew_history,
+                            slew_history_line_len=ray_length,
                             slew_history_lw=1.8,
                             slew_history_alpha=0.85,
                             slew_history_cmap="viridis",

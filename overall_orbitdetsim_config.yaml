@@ -175,14 +175,14 @@ optimizer_att_coord:
   max_iterations: 60
   ftol: 1.0e-10
   display: False
-  num_candidates: 10
+  num_candidates: 20
 
 ems:
   p_em: [0.0, 0.0, 0.0]
   R_em: 0.5e+6
-  alpha_s_deg: 5
-  lambda_em: 1
-  beta_zeta: 115.0
+  alpha_s_deg: 2
+  lambda_em: 2
+  beta_zeta: 1150.0
 
 
 
@@ -213,7 +213,7 @@ adaptive_R:
     window: 20  # window over which innovation is considered
     min_samples: 3
     psd_floor: 1.0e-18
-    single_obs_rho: 1.0e+6
+    single_obs_rho: 1.28e+6
     single_obs_rhodot: 1.0
 
 # weight values for SPKF portion
@@ -228,7 +228,7 @@ epsilon_ukf: 0.0000000001
 ############################
 ray_length: 8.0e+6
 two_d_prop:
-  stride: 5
+  stride: 1
   n_std: 3
   xlim: [-5.0e+6, 5.0e+6]
   ylim: [-5.0e+6, 5.0e+6]
