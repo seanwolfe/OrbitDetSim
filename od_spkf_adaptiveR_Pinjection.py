@@ -91,9 +91,9 @@ def od_setup_from_iod(config, row, *, util, sp, eps=1e-12):
     # (this is your "interpret everything at AE" choice)
     # -----------------------------
     sc_geoeclip_ae_kms = util.geo_secr_to_geo_eclip_generic(
-        sc_secr_se_kms, earth_helio_ae_kms, layout="batch"
+        sc_secr_se_kms, earth_helio_ae_kms, layout="batch", obj_hint="(batch, 6)"
     )
-    sc_eme_ae_kms = util.geo_eclip_to_geo_eme_generic(sc_geoeclip_ae_kms, layout="batch")
+    sc_eme_ae_kms = util.geo_eclip_to_geo_eme_generic(sc_geoeclip_ae_kms, layout="batch", hint="(batch, 6)")
 
     # Convert pointing from SECR -> GEO ECLIP -> GEO EME (at AE)
     sc_pointing_geoeclip_cartesian = util.geo_secr_to_geo_eclip_generic(
