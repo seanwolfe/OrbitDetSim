@@ -1333,6 +1333,20 @@ def init_theta_phi_boundary_projection(
 
         if best is not None:
             u_i, theta_i, phi_i = best
+
+            # Apply jitter to uncertainty-candidate initialization as well.
+            # This perturbs the slew angle while keeping the same local azimuth phi_i.
+            jitter_i = float(rng.choice(jitter_values))
+            theta_j = float(np.clip(theta_i + jitter_i, theta_lower[i], theta_upper[i]))
+            u_j = theta_phi_to_u(theta_j, phi_i, u_curr_norm[i], e1_list[i], e2_list[i])
+
+            if (
+                    keepout_safe_single_local(p_agents[i], u_j)
+                    and ray_intersects_ellipsoid(p_agents[i], u_j, p_hat, P_inv, d_M)
+            ):
+                theta_i = theta_j
+                u_i = u_j
+
             accept_candidate(i, u_i, theta_i, phi_i, stage="uncertainty")
 
     if np.all(assigned):
@@ -1348,7 +1362,6 @@ def init_theta_phi_boundary_projection(
             u_det = _unit(np.asarray(detecting_u, dtype=float).reshape(3, ))
         else:
             u_det = _unit(p_hat - p_det)
-
         if u_det is not None:
             if np.dot(u_det, p_hat - p_det) < 0.0:
                 u_det = -u_det
@@ -1371,7 +1384,6 @@ def init_theta_phi_boundary_projection(
 
                 best = None
                 best_dist = np.inf
-
                 for p_los in p_los_candidates:
                     ok, u_i, theta_i, phi_i = try_point_to_point(
                         i,
@@ -1854,6 +1866,8 @@ def optimize_pointing_lbfgs_joint(
         n_uncertainty_candidates=num_candidates, n_los_candidates=num_candidates, return_log=True
     )
 
+    # print(candidate_log)
+
     debug_ini_flag = False
     if debug_ini_flag:
         util.plot_init_candidate_geometry(
@@ -2189,8 +2203,8 @@ class AttitudeCoordinator:
                 ftol=float(self.ftolerance),
                 display=bool(self.display),
                 use_fixed_agent=bool(use_fixed_agent),
-                idx_fix=(None if not use_fixed_agent else fixed_agent_idx),
-                u_fix=(None if not use_fixed_agent else fixed_agent_u),
+                idx_fix=fixed_agent_idx,
+                u_fix=fixed_agent_u,
                 num_candidates=int(self.num_candidates)
             )
 

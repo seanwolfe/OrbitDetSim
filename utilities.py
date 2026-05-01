@@ -9347,19 +9347,19 @@ def plot_init_candidate_geometry(
                 color=color,
             )
 
-        if u is not None:
-            u = unit(u)
-            if u is not None:
-                p0 = p_agents[sc_idx]
-                p1 = p0 + candidate_ray_length * u
-                ax.plot(
-                    [p0[0], p1[0]],
-                    [p0[1], p1[1]],
-                    [p0[2], p1[2]],
-                    color=color,
-                    alpha=0.25 if not accepted else 0.75,
-                    linewidth=1.0 if not accepted else 1.8,
-                )
+        # if u is not None:
+        #     u = unit(u)
+        #     if u is not None:
+        #         p0 = p_agents[sc_idx]
+        #         p1 = p0 + candidate_ray_length * u
+        #         ax.plot(
+        #             [p0[0], p1[0]],
+        #             [p0[1], p1[1]],
+        #             [p0[2], p1[2]],
+        #             color=color,
+        #             alpha=0.25 if not accepted else 0.75,
+        #             linewidth=1.0 if not accepted else 1.8,
+        #         )
 
     ax.set_title(title)
     ax.set_xlabel("x")

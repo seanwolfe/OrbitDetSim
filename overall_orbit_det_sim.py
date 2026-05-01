@@ -2155,7 +2155,7 @@ def run_OD(config_global):
                     detecting_ids_str = str(int(setup["sc_detecting_id"]))
 
                     # visualize att_coord result
-                    att_coord_viz_flag_ini = False
+                    att_coord_viz_flag_ini = True
                     if att_coord_viz_flag_ini:
                         best_epoch = res_kcoverage.chosen_dt
                         best_idx = np.where(timer.attcoord_searchtimes == best_epoch)[0]
@@ -2455,6 +2455,156 @@ def run_OD(config_global):
                                 )
 
                             plt.legend(loc='upper right')
+
+                    view_other_epoch_res_flag = False
+                    if view_other_epoch_res_flag:
+                        desired_idx = [5, 6, 7, 8, 9]
+                        for des_idx in desired_idx:
+
+                            row = result_kcoverage_series[des_idx]
+
+                            best_epoch = row["dt"]
+                            best_idx = np.where(timer.attcoord_searchtimes == best_epoch)[0]
+
+                            theta_h_rad = util.fov_deg2_to_half_angle_rad(config["fov"])
+                            ems_center_xyz = np.array(config["ems"]["p_em"])
+                            ems_radius = config["ems"]['R_em']
+                            ray_length = config['ray_length']
+
+                            sc_eme_ae_kms = np.squeeze(sc_eme_states_kms_piecewise[best_idx, :, :3])
+                            sc_pointing_eme_cartesian = row['u']
+                            ang_eme = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_eme_cartesian)
+                            ast_truth_eme = np.squeeze(ast_eme_traj_kms[best_idx, :3])
+
+                            ast_iod_eme = np.squeeze(x_ts[best_idx, :3])
+                            P_cart_eme = np.squeeze(P_ts[best_idx, :3, :3])
+
+                            ast_truth_eme = np.asarray(ast_truth_eme).reshape(-1)
+
+                            best_idx = int(np.where(timer.attcoord_searchtimes == best_epoch)[0][0])
+                            T = len(timer.attcoord_searchtimes)
+
+                            agents_xyz = sc_eme_ae_kms
+                            target_cov_xyz = P_cart_eme
+
+                            def build_slew_history_from_opt_series(opt_series, ids, *, key_u="u", normalize=True):
+                                ids = [int(i) for i in ids]
+                                out = {i: [] for i in ids}
+
+                                for row_idx, rowh in enumerate(opt_series):
+                                    if key_u not in rowh:
+                                        raise KeyError(f"Row {row_idx} missing key '{key_u}'")
+                                    U = np.asarray(rowh[key_u], dtype=float)
+                                    if U.ndim != 2 or U.shape[1] != 3:
+                                        raise ValueError(f"Row {row_idx} '{key_u}' must be (M,3), got {U.shape}")
+                                    M = U.shape[0]
+                                    for i in ids:
+                                        if not (0 <= i < M):
+                                            raise IndexError(f"Row {row_idx}: id {i} out of range for M={M}")
+                                        out[i].append(U[i].copy())
+
+                                for i in ids:
+                                    Ui = np.asarray(out[i], dtype=float)
+                                    if Ui.size == 0:
+                                        Ui = Ui.reshape(0, 3)
+
+                                    if normalize and Ui.shape[0] > 0:
+                                        n = np.linalg.norm(Ui, axis=1, keepdims=True)
+                                        n = np.maximum(n, 1e-12)
+                                        Ui = Ui / n
+
+                                    out[i] = Ui
+
+                                return out
+
+                            ids = config['three_d_prop'].get('history_ids')
+                            if ids is None:
+                                ids = list(range(config['num_spacecraft']))
+
+                            slew_history = build_slew_history_from_opt_series(row["history"], ids)
+
+                            fig, ax = util.plot_od_scenario_3d_new(
+                                t_label=best_epoch,
+                                agents_xyz=agents_xyz,
+                                u_opt_agents_xyz=sc_pointing_eme_cartesian,
+                                theta_h_rad=theta_h_rad,
+                                ray_length=ray_length,
+                                u_curr_agents_xyz=sc_pointings_eme,
+                                boresight_line_len=ray_length * 0.1,
+                                u_init_agents_xyz=None,
+                                init_boresight_line_len=ray_length * 1.5,
+                                agent_orbit_tracks_xyz=[sc_eme_states_kms_piecewise[:, i, :3] for i in
+                                                        range(config['num_spacecraft'])],
+                                spacecraft_orbit_xyz=None,
+                                xlim=config['three_d_prop']['xlim'], ylim=config['three_d_prop']['ylim'],
+                                zlim=config['three_d_prop']['zlim'],
+                                target_mean_xyz=ast_iod_eme[:3],
+                                target_cov_xyz=target_cov_xyz,
+                                d_mahal=config['d_mahal'],
+                                true_target_xyz=ast_truth_eme[:3],
+                                target_mean_traj_xyz=x_ts[:, :3],
+                                true_target_traj_xyz=ast_eme_traj_kms[:, :3],
+                                true_target_traj_xyz_2=ast_truth_original_eme[:, :3],
+                                ems_center_xyz=ems_center_xyz,
+                                ems_radius=ems_radius,
+                                show_uncertainty=True,
+                                show_truth=True,  # green circle
+                                show_ems=True,
+                                show_fov_cones=True,
+                                show_legend=True,
+                                show_target_mean_traj=True,
+                                show_true_target_traj=True,
+                                show_true_target_traj_2=False,
+                                show_init_boresights=False,
+                                show_current_boresights=False,
+                                show_slew_angle_annotations=False,
+                                show_agent_name_annotations=True,
+                                show_agent_orbit_tracks=True,
+                                show_spacecraft_orbit=False,
+                                show_coverage=True,
+
+                                Nx=60,
+                                Ny=60,
+                                Nz=40,
+
+                                # coverage display
+                                show_pair_coverage=True,
+                                show_triple_coverage=True,
+                                pair_only_exact=True,
+
+                                pair_coverage_alpha=0.25,
+                                triple_coverage_alpha=0.35,
+
+                                # FOV styling
+                                fov_style="surface",  # "surface", "wire", "both"
+                                fov_surface_alpha=0.12,
+                                fov_surface_color="lightskyblue",
+                                fov_n_rays=2,
+                                fov_n_circle=64,
+                                fov_n_len=20,
+
+                                # styling
+                                title=None,
+                                label_fontsize=9,
+                                label_offset_px=10,
+                                slew_label_offset_px=16,
+                                fill_alpha=0.10,
+                                sparse_wire=True,
+
+                                init_boresight_lw=1.5,
+                                init_boresight_alpha=0.95,
+
+                                # slew history
+                                slew_history=slew_history,
+                                slew_history_line_len=ray_length,
+                                slew_history_lw=1.8,
+                                slew_history_alpha=0.85,
+                                slew_history_cmap="viridis",
+                                slew_history_every=1,
+                                slew_history_colorbar=True,
+                                slew_history_colorbar_label="Slew history step",
+                                slew_history_norm_mode="per_agent",
+                            )
 
 
 
@@ -2794,23 +2944,8 @@ def run_OD(config_global):
                     alpha_max = 1.63 * tau_max / I_max
                     omega_max = 1.63 * h_max / I_max
 
-                    if len(formation.currently_detecting) == 1:
-                        res_kcoverage, result_mean, result_kcoverage_series, result_mean_series, mean_time = attitude_coordination.step(
-                            sc_eme_states_kms_piecewise[:, :, :3],
-                            sc_pointings_eme,
-                            x_ts[:, :3],
-                            P_ts[:, :3, :3],
-                            timer.attcoord_searchtimes,
-                            theta_h_rad,
-                            alpha_max,
-                            omega_max,
-                            d_M=config['d_mahal'],
-                            use_fixed_agent=True,
-                            fixed_agent_idx=int(formation.currently_detecting[0]),
-                            fixed_agent_u=sc_pointings_eme[int(formation.currently_detecting[0]), :],
-                            coverage_point=ast_eme_traj_kms[:, :3]
-                        )
-                    elif len(formation.currently_detecting) > 1:
+                    use_tracking = bool(config_global['use_tracking'])
+                    if use_tracking:
                         res_kcoverage, result_mean, result_kcoverage_series, result_mean_series, mean_time = attitude_coordination.step(
                             sc_eme_states_kms_piecewise[:, :, :3],
                             sc_pointings_eme,
@@ -2822,10 +2957,45 @@ def run_OD(config_global):
                             omega_max,
                             d_M=config['d_mahal'],
                             use_fixed_agent=False,
+                            fixed_agent_idx=int(formation.currently_detecting[0]),
+                            fixed_agent_u=sc_pointings_eme[int(formation.currently_detecting[0]), :],
                             coverage_point=ast_eme_traj_kms[:, :3]
                         )
                     else:
-                        raise NotImplementedError("No detections...object lost")
+                        if len(formation.currently_detecting) == 1:
+                            res_kcoverage, result_mean, result_kcoverage_series, result_mean_series, mean_time = attitude_coordination.step(
+                                sc_eme_states_kms_piecewise[:, :, :3],
+                                sc_pointings_eme,
+                                x_ts[:, :3],
+                                P_ts[:, :3, :3],
+                                timer.attcoord_searchtimes,
+                                theta_h_rad,
+                                alpha_max,
+                                omega_max,
+                                d_M=config['d_mahal'],
+                                use_fixed_agent=True,
+                                fixed_agent_idx=int(formation.currently_detecting[0]),
+                                fixed_agent_u=sc_pointings_eme[int(formation.currently_detecting[0]), :],
+                                coverage_point=ast_eme_traj_kms[:, :3]
+                            )
+                        elif len(formation.currently_detecting) > 1:
+                            res_kcoverage, result_mean, result_kcoverage_series, result_mean_series, mean_time = attitude_coordination.step(
+                                sc_eme_states_kms_piecewise[:, :, :3],
+                                sc_pointings_eme,
+                                x_ts[:, :3],
+                                P_ts[:, :3, :3],
+                                timer.attcoord_searchtimes,
+                                theta_h_rad,
+                                alpha_max,
+                                omega_max,
+                                d_M=config['d_mahal'],
+                                use_fixed_agent=False,
+                                fixed_agent_idx=int(formation.currently_detecting[0]),
+                                fixed_agent_u=sc_pointings_eme[int(formation.currently_detecting[0]), :],
+                                coverage_point=ast_eme_traj_kms[:, :3]
+                            )
+                        else:
+                            raise NotImplementedError("No detections...object lost")
 
                     attcoord_endtime = time.time()
                     timer.set_attcoord_time(attcoord_endtime - attcoord_startime - mean_time)
@@ -2937,7 +3107,7 @@ def run_OD(config_global):
                                 _append_row(optimizer_csv_path, row_opt, optimizer_header)
 
                     # visualize att_coord result
-                    att_coord_viz_flag = False
+                    att_coord_viz_flag = True
                     if att_coord_viz_flag:
                         best_epoch = res_kcoverage.chosen_dt
                         best_idx = np.where(timer.attcoord_searchtimes == best_epoch)[0]
@@ -3294,6 +3464,158 @@ def run_OD(config_global):
                                 )
 
                             plt.legend(loc='upper right')
+
+                    view_other_epoch_res_flag = False
+                    if view_other_epoch_res_flag:
+                        desired_idx = [15, 16, 17, 18, 19, 20, 21, 22]
+                        for des_idx in desired_idx:
+
+                            row = result_kcoverage_series[des_idx]
+
+                            best_epoch = row["dt"]
+                            best_idx = np.where(timer.attcoord_searchtimes == best_epoch)[0]
+
+                            theta_h_rad = util.fov_deg2_to_half_angle_rad(config["fov"])
+                            ems_center_xyz = np.array(config["ems"]["p_em"])
+                            ems_radius = config["ems"]['R_em']
+                            ray_length = config['ray_length']
+
+                            sc_eme_ae_kms = np.squeeze(sc_eme_states_kms_piecewise[best_idx, :, :3])
+                            sc_pointing_eme_cartesian = row['u']
+                            ang_eme = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_eme_cartesian)
+                            ast_truth_eme = np.squeeze(ast_eme_traj_kms[best_idx, :3])
+
+                            ast_iod_eme = np.squeeze(x_ts[best_idx, :3])
+                            P_cart_eme = np.squeeze(P_ts[best_idx, :3, :3])
+
+                            ast_truth_eme = np.asarray(ast_truth_eme).reshape(-1)
+
+                            best_idx = int(np.where(timer.attcoord_searchtimes == best_epoch)[0][0])
+                            T = len(timer.attcoord_searchtimes)
+
+                            agents_xyz = sc_eme_ae_kms
+                            target_cov_xyz = P_cart_eme
+
+
+                            def build_slew_history_from_opt_series(opt_series, ids, *, key_u="u", normalize=True):
+                                ids = [int(i) for i in ids]
+                                out = {i: [] for i in ids}
+
+                                for row_idx, rowh in enumerate(opt_series):
+                                    if key_u not in rowh:
+                                        raise KeyError(f"Row {row_idx} missing key '{key_u}'")
+                                    U = np.asarray(rowh[key_u], dtype=float)
+                                    if U.ndim != 2 or U.shape[1] != 3:
+                                        raise ValueError(f"Row {row_idx} '{key_u}' must be (M,3), got {U.shape}")
+                                    M = U.shape[0]
+                                    for i in ids:
+                                        if not (0 <= i < M):
+                                            raise IndexError(f"Row {row_idx}: id {i} out of range for M={M}")
+                                        out[i].append(U[i].copy())
+
+                                for i in ids:
+                                    Ui = np.asarray(out[i], dtype=float)
+                                    if Ui.size == 0:
+                                        Ui = Ui.reshape(0, 3)
+
+                                    if normalize and Ui.shape[0] > 0:
+                                        n = np.linalg.norm(Ui, axis=1, keepdims=True)
+                                        n = np.maximum(n, 1e-12)
+                                        Ui = Ui / n
+
+                                    out[i] = Ui
+
+                                return out
+
+                            ids = config['three_d_prop'].get('history_ids')
+                            if ids is None:
+                                ids = list(range(config['num_spacecraft']))
+
+                            slew_history = build_slew_history_from_opt_series(row["history"], ids)
+
+                            fig, ax = util.plot_od_scenario_3d_new(
+                                t_label=best_epoch,
+                                agents_xyz=agents_xyz,
+                                u_opt_agents_xyz=sc_pointing_eme_cartesian,
+                                theta_h_rad=theta_h_rad,
+                                ray_length=ray_length,
+                                u_curr_agents_xyz=sc_pointings_eme,
+                                boresight_line_len=ray_length * 0.1,
+                                u_init_agents_xyz=None,
+                                init_boresight_line_len=ray_length * 1.5,
+                                agent_orbit_tracks_xyz=[sc_eme_states_kms_piecewise[:, i, :3] for i in
+                                                        range(config['num_spacecraft'])],
+                                spacecraft_orbit_xyz=None,
+                                xlim=config['three_d_prop']['xlim'], ylim=config['three_d_prop']['ylim'],
+                                zlim=config['three_d_prop']['zlim'],
+                                target_mean_xyz=ast_iod_eme[:3],
+                                target_cov_xyz=target_cov_xyz,
+                                d_mahal=config['d_mahal'],
+                                true_target_xyz=ast_truth_eme[:3],
+                                target_mean_traj_xyz=x_ts[:, :3],
+                                true_target_traj_xyz=ast_eme_traj_kms[:, :3],
+                                true_target_traj_xyz_2=ast_truth_original_eme[:, :3],
+                                ems_center_xyz=ems_center_xyz,
+                                ems_radius=ems_radius,
+                                show_uncertainty=True,
+                                show_truth=True,  # green circle
+                                show_ems=True,
+                                show_fov_cones=True,
+                                show_legend=True,
+                                show_target_mean_traj=True,
+                                show_true_target_traj=True,
+                                show_true_target_traj_2=False,
+                                show_init_boresights=False,
+                                show_current_boresights=False,
+                                show_slew_angle_annotations=False,
+                                show_agent_name_annotations=True,
+                                show_agent_orbit_tracks=True,
+                                show_spacecraft_orbit=False,
+                                show_coverage=True,
+
+                                Nx=60,
+                                Ny=60,
+                                Nz=40,
+
+                                # coverage display
+                                show_pair_coverage=True,
+                                show_triple_coverage=True,
+                                pair_only_exact=True,
+
+                                pair_coverage_alpha=0.25,
+                                triple_coverage_alpha=0.35,
+
+                                # FOV styling
+                                fov_style="surface",  # "surface", "wire", "both"
+                                fov_surface_alpha=0.12,
+                                fov_surface_color="lightskyblue",
+                                fov_n_rays=2,
+                                fov_n_circle=64,
+                                fov_n_len=20,
+
+                                # styling
+                                title=None,
+                                label_fontsize=9,
+                                label_offset_px=10,
+                                slew_label_offset_px=16,
+                                fill_alpha=0.10,
+                                sparse_wire=True,
+
+                                init_boresight_lw=1.5,
+                                init_boresight_alpha=0.95,
+
+                                # slew history
+                                slew_history=slew_history,
+                                slew_history_line_len=ray_length,
+                                slew_history_lw=1.8,
+                                slew_history_alpha=0.85,
+                                slew_history_cmap="viridis",
+                                slew_history_every=1,
+                                slew_history_colorbar=True,
+                                slew_history_colorbar_label="Slew history step",
+                                slew_history_norm_mode="per_agent",
+                            )
+
 
                     # plt.show()
 

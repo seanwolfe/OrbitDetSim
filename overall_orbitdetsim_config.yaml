@@ -162,6 +162,7 @@ epochs:
   average_epoch_time: 5  # average time to run the att coord algorithm for one time, seconds
 
 d_mahal: 3.0
+use_tracking: True
 
 optimizer_att_coord:
   kappa_sigma: 1500.0
@@ -175,14 +176,14 @@ optimizer_att_coord:
   max_iterations: 60
   ftol: 1.0e-10
   display: False
-  num_candidates: 20
+  num_candidates: 100
 
 ems:
   p_em: [0.0, 0.0, 0.0]
   R_em: 0.5e+6
   alpha_s_deg: 2
   lambda_em: 2
-  beta_zeta: 1150.0
+  beta_zeta: 1500.0
 
 
 
