@@ -158,8 +158,8 @@ error:
 epochs:
   dt_min: 1.0   # in seconds, first time to check
   dt_max: 86400.0  # last time to check
-  n_dt: 25       # number of checks
-  average_epoch_time: 5  # average time to run the att coord algorithm for one time, seconds
+  n_dt: 5       # number of checks
+  average_epoch_time: 20  # average time to run the att coord algorithm for one time, seconds
 
 d_mahal: 3.0
 use_tracking: True
@@ -205,9 +205,9 @@ od_max_steps: 5
 od_status_every: 1
 iod_cov_topo_std: [4.4, 2.31, 1.28e+6, 3.27e-5, 2.44e-5, 1.09]  # ra, dec, rho, ra dot, dec dot, rho dot (deg, km, deg/s, km/s)
 INCLUDE_EMS_EXCLUSION: 1
-radial_process_noise: 1.0e-20  # radial noise in RTN frame (km/s^2)^2 /s
-track_process_noise: 1.0e-20  # along track noise in RTN frame (km/s^2)^2 /s
-normal_process_noise: 1.0e-20  # normal to track noise in RTN frame (km/s^2)^2 / s
+radial_process_noise: 1.0e-10  # radial noise in RTN frame (km/s^2)^2 /s
+track_process_noise: 1.0e-10 # along track noise in RTN frame (km/s^2)^2 /s
+normal_process_noise: 1.0e-10 # normal to track noise in RTN frame (km/s^2)^2 / s
 sigma_meas_noise: 1.0e+7  # measurement uncertainty in mas
 
 adaptive_R:

@@ -257,9 +257,6 @@ def process_tracklet_until_update_with_prior_epoch(
     sc_states_k,
     detection_res_k,
 ):
-    """
-    Same as process_tracklet_until_update(), but explicitly takes the prior filter epoch.
-    """
     epochs_k = np.asarray(epochs_k, dtype=float).ravel()
     noisy_meas_k = np.asarray(noisy_meas_k, dtype=float)
     sc_states_k = np.asarray(sc_states_k, dtype=float)
@@ -297,10 +294,27 @@ def process_tracklet_until_update_with_prior_epoch(
     update_history = []
     processed_epochs = []
 
+    # Decay once per tracklet, not once per individual frame/update.
+    if len(detecting_ids) < 2:
+        ukf.multi_observer_update_count = 0
+        ukf.decay = 1.0
+        mode = "single_observer_full_injection"
+    else:
+        ukf.multi_observer_update_count += 1
+        if ukf.p_injection_decay_tau <= 0.0:
+            ukf.decay = 0.0
+        else:
+            ukf.decay = float(
+                np.exp(-ukf.multi_observer_update_count / ukf.p_injection_decay_tau)
+            )
+        mode = "multi_observer_decayed_injection"
+
+    # Prefer a real observing spacecraft LOS for injection, not a mean observer.
+    primary_sid = int(getattr(ukf, "primary_detecting_id", detecting_ids[0]))
+
     for j in range(N):
         t_meas = float(epochs_k[j])
 
-        # predict ONCE to this epoch
         ukf.predict(
             t_prev,
             t_meas,
@@ -310,9 +324,8 @@ def process_tracklet_until_update_with_prior_epoch(
         x_prior = ukf.x.copy()
         P_prior = ukf.P.copy()
 
-        # sequential same-epoch updates for all detecting spacecraft
-        # fixed ordering by spacecraft index for deterministic behavior
         epoch_updates = []
+        epoch_r_obs_by_sid = {}
 
         for sid in detecting_ids:
             ra_meas = noisy_meas_k[sid, j, 0]
@@ -321,33 +334,46 @@ def process_tracklet_until_update_with_prior_epoch(
             if not (np.isfinite(ra_meas) and np.isfinite(dec_meas)):
                 continue
 
-            r_obs_km = sc_states_k[sid, j, :3]
+            r_obs_km = np.asarray(sc_states_k[sid, j, :3], dtype=float)
 
             z_hat = ukf.ra_dec_to_los_unitvec(ra_meas, dec_meas)
             R_hat = ukf.build_R(ra_meas, dec_meas)
 
             update_info = ukf.update_angles_unitvec(z_hat, r_obs_km, R_hat)
 
-            # Single-observer angles-only geometry does not directly constrain
-            # range/range-rate. Keep R adaptive, but explicitly preserve
-            # covariance along the unobservable LOS position/velocity directions.
-            injection_info = None
-            if len(detecting_ids) < 2:
-                injection_info = ukf.inject_single_observer_range_rate_uncertainty(
-                    r_obs_km=r_obs_km
-                )
+            epoch_r_obs_by_sid[int(sid)] = r_obs_km.copy()
 
             epoch_updates.append({
                 "sid": int(sid),
                 "epoch_jdtdb": t_meas,
                 "ra_rad": float(ra_meas),
                 "dec_rad": float(dec_meas),
-                "r_obs_km": np.asarray(r_obs_km, dtype=float).copy(),
+                "r_obs_km": r_obs_km.copy(),
                 "update_info": update_info,
-                "single_observer_injection_info": injection_info,
+                "single_observer_injection_info": None,
             })
 
+        # Inject once per epoch after all same-epoch measurement updates.
+        injection_info = None
         if len(epoch_updates) > 0:
+            if primary_sid in epoch_r_obs_by_sid:
+                r_obs_for_injection = epoch_r_obs_by_sid[primary_sid]
+                injection_sid = primary_sid
+            else:
+                # Fallback to the first actual observer that had a valid measurement.
+                injection_sid = int(epoch_updates[0]["sid"])
+                r_obs_for_injection = epoch_r_obs_by_sid[injection_sid]
+
+            injection_info = ukf.inject_decaying_range_rate_uncertainty(
+                r_obs_km=r_obs_for_injection,
+                n_observers=len(detecting_ids),
+                mode=mode,
+            )
+            injection_info["injection_sid"] = injection_sid
+
+            for u in epoch_updates:
+                u["single_observer_injection_info"] = injection_info
+
             processed_epochs.append(t_meas)
             update_history.append({
                 "frame_index": int(j),
@@ -357,6 +383,7 @@ def process_tracklet_until_update_with_prior_epoch(
                 "updates": epoch_updates,
                 "x_post": ukf.x.copy(),
                 "P_post": ukf.P.copy(),
+                "epoch_injection_info": injection_info,
             })
 
         t_prev = t_meas
@@ -404,8 +431,9 @@ class OD_UKF:
         adaptive_R_window=20,              # innovation window for adaptive measurement covariance
         adaptive_R_min_samples=5,          # minimum samples before using adaptive R
         adaptive_R_psd_floor=1e-18,        # numerical eigenvalue floor for adaptive R in unit-vector space
-        sigma_rho_single_obs_km=None,      # range covariance floor for single-observer updates [km]
-        sigma_rhodot_single_obs_km_s=None, # range-rate covariance floor for single-observer updates [km/s]
+        sigma_rho_single_obs_km=None,      # range uncertainty enforced during single-observer updates [km]
+        sigma_rhodot_single_obs_km_s=None, # range-rate uncertainty enforced during single-observer updates [km/s]
+        p_injection_decay_tau=2.0,         # multi-observer exponential decay constant in update counts; no final floor
         ukf_alpha=1e-3,
         ukf_beta=2.0,
         ukf_kappa=0.0,
@@ -436,6 +464,9 @@ class OD_UKF:
             None if sigma_rhodot_single_obs_km_s is None
             else float(sigma_rhodot_single_obs_km_s)
         )
+        self.p_injection_decay_tau = float(p_injection_decay_tau)
+        self.multi_observer_update_count = 0
+        self.decay=1.0
 
         self.alpha = float(ukf_alpha)
         self.beta = float(ukf_beta)
@@ -888,6 +919,7 @@ class OD_UKF:
             )
         else:
             R_eff = R_nominal.copy()
+
             adaptive_info = {
                 "used_adaptive_R": False,
                 "reason": "disabled",
@@ -954,7 +986,76 @@ class OD_UKF:
             "R_adapt": R_adapt.copy(),
         }
 
-    def inject_single_observer_range_rate_uncertainty(
+    def inject_decaying_range_rate_uncertainty(
+        self,
+        r_obs_km,
+        *,
+        n_observers,
+        sigma_rho_km=None,
+        sigma_rhodot_km_s=None,
+        tau=None,
+        mode=None,
+    ):
+        """
+        Enforce LOS range/range-rate covariance with observer-count-dependent decay.
+
+        Behavior:
+          - n_observers < 2:
+              enforce the full configured single-observer range/range-rate
+              uncertainty and reset the multi-observer decay counter.
+          - n_observers >= 2:
+              enforce a decayed uncertainty
+
+                  sigma_eff = sigma_single * exp(-m / tau)
+
+              where m is the number of multi-observer updates since the most
+              recent single-observer phase. No terminal minimum floor is used,
+              so the enforced uncertainty approaches zero and triangulation can
+              eventually dominate.
+
+        This operates on P, not R. Adaptive R remains active regardless of
+        observer count.
+        """
+        n_observers = int(n_observers)
+
+        if sigma_rho_km is None:
+            sigma_rho_km = self.sigma_rho_single_obs_km
+        if sigma_rhodot_km_s is None:
+            sigma_rhodot_km_s = self.sigma_rhodot_single_obs_km_s
+        if tau is None:
+            tau = self.p_injection_decay_tau
+        tau = float(tau)
+
+        if sigma_rho_km is None and sigma_rhodot_km_s is None:
+            return {
+                "applied": False,
+                "reason": "range_rate_uncertainty_disabled",
+                "n_observers": n_observers,
+            }
+
+        sigma_rho_eff = None if sigma_rho_km is None else float(sigma_rho_km) * self.decay
+        sigma_rhodot_eff = None if sigma_rhodot_km_s is None else float(sigma_rhodot_km_s) * self.decay
+
+        info = self.inject_range_rate_uncertainty(
+            r_obs_km=r_obs_km,
+            sigma_rho_km=sigma_rho_eff,
+            sigma_rhodot_km_s=sigma_rhodot_eff,
+        )
+        info.update({
+            "mode": mode,
+            "n_observers": n_observers,
+            "decay": float(self.decay),
+            "tau": float(tau),
+            "multi_observer_update_count": int(self.multi_observer_update_count),
+            "sigma_rho_base_km": None if sigma_rho_km is None else float(sigma_rho_km),
+            "sigma_rhodot_base_km_s": None if sigma_rhodot_km_s is None else float(sigma_rhodot_km_s),
+            "sigma_rho_eff_km": sigma_rho_eff,
+            "sigma_rhodot_eff_km_s": sigma_rhodot_eff,
+        })
+        return info
+
+
+    def inject_range_rate_uncertainty(
         self,
         r_obs_km,
         *,
@@ -962,22 +1063,14 @@ class OD_UKF:
         sigma_rhodot_km_s=None,
     ):
         """
-        Enforce minimum covariance along the instantaneous LOS range and
-        range-rate directions for single-observer angles-only updates.
-
-        This is intentionally applied to P, not R: the measurement noise model
-        can remain adaptive while the state covariance preserves uncertainty in
-        directions that a single angles-only observer cannot directly observe.
+        Enforce covariance along the instantaneous LOS range and range-rate
+        directions. This helper has no observer-count logic and no terminal
+        floor beyond the sigma values supplied by the caller.
         """
-        if sigma_rho_km is None:
-            sigma_rho_km = self.sigma_rho_single_obs_km
-        if sigma_rhodot_km_s is None:
-            sigma_rhodot_km_s = self.sigma_rhodot_single_obs_km_s
-
         if sigma_rho_km is None and sigma_rhodot_km_s is None:
             return {
                 "applied": False,
-                "reason": "single_observer_range_rate_uncertainty_disabled",
+                "reason": "no_sigma_values_supplied",
             }
 
         r_obs = np.asarray(r_obs_km, dtype=float).reshape(3)
@@ -1007,25 +1100,25 @@ class OD_UKF:
         }
 
         if sigma_rho_km is not None:
-            var_floor = float(sigma_rho_km) ** 2
+            var_target = float(sigma_rho_km) ** 2
             var_before = float(rho_hat @ self.P[:3, :3] @ rho_hat)
             info["var_rho_before"] = var_before
-            if var_before < var_floor:
-                self.P[:3, :3] += (var_floor - var_before) * uuT
+            if var_before < var_target:
+                self.P[:3, :3] += (var_target - var_before) * uuT
                 info["position_injected"] = True
             info["var_rho_after"] = float(rho_hat @ self.P[:3, :3] @ rho_hat)
 
         if sigma_rhodot_km_s is not None:
-            var_floor = float(sigma_rhodot_km_s) ** 2
+            var_target = float(sigma_rhodot_km_s) ** 2
             var_before = float(rho_hat @ self.P[3:, 3:] @ rho_hat)
             info["var_rhodot_before"] = var_before
-            if var_before < var_floor:
-                self.P[3:, 3:] += (var_floor - var_before) * uuT
+            if var_before < var_target:
+                self.P[3:, 3:] += (var_target - var_before) * uuT
                 info["velocity_injected"] = True
             info["var_rhodot_after"] = float(rho_hat @ self.P[3:, 3:] @ rho_hat)
-
         self.P = self._symmetrize(self.P)
         return info
+
 
     @staticmethod
     def _project_psd(A, eig_floor=0.0):

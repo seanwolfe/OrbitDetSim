@@ -5,7 +5,7 @@ from Asteroid import Asteroid
 from Formation import Formation
 import numpy as np
 import mpi4py.rc
-from od_spkf_adaptiveR_Pinjection import OD_UKF, od_setup_from_iod, process_tracklet_until_update_with_prior_epoch
+from od_spkf_adaptiveR_Pinjection_decay_no_floor import OD_UKF, od_setup_from_iod, process_tracklet_until_update_with_prior_epoch
 from time_tracker import SimTime
 import copy
 mpi4py.rc.threads = False
@@ -2115,6 +2115,8 @@ def run_OD(config_global):
                         theta_h_rad,
                         alpha_max,
                         omega_max,
+                        sc_pointings_eme[ list(formation.currently_detecting), :],
+                        list(formation.currently_detecting),
                         d_M=config['d_mahal'],
                         use_fixed_agent=True,
                         fixed_agent_idx=int(formation.currently_detecting[0]),
@@ -2955,11 +2957,13 @@ def run_OD(config_global):
                             theta_h_rad,
                             alpha_max,
                             omega_max,
+                            sc_pointings_eme[ list(formation.currently_detecting), :],
+                            list(formation.currently_detecting),
                             d_M=config['d_mahal'],
                             use_fixed_agent=False,
-                            fixed_agent_idx=int(formation.currently_detecting[0]),
+                            fixed_agent_idx=None,
                             fixed_agent_u=sc_pointings_eme[int(formation.currently_detecting[0]), :],
-                            coverage_point=ast_eme_traj_kms[:, :3]
+                            coverage_point=ast_eme_traj_kms[:, :3],
                         )
                     else:
                         if len(formation.currently_detecting) == 1:
@@ -2972,6 +2976,8 @@ def run_OD(config_global):
                                 theta_h_rad,
                                 alpha_max,
                                 omega_max,
+                                sc_pointings_eme[ list(formation.currently_detecting), :],
+                                list(formation.currently_detecting),
                                 d_M=config['d_mahal'],
                                 use_fixed_agent=True,
                                 fixed_agent_idx=int(formation.currently_detecting[0]),
@@ -2988,6 +2994,8 @@ def run_OD(config_global):
                                 theta_h_rad,
                                 alpha_max,
                                 omega_max,
+                                sc_pointings_eme[ list(formation.currently_detecting), :],
+                                list(formation.currently_detecting),
                                 d_M=config['d_mahal'],
                                 use_fixed_agent=False,
                                 fixed_agent_idx=int(formation.currently_detecting[0]),
@@ -3318,7 +3326,7 @@ def run_OD(config_global):
                             show_agent_name_annotations=True,
                             show_agent_orbit_tracks=True,
                             show_spacecraft_orbit=False,
-                            show_coverage=True,
+                            show_coverage=False,
 
                             Nx=60,
                             Ny=60,
@@ -3352,7 +3360,7 @@ def run_OD(config_global):
                             init_boresight_alpha=0.95,
 
                             # slew history
-                            slew_history=slew_history,
+                            slew_history=None,
                             slew_history_line_len=ray_length,
                             slew_history_lw=1.8,
                             slew_history_alpha=0.85,
