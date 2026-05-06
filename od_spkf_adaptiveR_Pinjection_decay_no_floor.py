@@ -433,7 +433,7 @@ class OD_UKF:
         adaptive_R_psd_floor=1e-18,        # numerical eigenvalue floor for adaptive R in unit-vector space
         sigma_rho_single_obs_km=None,      # range uncertainty enforced during single-observer updates [km]
         sigma_rhodot_single_obs_km_s=None, # range-rate uncertainty enforced during single-observer updates [km/s]
-        p_injection_decay_tau=2.0,         # multi-observer exponential decay constant in update counts; no final floor
+        p_injection_decay_tau=1.0,         # multi-observer exponential decay constant in update counts; no final floor
         ukf_alpha=1e-3,
         ukf_beta=2.0,
         ukf_kappa=0.0,
@@ -891,7 +891,7 @@ class OD_UKF:
         z = np.asarray(z_rhohat, dtype=float).reshape(3)
         r_obs = np.asarray(r_obs_km, dtype=float).reshape(3)
         R_nominal = np.asarray(R_hat, dtype=float).reshape(3, 3)
-
+        # print(np.diag(self.P))
         X, Wm, Wc = self._sigma_points(self.x, self.P)
 
         Zsig = np.zeros((X.shape[0], 3), dtype=float)

@@ -25,6 +25,7 @@ import math
 import time
 from datetime import datetime
 import traceback
+import pickle
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
 sp.furnsh("de430.bsp")
@@ -1467,6 +1468,286 @@ def run_OD(config_global):
         except Exception:
             return None
 
+    def _atomic_pickle_dump(obj, path):
+        """Atomically write a pickle file so a killed job does not leave a half-written checkpoint."""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp_path = f"{path}.tmp"
+        with open(tmp_path, "wb") as f:
+            pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+
+    def _safe_np_random_state():
+        try:
+            return np.random.get_state()
+        except Exception:
+            return None
+
+    def _restore_np_random_state(state):
+        if state is None:
+            return
+        try:
+            np.random.set_state(state)
+        except Exception:
+            pass
+
+    def _checkpoint_path_for(run_dir, checkpoint_name="checkpoint_state.pkl"):
+        return os.path.join(run_dir, checkpoint_name)
+
+    def _get_sc_epochs(formation):
+        try:
+            return [getattr(sc, "curr_sc_epoch", None) for sc in formation.spacecraft]
+        except Exception:
+            return None
+
+    def _set_sc_epochs(formation, epochs):
+        if epochs is None:
+            return
+        try:
+            for sc, ep in zip(formation.spacecraft, epochs):
+                sc.curr_sc_epoch = ep
+        except Exception:
+            pass
+
+    def _save_od_checkpoint(
+            checkpoint_path, *, uid, m_idx, rank, ukf, timer, minimoon, formation,
+            od_convergence_streak, last_od_stop_metrics, last_completed_outer_step,
+            outer_csv_path, termination_reason="", progress_status="running"
+    ):
+        """Save the minimum state needed to resume from the last completed outer OD step."""
+        payload = {
+            "schema_version": 1,
+            "uid": uid,
+            "master_row_idx": int(m_idx),
+            "rank": int(rank),
+            "outer_csv_path": outer_csv_path,
+            "last_completed_outer_step": int(last_completed_outer_step),
+            "termination_reason": str(termination_reason or ""),
+            "progress_status": str(progress_status or "running"),
+            "rng_state_numpy": _safe_np_random_state(),
+            # Save object dictionaries for filter/timer because these contain small arrays,
+            # counters, adaptive-R histories, and mutable timer search grids.
+            "ukf_dict": copy.deepcopy(getattr(ukf, "__dict__", {})),
+            "timer_dict": copy.deepcopy(getattr(timer, "__dict__", {})),
+            # The asteroid epoch is intentionally not authoritative; timer.curr_epoch is.
+            "minimoon_curr_state_eme": np.asarray(getattr(minimoon, "curr_state_eme", np.full(6, np.nan)), dtype=float).copy(),
+            "formation_states_eme": np.asarray(formation.get_spacecraft_states(), dtype=float).copy(),
+            "formation_pointings_eme": np.asarray(formation.get_spacecraft_pointings(), dtype=float).copy(),
+            "formation_sc_epochs": _get_sc_epochs(formation),
+            "currently_detecting": tuple(int(x) for x in np.asarray(getattr(formation, "currently_detecting", ()), dtype=int).reshape(-1)),
+            "od_convergence_streak": int(od_convergence_streak),
+            "last_od_stop_metrics": copy.deepcopy(last_od_stop_metrics),
+        }
+        _atomic_pickle_dump(payload, checkpoint_path)
+
+    def _read_od_checkpoint(checkpoint_path):
+        if not os.path.exists(checkpoint_path):
+            return None
+        with open(checkpoint_path, "rb") as f:
+            return pickle.load(f)
+
+    def _restore_od_checkpoint(chk, *, ukf, timer, minimoon, formation):
+        """Restore checkpoint state into freshly constructed objects."""
+        if not isinstance(chk, dict):
+            raise ValueError("OD checkpoint is not a dictionary")
+        if int(chk.get("schema_version", -1)) != 1:
+            raise ValueError(f"Unsupported OD checkpoint schema_version={chk.get('schema_version')}")
+
+        ukf.__dict__.update(copy.deepcopy(chk.get("ukf_dict", {})))
+        timer.__dict__.update(copy.deepcopy(chk.get("timer_dict", {})))
+        minimoon.curr_state_eme = np.asarray(chk["minimoon_curr_state_eme"], dtype=float).reshape(6,)
+        formation.set_spacecraft_states(np.asarray(chk["formation_states_eme"], dtype=float).reshape(-1, 6))
+        formation.set_spacecraft_pointings(np.asarray(chk["formation_pointings_eme"], dtype=float).reshape(-1, 3))
+        _set_sc_epochs(formation, chk.get("formation_sc_epochs", None))
+        formation.currently_detecting = tuple(int(x) for x in np.asarray(chk.get("currently_detecting", ()), dtype=int).reshape(-1))
+        _restore_np_random_state(chk.get("rng_state_numpy", None))
+        return int(chk.get("od_convergence_streak", 0)), copy.deepcopy(chk.get("last_od_stop_metrics", {}))
+
+    def _write_incomplete_progress(progress_path, *, uid, timer, outer_csv_path, termination_reason, checkpoint_path=None):
+        _write_progress(progress_path, {
+            "uid": uid,
+            "last_completed_outer_step": int(getattr(timer, "curr_od_index", -1)),
+            "last_epoch_jdtdb": float(getattr(timer, "curr_epoch", np.nan)),
+            "completed": False,
+            "termination_reason": str(termination_reason),
+            "outer_csv_path": outer_csv_path,
+            "checkpoint_path": checkpoint_path,
+        })
+
+    def _walltime_near_limit(job_start_time, wall_cfg):
+        if not bool(wall_cfg.get("enabled", False)):
+            return False
+        max_walltime_sec = wall_cfg.get("max_walltime_sec", None)
+        if max_walltime_sec is None:
+            return False
+        safety_buffer_sec = float(wall_cfg.get("safety_buffer_sec", 900.0))
+        return (time.time() - job_start_time) >= (float(max_walltime_sec) - safety_buffer_sec)
+
+    def _read_last_outer_row(outer_csv_path):
+        """Return the last row of an outer-loop CSV as a dict, or an empty dict."""
+        if not os.path.exists(outer_csv_path):
+            return {}
+        try:
+            df = pd.read_csv(outer_csv_path)
+            if len(df) == 0:
+                return {}
+            return df.iloc[-1].to_dict()
+        except Exception:
+            return {}
+
+    def _csv_scalar(v):
+        """Make scalar values safe for CSV without turning useful strings into NaN."""
+        try:
+            if v is None:
+                return ""
+            if isinstance(v, str):
+                return v
+            if pd.isna(v):
+                return np.nan
+            return v
+        except Exception:
+            return v
+
+    def _serialize_outer_vec(last_outer_row, prefix, n):
+        """Serialize fields like x_est_0...x_est_5 from an outer-loop row."""
+        vals = []
+        for i in range(n):
+            v = last_outer_row.get(f"{prefix}_{i}", np.nan)
+            try:
+                vals.append("" if pd.isna(v) else f"{float(v):.16g}")
+            except Exception:
+                vals.append(str(v))
+        return ";".join(vals)
+
+    def _build_od_master_row_from_outer_last(
+            *, uid, m_idx, rank, outer_csv_path, num_sc, termination_reason_fallback="",
+            final_epoch_fallback=np.nan, final_steps_fallback=np.nan
+    ):
+        """Build one compact OD summary row from the final row of a run's outer-loop CSV."""
+        last = _read_last_outer_row(outer_csv_path)
+
+        # Prefer the final outer-loop row. Fall back only if the outer log cannot be read.
+        final_epoch = last.get("epoch_end_jdtdb", final_epoch_fallback)
+        final_steps = last.get("od_step_idx", final_steps_fallback)
+        term_reason = last.get("termination_reason", termination_reason_fallback)
+
+        row = {
+            "master_row_idx": int(m_idx),
+            "run_uid": uid,
+            "rank": int(rank),
+            "OD_RUN_UID": uid,
+            "OD_RANK": int(rank),
+            "OD_RESULT_SAVED_AS": os.path.basename(outer_csv_path),
+            "OD_OUTER_CSV_PATH": outer_csv_path,
+            "OD_EVENT_TYPE": _csv_scalar(last.get("event_type", "")),
+            "OD_TERMINATION_REASON": _csv_scalar(term_reason),
+            "OD_PROGRESS_STATUS": _csv_scalar(last.get("progress_status", "")),
+            "OD_FINAL_TIME_JDTDB": _csv_scalar(final_epoch),
+            "OD_N_STEPS": _csv_scalar(final_steps),
+            "OD_HAD_DETECTION": _csv_scalar(last.get("had_detection", np.nan)),
+            "OD_N_DETECTIONS": _csv_scalar(last.get("n_detections", np.nan)),
+            "OD_DETECTING_IDS": _csv_scalar(last.get("detecting_ids", "")),
+            "OD_PROCESSED_EPOCH_FIRST_JDTDB": _csv_scalar(last.get("processed_epoch_first_jdtdb", np.nan)),
+            "OD_PROCESSED_EPOCH_LAST_JDTDB": _csv_scalar(last.get("processed_epoch_last_jdtdb", np.nan)),
+            "OD_PROCESSED_EPOCH_COUNT": _csv_scalar(last.get("processed_epoch_count", np.nan)),
+            "OD_TIME_SEC": _csv_scalar(last.get("od_time_sec", np.nan)),
+            "OD_ATTCOORD_TIME_SEC": _csv_scalar(last.get("attcoord_time_sec", np.nan)),
+            "OD_LAST_POS_RMSE": _csv_scalar(last.get("pos_err_norm", np.nan)),
+            "OD_LAST_VEL_RMSE": _csv_scalar(last.get("vel_err_norm", np.nan)),
+            "OD_P_POS_TRACE": _csv_scalar(last.get("P_pos_trace", np.nan)),
+            "OD_P_VEL_TRACE": _csv_scalar(last.get("P_vel_trace", np.nan)),
+            "OD_P_POS_SIGMA_3D": _csv_scalar(last.get("P_pos_sigma_3d", np.nan)),
+            "OD_P_VEL_SIGMA_3D": _csv_scalar(last.get("P_vel_sigma_3d", np.nan)),
+            "OD_NIS_LAST": _csv_scalar(last.get("NIS_last", np.nan)),
+            "OD_NIS_MEAN": _csv_scalar(last.get("NIS_mean", np.nan)),
+            "OD_NIS_COUNT": _csv_scalar(last.get("NIS_count", np.nan)),
+            "OD_CONVERGENCE_STREAK": _csv_scalar(last.get("OD_convergence_streak", np.nan)),
+            "OD_CHOSEN_CANDIDATE_IDX": _csv_scalar(last.get("chosen_candidate_idx", np.nan)),
+            "OD_CHOSEN_CANDIDATE_EPOCH_JDTDB": _csv_scalar(last.get("chosen_candidate_epoch_jdtdb", np.nan)),
+            "OD_FINAL_STATE": _serialize_outer_vec(last, "x_est", 6),
+            "OD_FINAL_TRUE_STATE": _serialize_outer_vec(last, "x_true", 6),
+            "OD_FINAL_P_DIAG": _serialize_outer_vec(last, "P_diag", 6),
+            "OD_MASTER_WRITE_UTC": dt.datetime.utcnow().isoformat() + "Z",
+        }
+
+        for sc_id in range(num_sc):
+            row[f"OD_FINAL_SC{sc_id}_STATE"] = _serialize_outer_vec(last, f"sc{sc_id}_state_post", 6)
+            row[f"OD_FINAL_SC{sc_id}_POINTING"] = _serialize_outer_vec(last, f"sc{sc_id}_pointing_post", 3)
+
+        return row
+
+    def _append_od_master_row(od_master_rank_path, row_dict, od_master_header, dedup_existing=True):
+        """Append one completed OD summary to this rank's OD master CSV.
+
+        This is rank-local, so it needs no MPI/file lock. If a retry tries to append
+        the same master_row_idx/run_uid again, dedup_existing prevents duplicates.
+        """
+        os.makedirs(os.path.dirname(od_master_rank_path), exist_ok=True)
+        if dedup_existing and os.path.exists(od_master_rank_path):
+            try:
+                prev = pd.read_csv(od_master_rank_path, usecols=["master_row_idx", "run_uid"])
+                dup = (prev["master_row_idx"].astype(int) == int(row_dict["master_row_idx"])) & (prev["run_uid"].astype(str) == str(row_dict["run_uid"]))
+                if bool(dup.any()):
+                    return
+            except Exception:
+                pass
+        _append_row(od_master_rank_path, row_dict, od_master_header)
+
+    def _merge_od_master_rows_into_master(master_fn, od_master_dir, od_master_glob, od_master_header):
+        """Rank-0 convenience merge: per-rank OD master rows -> MASTER_IOD.csv.
+
+        The per-rank OD master files remain the durable OD-stage record even if this
+        final merge is interrupted by walltime.
+        """
+        paths = sorted(glob.glob(os.path.join(od_master_dir, od_master_glob)))
+        if len(paths) == 0:
+            return 0
+
+        frames = []
+        for path in paths:
+            try:
+                df = pd.read_csv(path)
+                if len(df) > 0:
+                    frames.append(df)
+            except Exception as e:
+                print(f"[Stage: OD] Could not read OD master file {path}: {e}", flush=True)
+
+        if len(frames) == 0:
+            return 0
+
+        od_df = pd.concat(frames, ignore_index=True)
+        if "master_row_idx" not in od_df.columns:
+            return 0
+
+        # Keep the latest appended summary for each MASTER row.
+        if "OD_MASTER_WRITE_UTC" in od_df.columns:
+            od_df = od_df.sort_values(["master_row_idx", "OD_MASTER_WRITE_UTC"])
+        od_df = od_df.drop_duplicates(subset=["master_row_idx"], keep="last")
+
+        dfm = pd.read_csv(master_fn)
+        # Keep rank-local bookkeeping columns in OD_MASTER.csv, but do not add
+        # unprefixed columns like run_uid/rank to the main MASTER_IOD.csv.
+        merge_cols = [c for c in od_df.columns if c not in ("master_row_idx", "run_uid", "rank")]
+        for col in merge_cols:
+            if col not in dfm.columns:
+                dfm[col] = ""
+
+        for _, upd in od_df.iterrows():
+            try:
+                ri = int(upd["master_row_idx"])
+            except Exception:
+                continue
+            if ri < 0 or ri >= len(dfm):
+                continue
+            for col in merge_cols:
+                dfm.at[ri, col] = upd[col]
+
+        tmp = master_fn + ".tmp"
+        dfm.to_csv(tmp, index=False)
+        os.replace(tmp, master_fn)
+        return int(len(od_df))
+
     def _summarize_meas_outer(meas):
         try:
             arr = np.asarray(meas)
@@ -1753,6 +2034,23 @@ def run_OD(config_global):
     log_attcoord = bool(diag_cfg.get("log_attcoord_candidates", False))
     log_optimizer = bool(diag_cfg.get("log_optimizer_history", False))
 
+    checkpoint_cfg = config_global.get("od_checkpoint", {})
+    checkpoint_enabled_default = True
+    checkpoint_enabled = bool(checkpoint_cfg.get("enabled", checkpoint_enabled_default))
+    checkpoint_name = str(checkpoint_cfg.get("checkpoint_name", "checkpoint_state.pkl"))
+    walltime_cfg = checkpoint_cfg.get("walltime_guard", {})
+    # Backward-compatible flat config style is also accepted:
+    # od_checkpoint:
+    #   walltime_guard_enabled: true
+    #   max_walltime_sec: 82800
+    #   safety_buffer_sec: 900
+    if "walltime_guard_enabled" in checkpoint_cfg or "max_walltime_sec" in checkpoint_cfg:
+        walltime_cfg = {
+            "enabled": bool(checkpoint_cfg.get("walltime_guard_enabled", checkpoint_cfg.get("enabled", False))),
+            "max_walltime_sec": checkpoint_cfg.get("max_walltime_sec", None),
+            "safety_buffer_sec": checkpoint_cfg.get("safety_buffer_sec", 900.0),
+        }
+
     outer_dir = diag_cfg.get("outer_loop_dir", os.path.join(iod_dir, "od_outer_logs"))
     detail_root = diag_cfg.get("detail_root_dir", os.path.join(iod_dir, "od_run_details"))
     os.makedirs(outer_dir, exist_ok=True)
@@ -1766,16 +2064,18 @@ def run_OD(config_global):
     od_max_steps = config_global.get('od_max_steps', None)
     od_max_steps = int(od_max_steps) if (od_max_steps is not None) else None
 
-    # Columns we’ll add/update in MASTER
-    od_metrics_cols = [
-        "OD_RESULT_SAVED_AS",
-        "OD_FINAL_TIME_JDTDB",
-        "OD_N_STEPS",
-        "OD_LAST_POS_RMSE",
-        "OD_LAST_VEL_RMSE",
-    ]
+    # Per-rank OD master files: durable, low-memory OD summary output for MPI/HPC.
+    od_master_cfg = config_global.get("od_master", {})
+    od_master_enabled = bool(od_master_cfg.get("enabled", True))
+    od_master_dir = od_master_cfg.get("dir", os.path.join(iod_dir, "od_master_rows"))
+    od_master_filename_template = str(od_master_cfg.get("rank_filename_template", "od_master_rank_{rank}.csv"))
+    od_master_rank_path = os.path.join(od_master_dir, od_master_filename_template.format(rank=rank))
+    od_master_merge_at_end = bool(od_master_cfg.get("merge_into_master_at_end", True))
+    od_master_glob = str(od_master_cfg.get("merge_glob", "od_master_rank_*.csv"))
 
-    updates = []
+    if od_master_enabled:
+        os.makedirs(od_master_dir, exist_ok=True)
+
     processed = skipped = errors = 0
 
     # ---------------------------------------------------------
@@ -1891,9 +2191,52 @@ def run_OD(config_global):
         optimizer_header += [f"u_sc{sc_id}_{i}" for i in range(3)]
     optimizer_header += [f"slew_sc{i}" for i in range(num_sc)]
 
+    od_master_header = [
+        "master_row_idx",
+        "run_uid",
+        "rank",
+        "OD_RUN_UID",
+        "OD_RANK",
+        "OD_RESULT_SAVED_AS",
+        "OD_OUTER_CSV_PATH",
+        "OD_EVENT_TYPE",
+        "OD_TERMINATION_REASON",
+        "OD_PROGRESS_STATUS",
+        "OD_FINAL_TIME_JDTDB",
+        "OD_N_STEPS",
+        "OD_HAD_DETECTION",
+        "OD_N_DETECTIONS",
+        "OD_DETECTING_IDS",
+        "OD_PROCESSED_EPOCH_FIRST_JDTDB",
+        "OD_PROCESSED_EPOCH_LAST_JDTDB",
+        "OD_PROCESSED_EPOCH_COUNT",
+        "OD_TIME_SEC",
+        "OD_ATTCOORD_TIME_SEC",
+        "OD_LAST_POS_RMSE",
+        "OD_LAST_VEL_RMSE",
+        "OD_P_POS_TRACE",
+        "OD_P_VEL_TRACE",
+        "OD_P_POS_SIGMA_3D",
+        "OD_P_VEL_SIGMA_3D",
+        "OD_NIS_LAST",
+        "OD_NIS_MEAN",
+        "OD_NIS_COUNT",
+        "OD_CONVERGENCE_STREAK",
+        "OD_CHOSEN_CANDIDATE_IDX",
+        "OD_CHOSEN_CANDIDATE_EPOCH_JDTDB",
+        "OD_FINAL_STATE",
+        "OD_FINAL_TRUE_STATE",
+        "OD_FINAL_P_DIAG",
+        "OD_MASTER_WRITE_UTC",
+    ]
+    for sc_id in range(num_sc):
+        od_master_header += [f"OD_FINAL_SC{sc_id}_STATE", f"OD_FINAL_SC{sc_id}_POINTING"]
+
     # ---------------------------------------------------------
     # Main row loop
     # ---------------------------------------------------------
+    job_start_time = time.time()
+
     for m_idx in my_indices:
         row = df_master.iloc[m_idx]
 
@@ -1922,6 +2265,8 @@ def run_OD(config_global):
         inner_csv_path = os.path.join(run_dir, "inner_kf_updates.csv")
         attcoord_csv_path = os.path.join(run_dir, "attcoord_candidates.csv")
         optimizer_csv_path = os.path.join(run_dir, "optimizer_history.csv")
+        checkpoint_path = _checkpoint_path_for(run_dir, checkpoint_name)
+        row_paused_for_walltime = False
 
         try:
             # ----------------------------------------------
@@ -2039,7 +2384,46 @@ def run_OD(config_global):
                 "convergence_streak": 0,
             }
 
+            # True checkpoint resume: restore the filter/timer/formation state directly
+            # instead of replaying from the beginning. The old resume_after_step guard is
+            # kept only as a duplicate-write safety net.
+            if checkpoint_enabled and os.path.exists(checkpoint_path):
+                chk = _read_od_checkpoint(checkpoint_path)
+                od_convergence_streak, restored_metrics = _restore_od_checkpoint(
+                    chk, ukf=ukf, timer=timer, minimoon=minimoon, formation=formation
+                )
+                if restored_metrics:
+                    last_od_stop_metrics.update(restored_metrics)
+                resume_after_step = int(chk.get("last_completed_outer_step", resume_after_step))
+                print(
+                    f"[OD r{rank} uid={uid}] Resumed from checkpoint at "
+                    f"od_step_idx={timer.curr_od_index}, epoch_jdtdb={timer.curr_epoch}",
+                    flush=True,
+                )
+
             while True:
+                if _walltime_near_limit(job_start_time, walltime_cfg):
+                    termination_reason = "walltime_checkpoint"
+                    progress_status = "paused"
+                    if checkpoint_enabled:
+                        _save_od_checkpoint(
+                            checkpoint_path, uid=uid, m_idx=m_idx, rank=rank, ukf=ukf, timer=timer,
+                            minimoon=minimoon, formation=formation,
+                            od_convergence_streak=od_convergence_streak,
+                            last_od_stop_metrics=last_od_stop_metrics,
+                            last_completed_outer_step=int(getattr(timer, "curr_od_index", -1)),
+                            outer_csv_path=outer_csv_path,
+                            termination_reason=termination_reason,
+                            progress_status=progress_status,
+                        )
+                    _write_incomplete_progress(
+                        progress_path, uid=uid, timer=timer, outer_csv_path=outer_csv_path,
+                        termination_reason=termination_reason, checkpoint_path=(checkpoint_path if checkpoint_enabled else None)
+                    )
+                    row_paused_for_walltime = True
+                    print(f"[OD r{rank} uid={uid}] Pausing before walltime limit; checkpoint saved.", flush=True)
+                    break
+
                 if timer.curr_epoch > timer.end_time:
                     print("Over Time")
                     termination_reason = "time_limit"
@@ -2313,7 +2697,7 @@ def run_OD(config_global):
                     detecting_ids_str = str(int(setup["sc_detecting_id"]))
 
                     # visualize att_coord result
-                    att_coord_viz_flag_ini = True
+                    att_coord_viz_flag_ini = False
                     if att_coord_viz_flag_ini:
                         best_epoch = res_kcoverage.chosen_dt
                         best_idx = np.where(timer.attcoord_searchtimes == best_epoch)[0]
@@ -2822,8 +3206,8 @@ def run_OD(config_global):
                                 show=False,
                             )
 
-                    print(detection_res_k)
-                    plt.show()
+                    # print(detection_res_k)
+                    # plt.show()
 
                     # -------------------------
                     # Prediction + UKF update only
@@ -3365,7 +3749,7 @@ def run_OD(config_global):
                                 _append_row(optimizer_csv_path, row_opt, optimizer_header)
 
                     # visualize att_coord result
-                    att_coord_viz_flag = True
+                    att_coord_viz_flag = False
                     if att_coord_viz_flag:
                         best_epoch = res_kcoverage.chosen_dt
                         best_idx = np.where(timer.attcoord_searchtimes == best_epoch)[0]
@@ -3957,7 +4341,19 @@ def run_OD(config_global):
                         "completed": False,
                         "termination_reason": "",
                         "outer_csv_path": outer_csv_path,
+                        "checkpoint_path": (checkpoint_path if checkpoint_enabled else None),
                     })
+                    if checkpoint_enabled:
+                        _save_od_checkpoint(
+                            checkpoint_path, uid=uid, m_idx=m_idx, rank=rank, ukf=ukf, timer=timer,
+                            minimoon=minimoon, formation=formation,
+                            od_convergence_streak=od_convergence_streak,
+                            last_od_stop_metrics=last_od_stop_metrics,
+                            last_completed_outer_step=int(timer.curr_od_index),
+                            outer_csv_path=outer_csv_path,
+                            termination_reason="",
+                            progress_status=progress_status,
+                        )
 
                 print_od_status(
                     timer=timer,
@@ -3974,14 +4370,19 @@ def run_OD(config_global):
             final_epoch = float(getattr(timer, "curr_epoch", np.nan))
             final_steps = int(getattr(timer, "curr_od_index", 0))
 
-            updates.append({
-                "m_idx": m_idx,
-                "OD_RESULT_SAVED_AS": os.path.basename(outer_csv_path),
-                "OD_FINAL_TIME_JDTDB": final_epoch,
-                "OD_N_STEPS": final_steps,
-                "OD_LAST_POS_RMSE": last_pos_rmse,
-                "OD_LAST_VEL_RMSE": last_vel_rmse,
-            })
+            if row_paused_for_walltime:
+                # Incomplete by design: leave no .done marker so the next job resumes this row.
+                # Stop this rank's row loop too; near walltime, starting another row is unsafe.
+                break
+
+            if od_master_enabled:
+                od_summary = _build_od_master_row_from_outer_last(
+                    uid=uid, m_idx=m_idx, rank=rank, outer_csv_path=outer_csv_path, num_sc=num_sc,
+                    termination_reason_fallback=termination_reason,
+                    final_epoch_fallback=final_epoch,
+                    final_steps_fallback=final_steps,
+                )
+                _append_od_master_row(od_master_rank_path, od_summary, od_master_header)
 
             _write_progress(progress_path, {
                 "uid": uid,
@@ -3990,6 +4391,7 @@ def run_OD(config_global):
                 "completed": True,
                 "termination_reason": termination_reason,
                 "outer_csv_path": outer_csv_path,
+                "checkpoint_path": (checkpoint_path if checkpoint_enabled else None),
             })
             write_done(uid)
             processed += 1
@@ -4043,39 +4445,50 @@ def run_OD(config_global):
                         row_out[f"sc{sc_id}_pointing_post_{i}"] = np.nan
 
                 _append_row(outer_csv_path, row_out, outer_header)
+                err_final_epoch = float(getattr(timer, "curr_epoch", np.nan)) if "timer" in locals() else np.nan
+                err_final_step = int(getattr(timer, "curr_od_index", -1)) if "timer" in locals() else -1
                 _write_progress(progress_path, {
                     "uid": uid,
-                    "last_completed_outer_step": int(getattr(timer, "curr_od_index", -1)) if "timer" in locals() else -1,
-                    "last_epoch_jdtdb": float(getattr(timer, "curr_epoch", np.nan)) if "timer" in locals() else np.nan,
-                    "completed": False,
-                    "termination_reason": f"{type(e).__name__}: {e}",
+                    "last_completed_outer_step": err_final_step,
+                    "last_epoch_jdtdb": err_final_epoch,
+                    "completed": True,
+                    "termination_reason": f"ERROR_TERMINAL: {type(e).__name__}: {e}",
                     "outer_csv_path": outer_csv_path,
+                    "checkpoint_path": (checkpoint_path if checkpoint_enabled else None),
                 })
+                if od_master_enabled:
+                    od_summary = _build_od_master_row_from_outer_last(
+                        uid=uid, m_idx=m_idx, rank=rank, outer_csv_path=outer_csv_path, num_sc=num_sc,
+                        termination_reason_fallback=f"ERROR_TERMINAL: {type(e).__name__}: {e}",
+                        final_epoch_fallback=err_final_epoch,
+                        final_steps_fallback=err_final_step,
+                    )
+                    _append_od_master_row(od_master_rank_path, od_summary, od_master_header)
+                write_done(uid)
             except Exception:
-                pass
+                try:
+                    write_done(uid)
+                except Exception:
+                    pass
 
     # ---------------------------------------------------------
-    # Rank 0 updates MASTER
+    # Optional rank-0 merge: per-rank OD master rows -> MASTER_IOD.csv
     # ---------------------------------------------------------
-    all_updates = comm.gather(updates, root=0)
+    comm.Barrier()
 
     if rank == 0:
-        flat_updates = [u for sub in all_updates for u in sub]
-        if len(flat_updates) > 0:
-            dfm = pd.read_csv(master_fn)
+        merged_rows = 0
+        if od_master_enabled and od_master_merge_at_end:
+            try:
+                merged_rows = _merge_od_master_rows_into_master(
+                    master_fn, od_master_dir, od_master_glob, od_master_header
+                )
+                print(f"[Stage: OD] merged {merged_rows} OD summary rows into {master_fn}", flush=True)
+            except Exception as e:
+                print(f"[Stage: OD] WARNING: could not merge OD master rows into MASTER_IOD.csv: {e}", flush=True)
+                traceback.print_exc()
 
-            for col in od_metrics_cols:
-                if col not in dfm.columns:
-                    dfm[col] = ""
-
-            for upd in flat_updates:
-                m_idx = upd["m_idx"]
-                for col in od_metrics_cols:
-                    dfm.at[m_idx, col] = upd[col]
-
-            dfm.to_csv(master_fn, index=False)
-
-        print(f"[Stage: OD] processed={processed}, skipped={skipped}, errors={errors}")
+        print(f"[Stage: OD] rank0 summary: processed={processed}, skipped={skipped}, errors={errors}")
 
 
 def run_OD_legacy(config_global):

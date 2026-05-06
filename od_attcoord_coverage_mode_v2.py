@@ -2335,7 +2335,7 @@ def optimize_pointing_lbfgs_joint(
         n_uncertainty_candidates=num_candidates, n_los_candidates=num_candidates, return_log=True
     )
 
-    debug_ini_flag = True
+    debug_ini_flag = False
     if debug_ini_flag:
         from collections import Counter
         print("after uncertainty stage counts:", Counter(row["stage"] for row in candidate_log))

@@ -15,10 +15,12 @@ telescope_offset: 0.3  # m
 telescope_length: 0.3
 # sigma_ra: 981  # right ascension measurement uncertainty - mas
 # sigma_dec: 939  # declination measurement uncertainty - mas
-# sigma_pointing: 7200  # pointing uncertainty - mas
-sigma_ra: 0.
-sigma_dec: 0.
-sigma_pointing: 500
+sigma_ra: 1887  # right ascension measurement uncertainty - mas
+sigma_dec: 1806  # declination measurement uncertainty - mas
+sigma_pointing: 7200  # pointing uncertainty - mas
+#sigma_ra: 0.
+#sigma_dec: 0.
+#sigma_pointing: 500
 number_of_frames: 16  # the number of measurements expected from detection technique
 time_between_frames: 31.25 # the time between consecutive frames from detection technique, in seconds
 patch_time: 1.6  # time for detection algo to process one patch
@@ -157,8 +159,8 @@ error:
 # epoch grid to search over
 epochs:
   dt_min: 1.0   # in seconds, first time to check
-  dt_max: 86400.0  # last time to check
-  n_dt: 5       # number of checks
+  dt_max: 3600.0  # last time to check
+  n_dt: 7       # number of checks
   average_epoch_time: 20  # average time to run the att coord algorithm for one time, seconds
 
 d_mahal: 3.0
@@ -182,7 +184,7 @@ ems:
   p_em: [0.0, 0.0, 0.0]
   R_em: 0.5e+6
   alpha_s_deg: 2
-  lambda_em: 2
+  lambda_em: 5
   beta_zeta: 1500.0
 
 
@@ -200,8 +202,8 @@ od_diagnostics:
 base_seed: 1765220306
 num_od_runs: 1
 od_file_dir: 'OD_results'
-od_duration_days: 3000
-od_max_steps: 5
+od_duration_days: 30
+od_max_steps: 1000
 od_status_every: 1
 iod_cov_topo_std: [4.4, 2.31, 1.28e+6, 3.27e-5, 2.44e-5, 1.09]  # ra, dec, rho, ra dot, dec dot, rho dot (deg, km, deg/s, km/s)
 INCLUDE_EMS_EXCLUSION: 1
@@ -223,6 +225,42 @@ beta_ukf: 2
 kappa_ukf: 0
 epsilon_ukf: 0.0000000001
 
+od_stop:
+  enabled: true
+
+  pos_trace_threshold_km2: 5.0e2
+  vel_trace_threshold_km2_s2: 5.0e-6
+
+  nis_mean_min: 0.2
+  nis_mean_max: 10.0
+  nis_min_count: 5
+
+  required_consecutive_steps: 25
+
+od_checkpoint:
+  enabled: true
+  checkpoint_name: "checkpoint_state.pkl"
+
+  walltime_guard:
+    enabled: true
+    max_walltime_sec: 86400      # 24 hours
+    safety_buffer_sec: 1800      # stop/checkpoint 30 min early
+
+od_master:
+  enabled: true
+
+  # Default location is:
+  # <iod_dir>/od_master_rows
+  # You can omit this unless you want a custom path.
+  # dir: "/path/to/iod_results/spacecraft_6/od_master_rows"
+
+  rank_filename_template: "od_master_rank_{rank}.csv"
+
+  # If true, rank 0 tries to merge all OD summaries into MASTER_IOD.csv
+  # at the end of run_OD().
+  merge_into_master_at_end: true
+
+  merge_glob: "od_master_rank_*.csv"
 
 #############################
 # Visualization relevant parameters
