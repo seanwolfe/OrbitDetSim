@@ -5,7 +5,7 @@ from Asteroid import Asteroid
 from Formation import Formation
 import numpy as np
 import mpi4py.rc
-from od_spkf_adaptiveR_Pinjection_decay_no_floor import OD_UKF, od_setup_from_iod, process_tracklet_until_update_with_prior_epoch
+from od_spkf_adaptiveR_Pinjection_decay_no_floor_mature_single_nonaug import OD_UKF, od_setup_from_iod, process_tracklet_until_update_with_prior_epoch
 from time_tracker import SimTime
 import copy
 mpi4py.rc.threads = False
@@ -2319,6 +2319,9 @@ def run_OD(config_global):
                 adaptive_R_psd_floor=adaptive_R_config['psd_floor'],
                 sigma_rho_single_obs_km=adaptive_R_config['single_obs_rho'],
                 sigma_rhodot_single_obs_km_s=adaptive_R_config['single_obs_rhodot'],
+                p_injection_decay_tau=adaptive_R_config.get('p_injection_decay_tau', 1.0),
+                multi_observer_maturity_threshold=adaptive_R_config.get('multi_observer_maturity_threshold', 3),
+                mature_single_observer_injection=adaptive_R_config.get('mature_single_observer_injection', 'decayed'),
                 ukf_alpha=alpha,
                 ukf_beta=beta,
                 ukf_kappa=kappa,
@@ -2697,7 +2700,7 @@ def run_OD(config_global):
                     detecting_ids_str = str(int(setup["sc_detecting_id"]))
 
                     # visualize att_coord result
-                    att_coord_viz_flag_ini = False
+                    att_coord_viz_flag_ini = True
                     if att_coord_viz_flag_ini:
                         best_epoch = res_kcoverage.chosen_dt
                         best_idx = np.where(timer.attcoord_searchtimes == best_epoch)[0]
@@ -3206,8 +3209,8 @@ def run_OD(config_global):
                                 show=False,
                             )
 
-                    # print(detection_res_k)
-                    # plt.show()
+                    print(detection_res_k)
+                    plt.show()
 
                     # -------------------------
                     # Prediction + UKF update only
@@ -3749,7 +3752,7 @@ def run_OD(config_global):
                                 _append_row(optimizer_csv_path, row_opt, optimizer_header)
 
                     # visualize att_coord result
-                    att_coord_viz_flag = False
+                    att_coord_viz_flag = True
                     if att_coord_viz_flag:
                         best_epoch = res_kcoverage.chosen_dt
                         best_idx = np.where(timer.attcoord_searchtimes == best_epoch)[0]
@@ -5059,6 +5062,9 @@ def run_OD_legacy(config_global):
                 adaptive_R_psd_floor=adaptive_R_config['psd_floor'],
                 sigma_rho_single_obs_km=adaptive_R_config['single_obs_rho'],
                 sigma_rhodot_single_obs_km_s=adaptive_R_config['single_obs_rhodot'],
+                p_injection_decay_tau=adaptive_R_config.get('p_injection_decay_tau', 1.0),
+                multi_observer_maturity_threshold=adaptive_R_config.get('multi_observer_maturity_threshold', 3),
+                mature_single_observer_injection=adaptive_R_config.get('mature_single_observer_injection', 'decayed'),
                 ukf_alpha=alpha,
                 ukf_beta=beta,
                 ukf_kappa=kappa,

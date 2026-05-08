@@ -30,12 +30,14 @@ class SimTime:
         self.detection_time = (int(math.ceil((big_H * big_L) / (h * l))) + 1) * self.detection_patchtime
         self.iod_time = iod_time
         self.slew_time = None  # seconds
+        self.od_time = None
 
 
     def set_attcoord_searchtimes(self, od_time=None):
         if od_time is None:
             delta = (self.datacollect_time + self.detection_time + self.iod_time + self.attcoord_expectedtime) / 86400.0  # in days
         else:
+            self.od_time = od_time
             delta = (
                             self.datacollect_time + self.detection_time + od_time + self.attcoord_expectedtime) / 86400.0  # in days
         big_t_set_jdtdb = self.curr_epoch + (self.attcoord_searchtimes / 86400.0) + delta
@@ -59,5 +61,20 @@ class SimTime:
         self.curr_od_index += 1
         self.curr_integration_epoch = best_anchor_epoch
         self.curr_integration_index = best_anchor_index
+
+    def check_search_times(self):
+        stop = False
+        od_time = 0 if self.od_time is None else self.od_time
+        delta = (
+                        self.datacollect_time + self.detection_time + od_time + self.attcoord_expectedtime) / 86400.0  # in days
+        big_t_set_jdtdb = self.curr_epoch + (self.attcoord_searchtimes / 86400.0) + delta
+        big_t_set_jdtdb = big_t_set_jdtdb[big_t_set_jdtdb <= self.end_time + 1e-15]
+        num_t_steps = len(big_t_set_jdtdb)
+        if num_t_steps == 0:
+            stop = True
+        return stop
+
+
+
 
 
