@@ -1513,6 +1513,3651 @@ def run_OD(config_global):
     def _save_od_checkpoint(
             checkpoint_path, *, uid, m_idx, rank, ukf, timer, minimoon, formation,
             od_convergence_streak, last_od_stop_metrics, last_completed_outer_step,
+            outer_csv_path, termination_reason="", progress_status="running", no_detection_state=None
+    ):
+        """Save the minimum state needed to resume from the last completed outer OD step."""
+        payload = {
+            "schema_version": 1,
+            "uid": uid,
+            "master_row_idx": int(m_idx),
+            "rank": int(rank),
+            "outer_csv_path": outer_csv_path,
+            "last_completed_outer_step": int(last_completed_outer_step),
+            "termination_reason": str(termination_reason or ""),
+            "progress_status": str(progress_status or "running"),
+            "rng_state_numpy": _safe_np_random_state(),
+            # Save object dictionaries for filter/timer because these contain small arrays,
+            # counters, adaptive-R histories, and mutable timer search grids.
+            "ukf_dict": copy.deepcopy(getattr(ukf, "__dict__", {})),
+            "timer_dict": copy.deepcopy(getattr(timer, "__dict__", {})),
+            # The asteroid epoch is intentionally not authoritative; timer.curr_epoch is.
+            "minimoon_curr_state_eme": np.asarray(getattr(minimoon, "curr_state_eme", np.full(6, np.nan)), dtype=float).copy(),
+            "formation_states_eme": np.asarray(formation.get_spacecraft_states(), dtype=float).copy(),
+            "formation_pointings_eme": np.asarray(formation.get_spacecraft_pointings(), dtype=float).copy(),
+            "formation_sc_epochs": _get_sc_epochs(formation),
+            "currently_detecting": tuple(int(x) for x in np.asarray(getattr(formation, "currently_detecting", ()), dtype=int).reshape(-1)),
+            "od_convergence_streak": int(od_convergence_streak),
+            "last_od_stop_metrics": copy.deepcopy(last_od_stop_metrics),
+            "no_detection_state": copy.deepcopy(no_detection_state or {}),
+        }
+        _atomic_pickle_dump(payload, checkpoint_path)
+
+    def _read_od_checkpoint(checkpoint_path):
+        if not os.path.exists(checkpoint_path):
+            return None
+        with open(checkpoint_path, "rb") as f:
+            return pickle.load(f)
+
+    def _restore_od_checkpoint(chk, *, ukf, timer, minimoon, formation):
+        """Restore checkpoint state into freshly constructed objects."""
+        if not isinstance(chk, dict):
+            raise ValueError("OD checkpoint is not a dictionary")
+        if int(chk.get("schema_version", -1)) != 1:
+            raise ValueError(f"Unsupported OD checkpoint schema_version={chk.get('schema_version')}")
+
+        ukf.__dict__.update(copy.deepcopy(chk.get("ukf_dict", {})))
+        timer.__dict__.update(copy.deepcopy(chk.get("timer_dict", {})))
+        minimoon.curr_state_eme = np.asarray(chk["minimoon_curr_state_eme"], dtype=float).reshape(6,)
+        formation.set_spacecraft_states(np.asarray(chk["formation_states_eme"], dtype=float).reshape(-1, 6))
+        formation.set_spacecraft_pointings(np.asarray(chk["formation_pointings_eme"], dtype=float).reshape(-1, 3))
+        _set_sc_epochs(formation, chk.get("formation_sc_epochs", None))
+        formation.currently_detecting = tuple(int(x) for x in np.asarray(chk.get("currently_detecting", ()), dtype=int).reshape(-1))
+        _restore_np_random_state(chk.get("rng_state_numpy", None))
+        return int(chk.get("od_convergence_streak", 0)), copy.deepcopy(chk.get("last_od_stop_metrics", {}))
+
+    def _write_incomplete_progress(progress_path, *, uid, timer, outer_csv_path, termination_reason, checkpoint_path=None):
+        _write_progress(progress_path, {
+            "uid": uid,
+            "last_completed_outer_step": int(getattr(timer, "curr_od_index", -1)),
+            "last_epoch_jdtdb": float(getattr(timer, "curr_epoch", np.nan)),
+            "completed": False,
+            "termination_reason": str(termination_reason),
+            "outer_csv_path": outer_csv_path,
+            "checkpoint_path": checkpoint_path,
+        })
+
+    def _walltime_near_limit(job_start_time, wall_cfg):
+        if not bool(wall_cfg.get("enabled", False)):
+            return False
+        max_walltime_sec = wall_cfg.get("max_walltime_sec", None)
+        if max_walltime_sec is None:
+            return False
+        safety_buffer_sec = float(wall_cfg.get("safety_buffer_sec", 900.0))
+        return (time.time() - job_start_time) >= (float(max_walltime_sec) - safety_buffer_sec)
+
+    def _read_last_outer_row(outer_csv_path):
+        """Return the last row of an outer-loop CSV as a dict, or an empty dict."""
+        if not os.path.exists(outer_csv_path):
+            return {}
+        try:
+            df = pd.read_csv(outer_csv_path)
+            if len(df) == 0:
+                return {}
+            return df.iloc[-1].to_dict()
+        except Exception:
+            return {}
+
+    def _csv_scalar(v):
+        """Make scalar values safe for CSV without turning useful strings into NaN."""
+        try:
+            if v is None:
+                return ""
+            if isinstance(v, str):
+                return v
+            if pd.isna(v):
+                return np.nan
+            return v
+        except Exception:
+            return v
+
+    def _serialize_outer_vec(last_outer_row, prefix, n):
+        """Serialize fields like x_est_0...x_est_5 from an outer-loop row."""
+        vals = []
+        for i in range(n):
+            v = last_outer_row.get(f"{prefix}_{i}", np.nan)
+            try:
+                vals.append("" if pd.isna(v) else f"{float(v):.16g}")
+            except Exception:
+                vals.append(str(v))
+        return ";".join(vals)
+
+    def _build_od_master_row_from_outer_last(
+            *, uid, m_idx, rank, outer_csv_path, num_sc, termination_reason_fallback="",
+            final_epoch_fallback=np.nan, final_steps_fallback=np.nan
+    ):
+        """Build one compact OD summary row from the final row of a run's outer-loop CSV."""
+        last = _read_last_outer_row(outer_csv_path)
+
+        # Prefer the final outer-loop row. Fall back only if the outer log cannot be read.
+        final_epoch = last.get("epoch_end_jdtdb", final_epoch_fallback)
+        final_steps = last.get("od_step_idx", final_steps_fallback)
+        term_reason = last.get("termination_reason", termination_reason_fallback)
+
+        row = {
+            "master_row_idx": int(m_idx),
+            "run_uid": uid,
+            "rank": int(rank),
+            "OD_RUN_UID": uid,
+            "OD_RANK": int(rank),
+            "OD_RESULT_SAVED_AS": os.path.basename(outer_csv_path),
+            "OD_OUTER_CSV_PATH": outer_csv_path,
+            "OD_EVENT_TYPE": _csv_scalar(last.get("event_type", "")),
+            "OD_TERMINATION_REASON": _csv_scalar(term_reason),
+            "OD_PROGRESS_STATUS": _csv_scalar(last.get("progress_status", "")),
+            "OD_FINAL_TIME_JDTDB": _csv_scalar(final_epoch),
+            "OD_N_STEPS": _csv_scalar(final_steps),
+            "OD_HAD_DETECTION": _csv_scalar(last.get("had_detection", np.nan)),
+            "OD_N_DETECTIONS": _csv_scalar(last.get("n_detections", np.nan)),
+            "OD_DETECTING_IDS": _csv_scalar(last.get("detecting_ids", "")),
+            "OD_NO_DETECTION_REASON": _csv_scalar(last.get("no_detection_reason", "")),
+            "OD_ALL_EMS_OCCLUDED": _csv_scalar(last.get("all_ems_occluded", np.nan)),
+            "OD_IN_EMS_BLACKOUT": _csv_scalar(last.get("in_ems_blackout", np.nan)),
+            "OD_PENDING_REACQUISITION": _csv_scalar(last.get("pending_reacquisition", np.nan)),
+            "OD_REACQUISITION_ATTEMPT_COUNT": _csv_scalar(last.get("reacquisition_attempt_count", np.nan)),
+            "OD_PROCESSED_EPOCH_FIRST_JDTDB": _csv_scalar(last.get("processed_epoch_first_jdtdb", np.nan)),
+            "OD_PROCESSED_EPOCH_LAST_JDTDB": _csv_scalar(last.get("processed_epoch_last_jdtdb", np.nan)),
+            "OD_PROCESSED_EPOCH_COUNT": _csv_scalar(last.get("processed_epoch_count", np.nan)),
+            "OD_TIME_SEC": _csv_scalar(last.get("od_time_sec", np.nan)),
+            "OD_ATTCOORD_TIME_SEC": _csv_scalar(last.get("attcoord_time_sec", np.nan)),
+            "OD_LAST_POS_RMSE": _csv_scalar(last.get("pos_err_norm", np.nan)),
+            "OD_LAST_VEL_RMSE": _csv_scalar(last.get("vel_err_norm", np.nan)),
+            "OD_P_POS_TRACE": _csv_scalar(last.get("P_pos_trace", np.nan)),
+            "OD_P_VEL_TRACE": _csv_scalar(last.get("P_vel_trace", np.nan)),
+            "OD_P_POS_SIGMA_3D": _csv_scalar(last.get("P_pos_sigma_3d", np.nan)),
+            "OD_P_VEL_SIGMA_3D": _csv_scalar(last.get("P_vel_sigma_3d", np.nan)),
+            "OD_NIS_LAST": _csv_scalar(last.get("NIS_last", np.nan)),
+            "OD_NIS_MEAN": _csv_scalar(last.get("NIS_mean", np.nan)),
+            "OD_NIS_COUNT": _csv_scalar(last.get("NIS_count", np.nan)),
+            "OD_CONVERGENCE_STREAK": _csv_scalar(last.get("OD_convergence_streak", np.nan)),
+            "OD_CHOSEN_CANDIDATE_IDX": _csv_scalar(last.get("chosen_candidate_idx", np.nan)),
+            "OD_CHOSEN_CANDIDATE_EPOCH_JDTDB": _csv_scalar(last.get("chosen_candidate_epoch_jdtdb", np.nan)),
+            "OD_FINAL_STATE": _serialize_outer_vec(last, "x_est", 6),
+            "OD_FINAL_TRUE_STATE": _serialize_outer_vec(last, "x_true", 6),
+            "OD_FINAL_P_DIAG": _serialize_outer_vec(last, "P_diag", 6),
+            "OD_MASTER_WRITE_UTC": dt.datetime.utcnow().isoformat() + "Z",
+        }
+
+        for sc_id in range(num_sc):
+            row[f"OD_FINAL_SC{sc_id}_STATE"] = _serialize_outer_vec(last, f"sc{sc_id}_state_post", 6)
+            row[f"OD_FINAL_SC{sc_id}_POINTING"] = _serialize_outer_vec(last, f"sc{sc_id}_pointing_post", 3)
+
+        return row
+
+    def _append_od_master_row(od_master_rank_path, row_dict, od_master_header, dedup_existing=True):
+        """Append one completed OD summary to this rank's OD master CSV.
+
+        This is rank-local, so it needs no MPI/file lock. If a retry tries to append
+        the same master_row_idx/run_uid again, dedup_existing prevents duplicates.
+        """
+        os.makedirs(os.path.dirname(od_master_rank_path), exist_ok=True)
+        if dedup_existing and os.path.exists(od_master_rank_path):
+            try:
+                prev = pd.read_csv(od_master_rank_path, usecols=["master_row_idx", "run_uid"])
+                dup = (prev["master_row_idx"].astype(int) == int(row_dict["master_row_idx"])) & (prev["run_uid"].astype(str) == str(row_dict["run_uid"]))
+                if bool(dup.any()):
+                    return
+            except Exception:
+                pass
+        _append_row(od_master_rank_path, row_dict, od_master_header)
+
+    def _merge_od_master_rows_into_master(master_fn, od_master_dir, od_master_glob, od_master_header):
+        """Rank-0 convenience merge: per-rank OD master rows -> MASTER_IOD.csv.
+
+        The per-rank OD master files remain the durable OD-stage record even if this
+        final merge is interrupted by walltime.
+        """
+        paths = sorted(glob.glob(os.path.join(od_master_dir, od_master_glob)))
+        if len(paths) == 0:
+            return 0
+
+        frames = []
+        for path in paths:
+            try:
+                df = pd.read_csv(path)
+                if len(df) > 0:
+                    frames.append(df)
+            except Exception as e:
+                print(f"[Stage: OD] Could not read OD master file {path}: {e}", flush=True)
+
+        if len(frames) == 0:
+            return 0
+
+        od_df = pd.concat(frames, ignore_index=True)
+        if "master_row_idx" not in od_df.columns:
+            return 0
+
+        # Keep the latest appended summary for each MASTER row.
+        if "OD_MASTER_WRITE_UTC" in od_df.columns:
+            od_df = od_df.sort_values(["master_row_idx", "OD_MASTER_WRITE_UTC"])
+        od_df = od_df.drop_duplicates(subset=["master_row_idx"], keep="last")
+
+        dfm = pd.read_csv(master_fn)
+        # Keep rank-local bookkeeping columns in OD_MASTER.csv, but do not add
+        # unprefixed columns like run_uid/rank to the main MASTER_IOD.csv.
+        merge_cols = [c for c in od_df.columns if c not in ("master_row_idx", "run_uid", "rank")]
+        for col in merge_cols:
+            if col not in dfm.columns:
+                dfm[col] = ""
+
+        for _, upd in od_df.iterrows():
+            try:
+                ri = int(upd["master_row_idx"])
+            except Exception:
+                continue
+            if ri < 0 or ri >= len(dfm):
+                continue
+            for col in merge_cols:
+                dfm.at[ri, col] = upd[col]
+
+        tmp = master_fn + ".tmp"
+        dfm.to_csv(tmp, index=False)
+        os.replace(tmp, master_fn)
+        return int(len(od_df))
+
+    def _summarize_meas_outer(meas):
+        try:
+            arr = np.asarray(meas)
+
+            if arr.size == 0:
+                return 0, np.nan, [np.nan, np.nan]
+
+            # reshape to (num_pairs, 2)
+            pairs = arr.reshape(-1, 2)
+
+            # keep only valid RA/Dec pairs
+            valid_mask = np.isfinite(pairs).all(axis=1)
+            valid_pairs = pairs[valid_mask]
+
+            n_valid = valid_pairs.shape[0]
+
+            if n_valid == 0:
+                return 0, np.nan, [np.nan, np.nan]
+
+            norm = float(np.linalg.norm(valid_pairs))
+
+            first_pair = valid_pairs[0]
+
+            return n_valid, norm, [float(first_pair[0]), float(first_pair[1])]
+
+        except Exception:
+            return 0, np.nan, [np.nan, np.nan]
+
+    def _extract_inner_obs_state(sc_states_k, update_idx, detecting_ids=None):
+        """
+        sc_states_k shape: (M, N, 6)
+        We map update_idx to time index update_idx, and by default pick first detecting SC if possible.
+        """
+        try:
+            arr = np.asarray(sc_states_k)
+            if arr.ndim != 3:
+                return [np.nan] * 6
+
+            M, N, D = arr.shape
+            if D < 6 or update_idx >= N:
+                return [np.nan] * 6
+
+            sc_pick = 0
+            if detecting_ids is not None:
+                try:
+                    det = np.asarray(detecting_ids).reshape(-1)
+                    if det.size > 0:
+                        sc_pick = int(det[0])
+                except Exception:
+                    pass
+
+            sc_pick = max(0, min(M - 1, sc_pick))
+            return _flatten_vec(arr[sc_pick, update_idx, :], 6)
+        except Exception:
+            return [np.nan] * 6
+
+    def _extract_inner_meas_pair(perfect_meas, noisy_meas, update_idx, detecting_ids=None):
+        """
+        perfect_meas, noisy_meas shapes: (M, N, 2)
+        For a given inner update index, extract one representative pair:
+        first detecting SC if available, otherwise SC 0.
+        """
+        try:
+            p = np.asarray(perfect_meas)
+            n = np.asarray(noisy_meas)
+            if p.ndim != 3 or n.ndim != 3:
+                return [np.nan, np.nan], [np.nan, np.nan]
+            M, N, D = p.shape
+            if D < 2 or update_idx >= N:
+                return [np.nan, np.nan], [np.nan, np.nan]
+
+            sc_pick = 0
+            if detecting_ids is not None:
+                try:
+                    det = np.asarray(detecting_ids).reshape(-1)
+                    if det.size > 0:
+                        sc_pick = int(det[0])
+                except Exception:
+                    pass
+
+            sc_pick = max(0, min(M - 1, sc_pick))
+            return _flatten_vec(p[sc_pick, update_idx, :], 2), _flatten_vec(n[sc_pick, update_idx, :], 2)
+        except Exception:
+            return [np.nan, np.nan], [np.nan, np.nan]
+
+    def print_od_status(
+            *,
+            timer,
+            ukf,
+            minimoon=None,
+            formation=None,
+            x_true=None,
+            n_detections=None,
+            status_every=1,
+            prefix="[OD]",
+            print_time=True,
+    ):
+        k = getattr(timer, "curr_od_index", None)
+        if k is None:
+            return
+
+        if status_every is not None and status_every > 1:
+            if (k % status_every) != 0:
+                return
+
+        x_est = getattr(ukf, "x", None)
+        P_est = getattr(ukf, "P", None)
+
+        if x_true is None and minimoon is not None:
+            x_true = getattr(minimoon, "curr_state_eme", None)
+
+        pos_err_norm, vel_err_norm = _best_effort_state_error(x_est, x_true)
+        Pdiag = _safe_diag(P_est, n=6)
+
+        det_id = ""
+        if formation is not None and hasattr(formation, "currently_detecting"):
+            det_id = str(getattr(formation, "currently_detecting"))
+
+        epoch = getattr(timer, "curr_epoch", None)
+        endt = getattr(timer, "end_time", None)
+
+        ts = ""
+        if print_time:
+            ts = datetime.now().strftime("%H:%M:%S") + " "
+
+        line1 = (
+            f"{ts}{prefix} k={k} "
+            f"epoch_jdtdb={epoch if epoch is not None else ''} "
+            f"end_jdtdb={endt if endt is not None else ''} "
+            f"det_sc={det_id} "
+            f"n_det={'' if n_detections is None else n_detections}"
+        )
+        line2 = f"{prefix} x_est={_fmt_vec(x_est, n=6, prec=6)}"
+        line3 = (
+            f"{prefix} pos_err_norm={pos_err_norm if not np.isnan(pos_err_norm) else ''} "
+            f"vel_err_norm={vel_err_norm if not np.isnan(vel_err_norm) else ''} "
+            f"P_diag={_fmt_vec(Pdiag, n=6, prec=6)}"
+        )
+
+        print(line1)
+        print(line2)
+        print(line3)
+
+    def _cov_trace_metrics(P):
+        """Return trace/sigma metrics for the 3x3 position and velocity covariance blocks."""
+        try:
+            P = np.asarray(P, dtype=float).reshape(6, 6)
+            tr_pos = float(np.trace(P[:3, :3]))
+            tr_vel = float(np.trace(P[3:, 3:]))
+            sig_pos = float(np.sqrt(max(tr_pos, 0.0)))
+            sig_vel = float(np.sqrt(max(tr_vel, 0.0)))
+            return tr_pos, tr_vel, sig_pos, sig_vel
+        except Exception:
+            return np.nan, np.nan, np.nan, np.nan
+
+    def _extract_nis_values(update_history, window=None):
+        """Extract NIS = innovation.T @ inv(S) @ innovation from nested UKF update history."""
+        vals = []
+        try:
+            for entry in update_history or []:
+                for upd in entry.get("updates", []):
+                    info = upd.get("update_info", {})
+                    innov = info.get("innovation", None)
+                    S = info.get("S", None)
+                    if innov is None or S is None:
+                        continue
+                    innov = np.asarray(innov, dtype=float).reshape(-1)
+                    S = np.asarray(S, dtype=float)
+                    if innov.size == 0 or S.ndim != 2 or S.shape[0] != S.shape[1] or S.shape[0] != innov.size:
+                        continue
+                    nis = float(innov @ np.linalg.pinv(S) @ innov)
+                    if np.isfinite(nis):
+                        vals.append(nis)
+        except Exception:
+            pass
+
+        if window is not None:
+            try:
+                window = int(window)
+                if window > 0:
+                    vals = vals[-window:]
+            except Exception:
+                pass
+        return vals
+
+    def _ems_detection_flags(detection_res_k):
+        """Return EMS/no-detection flags from Formation.detect() result dictionaries.
+
+        occluded_ems is the pure EMS exclusion flag. It is intentionally used
+        instead of visible_ems_filtered, because visible_ems_filtered also folds
+        in FOV and Earth/Moon visibility.
+        """
+        try:
+            rows = list(detection_res_k or [])
+        except Exception:
+            rows = []
+
+        if len(rows) == 0:
+            return {
+                "any_detected": False,
+                "all_ems_occluded": False,
+                "any_ems_occluded": False,
+                "n_ems_occluded": 0,
+            }
+
+        any_detected = any(bool(d.get("detected", False)) for d in rows if isinstance(d, dict))
+        ems_flags = [bool(d.get("occluded_ems", False)) for d in rows if isinstance(d, dict)]
+        n_ems = int(sum(ems_flags))
+        return {
+            "any_detected": bool(any_detected),
+            "all_ems_occluded": bool(len(ems_flags) == len(rows) and len(rows) > 0 and all(ems_flags)),
+            "any_ems_occluded": bool(any(ems_flags)),
+            "n_ems_occluded": n_ems,
+        }
+
+    def _no_detection_state_dict(in_ems_blackout, pending_reacquisition, reacquisition_attempt_count):
+        return {
+            "in_ems_blackout": bool(in_ems_blackout),
+            "pending_reacquisition": bool(pending_reacquisition),
+            "reacquisition_attempt_count": int(reacquisition_attempt_count),
+        }
+
+
+    def _od_stop_metrics_and_decision(config, P, update_history, convergence_streak):
+        """
+        Check OD convergence using only covariance traces and NIS.
+
+        Expected config block, for example:
+            od_stop:
+              enabled: true
+              pos_trace_threshold_km2: 1.0e4          # OR pos_sigma_threshold_km
+              vel_trace_threshold_km2_s2: 2.5e-5      # OR vel_sigma_threshold_km_s
+              nis_mean_max: 10.0
+              nis_mean_min: 0.0                       # optional
+              nis_window: 20
+              nis_min_samples: 3
+              required_consecutive_steps: 1
+        """
+        stop_cfg = config.get("od_stop", {})
+        enabled = bool(stop_cfg.get("enabled", False))
+
+        tr_pos, tr_vel, sig_pos, sig_vel = _cov_trace_metrics(P)
+        nis_window = stop_cfg.get("nis_window", None)
+        nis_vals = _extract_nis_values(update_history, window=nis_window)
+        nis_count = int(len(nis_vals))
+        nis_last = float(nis_vals[-1]) if nis_count > 0 else np.nan
+        nis_mean = float(np.mean(nis_vals)) if nis_count > 0 else np.nan
+
+        metrics = {
+            "trace_pos": tr_pos,
+            "trace_vel": tr_vel,
+            "sigma_pos_3d": sig_pos,
+            "sigma_vel_3d": sig_vel,
+            "nis_last": nis_last,
+            "nis_mean": nis_mean,
+            "nis_count": nis_count,
+            "convergence_streak": int(convergence_streak),
+        }
+
+        if not enabled:
+            return False, 0, metrics, "od_stop_disabled"
+
+        # Accept either trace thresholds or sigma thresholds. Sigma thresholds are converted to trace thresholds.
+        pos_trace_thr = stop_cfg.get("pos_trace_threshold_km2", None)
+        if pos_trace_thr is None and stop_cfg.get("pos_sigma_threshold_km", None) is not None:
+            pos_trace_thr = float(stop_cfg["pos_sigma_threshold_km"]) ** 2
+
+        vel_trace_thr = stop_cfg.get("vel_trace_threshold_km2_s2", None)
+        if vel_trace_thr is None and stop_cfg.get("vel_sigma_threshold_km_s", None) is not None:
+            vel_trace_thr = float(stop_cfg["vel_sigma_threshold_km_s"]) ** 2
+
+        nis_min_samples = int(stop_cfg.get("nis_min_samples", 1))
+        nis_mean_max = stop_cfg.get("nis_mean_max", None)
+        nis_mean_min = stop_cfg.get("nis_mean_min", None)
+        required_consecutive = int(stop_cfg.get("required_consecutive_steps", 1))
+
+        checks = []
+        reasons = []
+
+        if pos_trace_thr is not None:
+            ok = np.isfinite(tr_pos) and (tr_pos <= float(pos_trace_thr))
+            checks.append(ok)
+            if not ok:
+                reasons.append(f"pos_trace {tr_pos:.6g} > {float(pos_trace_thr):.6g}")
+
+        if vel_trace_thr is not None:
+            ok = np.isfinite(tr_vel) and (tr_vel <= float(vel_trace_thr))
+            checks.append(ok)
+            if not ok:
+                reasons.append(f"vel_trace {tr_vel:.6g} > {float(vel_trace_thr):.6g}")
+
+        if nis_mean_max is not None or nis_mean_min is not None:
+            ok_samples = nis_count >= nis_min_samples and np.isfinite(nis_mean)
+            if nis_mean_max is not None:
+                ok = ok_samples and (nis_mean <= float(nis_mean_max))
+                checks.append(ok)
+                if not ok:
+                    reasons.append(f"nis_mean {nis_mean:.6g} > {float(nis_mean_max):.6g} or insufficient NIS samples")
+            if nis_mean_min is not None:
+                ok = ok_samples and (nis_mean >= float(nis_mean_min))
+                checks.append(ok)
+                if not ok:
+                    reasons.append(f"nis_mean {nis_mean:.6g} < {float(nis_mean_min):.6g} or insufficient NIS samples")
+
+        # If no actual threshold was provided, never stop.
+        if len(checks) == 0:
+            return False, 0, metrics, "od_stop_enabled_but_no_thresholds"
+
+        instant_ok = all(checks)
+        new_streak = convergence_streak + 1 if instant_ok else 0
+        metrics["convergence_streak"] = int(new_streak)
+
+        should_stop = new_streak >= required_consecutive
+        reason = "convergence_criteria_met" if should_stop else ("; ".join(reasons) if reasons else "waiting_for_consecutive_convergence")
+        return should_stop, new_streak, metrics, reason
+
+    # ---------------------------------------------------------
+    # Diagnostics config
+    # ---------------------------------------------------------
+    diag_cfg = config_global.get("od_diagnostics", {})
+    log_inner_kf = bool(diag_cfg.get("log_inner_kf", False))
+    log_attcoord = bool(diag_cfg.get("log_attcoord_candidates", False))
+    log_optimizer = bool(diag_cfg.get("log_optimizer_history", False))
+
+    checkpoint_cfg = config_global.get("od_checkpoint", {})
+    checkpoint_enabled_default = True
+    checkpoint_enabled = bool(checkpoint_cfg.get("enabled", checkpoint_enabled_default))
+    checkpoint_name = str(checkpoint_cfg.get("checkpoint_name", "checkpoint_state.pkl"))
+    walltime_cfg = checkpoint_cfg.get("walltime_guard", {})
+    # Backward-compatible flat config style is also accepted:
+    # od_checkpoint:
+    #   walltime_guard_enabled: true
+    #   max_walltime_sec: 82800
+    #   safety_buffer_sec: 900
+    if "walltime_guard_enabled" in checkpoint_cfg or "max_walltime_sec" in checkpoint_cfg:
+        walltime_cfg = {
+            "enabled": bool(checkpoint_cfg.get("walltime_guard_enabled", checkpoint_cfg.get("enabled", False))),
+            "max_walltime_sec": checkpoint_cfg.get("max_walltime_sec", None),
+            "safety_buffer_sec": checkpoint_cfg.get("safety_buffer_sec", 900.0),
+        }
+
+    outer_dir = diag_cfg.get("outer_loop_dir", os.path.join(iod_dir, "od_outer_logs"))
+    detail_root = diag_cfg.get("detail_root_dir", os.path.join(iod_dir, "od_run_details"))
+    os.makedirs(outer_dir, exist_ok=True)
+    os.makedirs(detail_root, exist_ok=True)
+
+    # Load MASTER (workers)
+    df_master = pd.read_csv(master_fn)
+
+    # OD config
+    od_duration_days = float(config_global.get('od_duration_days', 1.0))
+    od_max_steps = config_global.get('od_max_steps', None)
+    od_max_steps = int(od_max_steps) if (od_max_steps is not None) else None
+
+    # No-detection / EMS blackout behavior.
+    # During EMS blackout, attitude coordination is skipped and the simulation
+    # advances by ems_blackout_dt_sec with prediction only. Once EMS blockage
+    # clears after a blackout, one or more reacquisition attitude-coordination
+    # attempts are allowed before declaring the object lost.
+    od_no_det_cfg = config_global.get("od_no_detection", {})
+    ems_blackout_dt_sec = float(od_no_det_cfg.get("ems_blackout_dt_sec", 600.0))
+    max_reacquisition_attempts_after_blackout = int(
+        od_no_det_cfg.get("max_reacquisition_attempts_after_blackout", 1)
+    )
+    terminate_if_ems_visible_but_not_detected = bool(
+        od_no_det_cfg.get("terminate_if_ems_visible_but_not_detected", True)
+    )
+
+    # Per-rank OD master files: durable, low-memory OD summary output for MPI/HPC.
+    od_master_cfg = config_global.get("od_master", {})
+    od_master_enabled = bool(od_master_cfg.get("enabled", True))
+    od_master_dir = od_master_cfg.get("dir", os.path.join(iod_dir, "od_master_rows"))
+    od_master_filename_template = str(od_master_cfg.get("rank_filename_template", "od_master_rank_{rank}.csv"))
+    od_master_rank_path = os.path.join(od_master_dir, od_master_filename_template.format(rank=rank))
+    od_master_merge_at_end = bool(od_master_cfg.get("merge_into_master_at_end", True))
+    od_master_glob = str(od_master_cfg.get("merge_glob", "od_master_rank_*.csv"))
+
+    if od_master_enabled:
+        os.makedirs(od_master_dir, exist_ok=True)
+
+    processed = skipped = errors = 0
+
+    # ---------------------------------------------------------
+    # Diagnostics headers
+    # ---------------------------------------------------------
+    num_sc = int(config_global["num_spacecraft"])
+
+    outer_header = [
+        "run_uid",
+        "master_row_idx",
+        "rank",
+        "od_step_idx",
+        "event_type",
+        "termination_reason",
+        "epoch_start_jdtdb",
+        "epoch_end_jdtdb",
+        "processed_epoch_first_jdtdb",
+        "processed_epoch_last_jdtdb",
+        "processed_epoch_count",
+        "had_detection",
+        "n_detections",
+        "detecting_ids",
+        "no_detection_reason",
+        "all_ems_occluded",
+        "in_ems_blackout",
+        "pending_reacquisition",
+        "reacquisition_attempt_count",
+        "od_time_sec",
+        "attcoord_time_sec",
+        "true_meas_len",
+        "true_meas_norm",
+        "true_meas_0",
+        "true_meas_1",
+        "noisy_meas_len",
+        "noisy_meas_norm",
+        "noisy_meas_0",
+        "noisy_meas_1",
+    ]
+    outer_header += [f"x_est_{i}" for i in range(6)]
+    outer_header += [f"x_true_{i}" for i in range(6)]
+    outer_header += [f"P_diag_{i}" for i in range(6)]
+    outer_header += [
+        "P_pos_trace",
+        "P_vel_trace",
+        "P_pos_sigma_3d",
+        "P_vel_sigma_3d",
+        "NIS_last",
+        "NIS_mean",
+        "NIS_count",
+        "OD_convergence_streak",
+    ]
+    outer_header += ["pos_err_norm", "vel_err_norm"]
+
+    for sc_id in range(num_sc):
+        outer_header += [f"sc{sc_id}_state_pre_{i}" for i in range(6)]
+    for sc_id in range(num_sc):
+        outer_header += [f"sc{sc_id}_pointing_pre_{i}" for i in range(3)]
+    for sc_id in range(num_sc):
+        outer_header += [f"sc{sc_id}_state_post_{i}" for i in range(6)]
+    for sc_id in range(num_sc):
+        outer_header += [f"sc{sc_id}_pointing_post_{i}" for i in range(3)]
+
+    outer_header += [
+        "chosen_candidate_idx",
+        "chosen_candidate_epoch_jdtdb",
+        "progress_status",
+    ]
+
+    inner_header = [
+        "run_uid",
+        "master_row_idx",
+        "rank",
+        "od_step_idx",
+        "inner_update_idx",
+        "epoch_jdtdb",
+    ]
+    inner_header += [f"x_prior_{i}" for i in range(6)]
+    inner_header += [f"x_post_{i}" for i in range(6)]
+    inner_header += [f"P_prior_diag_{i}" for i in range(6)]
+    inner_header += [f"P_post_diag_{i}" for i in range(6)]
+    inner_header += [f"x_true_{i}" for i in range(6)]
+    inner_header += [f"observer_state_{i}" for i in range(6)]
+    inner_header += [f"true_meas_{i}" for i in range(2)]
+    inner_header += [f"noisy_meas_{i}" for i in range(2)]
+    inner_header += ["detecting_ids"]
+
+    attcoord_header = [
+        "run_uid",
+        "master_row_idx",
+        "rank",
+        "od_step_idx",
+        "candidate_idx",
+        "candidate_epoch_jdtdb",
+        "is_chosen",
+    ]
+    attcoord_header += [f"x_pred_{i}" for i in range(6)]
+    attcoord_header += [f"P_pred_diag_{i}" for i in range(6)]
+    for sc_id in range(num_sc):
+        attcoord_header += [f"sc{sc_id}_state_{i}" for i in range(6)]
+    for sc_id in range(num_sc):
+        attcoord_header += [f"u_cmd_sc{sc_id}_{i}" for i in range(3)]
+    attcoord_header += ["J", "coverage_score"]
+
+    optimizer_header = [
+        "run_uid",
+        "master_row_idx",
+        "rank",
+        "od_step_idx",
+        "optimizer_row_idx",
+        "restart_idx",
+        "use_fixed_agent",
+        "idx_fix",
+        "J",
+    ]
+    optimizer_header += [f"x_param_{i}" for i in range(12)]
+    optimizer_header += [f"x_free_param_{i}" for i in range(12)]
+    for sc_id in range(num_sc):
+        optimizer_header += [f"u_sc{sc_id}_{i}" for i in range(3)]
+    optimizer_header += [f"slew_sc{i}" for i in range(num_sc)]
+
+    od_master_header = [
+        "master_row_idx",
+        "run_uid",
+        "rank",
+        "OD_RUN_UID",
+        "OD_RANK",
+        "OD_RESULT_SAVED_AS",
+        "OD_OUTER_CSV_PATH",
+        "OD_EVENT_TYPE",
+        "OD_TERMINATION_REASON",
+        "OD_PROGRESS_STATUS",
+        "OD_FINAL_TIME_JDTDB",
+        "OD_N_STEPS",
+        "OD_HAD_DETECTION",
+        "OD_N_DETECTIONS",
+        "OD_DETECTING_IDS",
+        "OD_NO_DETECTION_REASON",
+        "OD_ALL_EMS_OCCLUDED",
+        "OD_IN_EMS_BLACKOUT",
+        "OD_PENDING_REACQUISITION",
+        "OD_REACQUISITION_ATTEMPT_COUNT",
+        "OD_PROCESSED_EPOCH_FIRST_JDTDB",
+        "OD_PROCESSED_EPOCH_LAST_JDTDB",
+        "OD_PROCESSED_EPOCH_COUNT",
+        "OD_TIME_SEC",
+        "OD_ATTCOORD_TIME_SEC",
+        "OD_LAST_POS_RMSE",
+        "OD_LAST_VEL_RMSE",
+        "OD_P_POS_TRACE",
+        "OD_P_VEL_TRACE",
+        "OD_P_POS_SIGMA_3D",
+        "OD_P_VEL_SIGMA_3D",
+        "OD_NIS_LAST",
+        "OD_NIS_MEAN",
+        "OD_NIS_COUNT",
+        "OD_CONVERGENCE_STREAK",
+        "OD_CHOSEN_CANDIDATE_IDX",
+        "OD_CHOSEN_CANDIDATE_EPOCH_JDTDB",
+        "OD_FINAL_STATE",
+        "OD_FINAL_TRUE_STATE",
+        "OD_FINAL_P_DIAG",
+        "OD_MASTER_WRITE_UTC",
+    ]
+    for sc_id in range(num_sc):
+        od_master_header += [f"OD_FINAL_SC{sc_id}_STATE", f"OD_FINAL_SC{sc_id}_POINTING"]
+
+    # ---------------------------------------------------------
+    # Main row loop
+    # ---------------------------------------------------------
+    job_start_time = time.time()
+
+    for m_idx in my_indices:
+        row = df_master.iloc[m_idx]
+
+        config = copy.deepcopy(config_global)
+
+        occluded = int(row["OCCLUDED_BY_EMS"]) == 1
+
+        if occluded:
+            config["ems"]["R_em"] = 0.0
+            config["ems"]["alpha_s_deg"] = 0.0
+            print("Doing OD without EMS Exclusion...")
+        else:
+            print("Doing OD with EMS Exclusion")
+
+        saved_as_str = str(row.get("IOD_DATA_SAVED_AS", "") or "")
+        uid = uid_from_saved_as(saved_as_str, m_idx)
+
+        if is_done(uid):
+            skipped += 1
+            continue
+
+        base = f"{uid}__OD_{config['dynamics']}_{config['orbit']}_{config['observer']}_{config['optimizer']}"
+        outer_csv_path = os.path.join(outer_dir, f"{base}__outer.csv")
+        run_dir = os.path.join(detail_root, uid)
+        progress_path = os.path.join(run_dir, "progress.json")
+        inner_csv_path = os.path.join(run_dir, "inner_kf_updates.csv")
+        attcoord_csv_path = os.path.join(run_dir, "attcoord_candidates.csv")
+        optimizer_csv_path = os.path.join(run_dir, "optimizer_history.csv")
+        checkpoint_path = _checkpoint_path_for(run_dir, checkpoint_name)
+        row_paused_for_walltime = False
+
+        try:
+            # ----------------------------------------------
+            # Setup from iod
+            # ---------------------------------------------
+            setup = od_setup_from_iod(config, row, util=util, sp=sp)
+
+            # --------------------------
+            # Initialization (first step)
+            # --------------------------
+            x0_est = setup["iod"]["ast_iod_eme_ae_kms"]
+            P0_est = setup["iod"]["cov"]["P_cart_eme"]
+            x_true0 = setup["frames"]["ast_eme_ae_kms"]
+            t0_jdtdb = setup["epochs"]["ae_jdtdb"]
+
+            # Process noise initialization
+            r_noise = config['radial_process_noise']
+            t_noise = config['track_process_noise']
+            n_noise = config['normal_process_noise']
+
+            # Measurement noise initialization
+            ra_noise = config['sigma_ra']
+            dec_noise = config['sigma_dec']
+            pointing_noise = config['sigma_pointing']
+            meas_noise = config['sigma_meas_noise']
+
+            # ukf weight values
+            alpha = config['alpha_ukf']
+            beta = config['beta_ukf']
+            kappa = config['kappa_ukf']
+            epsilon = config['epsilon_ukf']
+            adaptive_R_config = config['adaptive_R']
+
+            # ---------------------------------------------
+            # build objects
+            # -------------------------------------------
+            n_body_propagator = nbody.NBodyPropagator(spice=sp, config=config)
+
+            ukf = OD_UKF(
+                x0=setup["x0_eme_kms"],
+                P0=setup["P0_eme"],
+                Sa_rtn=(r_noise, t_noise, n_noise),
+                meas_units="mas",
+                sigma_ra=ra_noise,
+                sigma_dec=dec_noise,
+                sigma_pointing=pointing_noise,
+                sigma_meas=None,  # do not use unless you want to artificially inflate R
+                adaptive_R_window=adaptive_R_config['window'],
+                adaptive_R_min_samples=adaptive_R_config['min_samples'],
+                adaptive_R_psd_floor=adaptive_R_config['psd_floor'],
+                sigma_rho_single_obs_km=adaptive_R_config['single_obs_rho'],
+                sigma_rhodot_single_obs_km_s=adaptive_R_config['single_obs_rhodot'],
+                p_injection_decay_tau=adaptive_R_config.get('p_injection_decay_tau', 1.0),
+                multi_observer_maturity_threshold=adaptive_R_config.get('multi_observer_maturity_threshold', 3),
+                mature_single_observer_injection=adaptive_R_config.get('mature_single_observer_injection', 'decayed'),
+                ukf_alpha=alpha,
+                ukf_beta=beta,
+                ukf_kappa=kappa,
+                eps=epsilon,
+            )
+
+            attitude_coordination = AttitudeCoordinator(config)
+
+            minimoon = Asteroid(
+                row['ID_AST'],
+                row['INDEX_USED'],
+                config,
+                current_state_eme=setup['frames']['ast_eme_ae_kms'],
+                current_epoch=setup['epochs']['ae_jdtdb']
+            )
+
+            formation = Formation(config)
+            sc1_ini_index = formation.get_index_from_pos(util.parse_vec_cell(row["SPACECRAFT_1_INI_POS(km)"]))
+            formation.recall_formation(sc1_ini_index, config)
+            formation.match_spacecraft_trajectory_full(int(row['TOTAL_LENGTH']), config)
+            formation.set_spacecraft_states(
+                setup["frames"]["sc_eme_ae_kms"],
+                set_epochs_from_row=row
+            )
+
+            formation.set_spacecraft_pointings(setup["frames"]["sc_pointing_eme_cartesian"])
+            formation.currently_detecting = tuple([int(setup["sc_detecting_id"])])
+
+            timer = SimTime(
+                config,
+                current_od_index=0,
+                current_epoch=t0_jdtdb,
+                iod_time=row['COMPUTATION_TIME_SEC'],
+                current_integration_epoch=t0_jdtdb,
+                current_integration_index=row['INDEX_USED']
+            )
+
+            status_every = int(config.get("od_status_every", 1))
+
+            last_pos_rmse = np.nan
+            last_vel_rmse = np.nan
+            termination_reason = ""
+            progress_status = "running"
+
+            prog = _read_progress(progress_path)
+            last_completed_outer = _resume_last_outer_idx(outer_csv_path)
+            if prog is not None and prog.get("completed", False):
+                write_done(uid)
+                skipped += 1
+                continue
+
+            resume_after_step = -1 if last_completed_outer is None else int(last_completed_outer)
+
+            od_convergence_streak = 0
+            last_od_stop_metrics = {
+                "trace_pos": np.nan,
+                "trace_vel": np.nan,
+                "sigma_pos_3d": np.nan,
+                "sigma_vel_3d": np.nan,
+                "nis_last": np.nan,
+                "nis_mean": np.nan,
+                "nis_count": 0,
+                "convergence_streak": 0,
+            }
+
+            # EMS-blackout / reacquisition state. These are also checkpointed.
+            in_ems_blackout = False
+            pending_reacquisition = False
+            reacquisition_attempt_count = 0
+
+            # True checkpoint resume: restore the filter/timer/formation state directly
+            # instead of replaying from the beginning. The old resume_after_step guard is
+            # kept only as a duplicate-write safety net.
+            if checkpoint_enabled and os.path.exists(checkpoint_path):
+                chk = _read_od_checkpoint(checkpoint_path)
+                od_convergence_streak, restored_metrics = _restore_od_checkpoint(
+                    chk, ukf=ukf, timer=timer, minimoon=minimoon, formation=formation
+                )
+                if restored_metrics:
+                    last_od_stop_metrics.update(restored_metrics)
+                nd_state = chk.get("no_detection_state", {}) if isinstance(chk, dict) else {}
+                in_ems_blackout = bool(nd_state.get("in_ems_blackout", in_ems_blackout))
+                pending_reacquisition = bool(nd_state.get("pending_reacquisition", pending_reacquisition))
+                reacquisition_attempt_count = int(nd_state.get("reacquisition_attempt_count", reacquisition_attempt_count))
+                resume_after_step = int(chk.get("last_completed_outer_step", resume_after_step))
+                print(
+                    f"[OD r{rank} uid={uid}] Resumed from checkpoint at "
+                    f"od_step_idx={timer.curr_od_index}, epoch_jdtdb={timer.curr_epoch}",
+                    flush=True,
+                )
+
+            while True:
+                if _walltime_near_limit(job_start_time, walltime_cfg):
+                    termination_reason = "walltime_checkpoint"
+                    progress_status = "paused"
+                    if checkpoint_enabled:
+                        _save_od_checkpoint(
+                            checkpoint_path, uid=uid, m_idx=m_idx, rank=rank, ukf=ukf, timer=timer,
+                            minimoon=minimoon, formation=formation,
+                            od_convergence_streak=od_convergence_streak,
+                            last_od_stop_metrics=last_od_stop_metrics,
+                            last_completed_outer_step=int(getattr(timer, "curr_od_index", -1)),
+                            outer_csv_path=outer_csv_path,
+                            termination_reason=termination_reason,
+                            progress_status=progress_status,
+                            no_detection_state=_no_detection_state_dict(
+                                in_ems_blackout, pending_reacquisition, reacquisition_attempt_count
+                            ),
+                        )
+                    _write_incomplete_progress(
+                        progress_path, uid=uid, timer=timer, outer_csv_path=outer_csv_path,
+                        termination_reason=termination_reason, checkpoint_path=(checkpoint_path if checkpoint_enabled else None)
+                    )
+                    row_paused_for_walltime = True
+                    print(f"[OD r{rank} uid={uid}] Pausing before walltime limit; checkpoint saved.", flush=True)
+                    break
+
+                if timer.curr_epoch > timer.end_time or timer.check_search_times():
+                    print("Over Time")
+                    termination_reason = "time_limit"
+                    progress_status = "completed"
+                    event_type = "termination_time_limit"
+
+                    sc_states_pre = np.asarray(formation.get_spacecraft_states(), dtype=float)
+                    sc_pointings_pre = np.asarray(formation.get_spacecraft_pointings(), dtype=float)
+                    sc_states_post = sc_states_pre.copy()
+                    sc_pointings_post = sc_pointings_pre.copy()
+
+                    x_est = _flatten_vec(getattr(ukf, "x", None), 6)
+                    x_true = _flatten_vec(getattr(minimoon, "curr_state_eme", None), 6)
+                    P_diag = _safe_diag(getattr(ukf, "P", None), 6)
+                    pos_err, vel_err = _best_effort_state_error(x_est, x_true)
+
+                    row_out = {
+                        "run_uid": uid,
+                        "master_row_idx": m_idx,
+                        "rank": rank,
+                        "od_step_idx": int(timer.curr_od_index),
+                        "event_type": event_type,
+                        "termination_reason": termination_reason,
+                        "epoch_start_jdtdb": float(timer.curr_epoch),
+                        "epoch_end_jdtdb": float(timer.curr_epoch),
+                        "processed_epoch_first_jdtdb": np.nan,
+                        "processed_epoch_last_jdtdb": np.nan,
+                        "processed_epoch_count": 0,
+                        "had_detection": False,
+                        "n_detections": 0,
+                        "detecting_ids": "",
+                        "od_time_sec": np.nan,
+                        "attcoord_time_sec": np.nan,
+                        "true_meas_len": 0,
+                        "true_meas_norm": np.nan,
+                        "true_meas_0": np.nan,
+                        "true_meas_1": np.nan,
+                        "noisy_meas_len": 0,
+                        "noisy_meas_norm": np.nan,
+                        "noisy_meas_0": np.nan,
+                        "noisy_meas_1": np.nan,
+                        "pos_err_norm": pos_err,
+                        "vel_err_norm": vel_err,
+                        "chosen_candidate_idx": np.nan,
+                        "chosen_candidate_epoch_jdtdb": np.nan,
+                        "progress_status": progress_status,
+                    }
+                    for i in range(6):
+                        row_out[f"x_est_{i}"] = x_est[i]
+                        row_out[f"x_true_{i}"] = x_true[i]
+                        row_out[f"P_diag_{i}"] = P_diag[i]
+                    for sc_id in range(num_sc):
+                        pre_s = _flatten_vec(sc_states_pre[sc_id], 6)
+                        pre_u = _flatten_vec(sc_pointings_pre[sc_id], 3)
+                        post_s = _flatten_vec(sc_states_post[sc_id], 6)
+                        post_u = _flatten_vec(sc_pointings_post[sc_id], 3)
+                        for i in range(6):
+                            row_out[f"sc{sc_id}_state_pre_{i}"] = pre_s[i]
+                            row_out[f"sc{sc_id}_state_post_{i}"] = post_s[i]
+                        for i in range(3):
+                            row_out[f"sc{sc_id}_pointing_pre_{i}"] = pre_u[i]
+                            row_out[f"sc{sc_id}_pointing_post_{i}"] = post_u[i]
+
+                    if timer.curr_od_index > resume_after_step:
+                        _append_row(outer_csv_path, row_out, outer_header)
+                    break
+
+                if od_max_steps is not None and timer.curr_od_index >= od_max_steps:
+                    print("Out of Iterations")
+                    termination_reason = "step_limit"
+                    progress_status = "completed"
+                    event_type = "termination_step_limit"
+
+                    sc_states_pre = np.asarray(formation.get_spacecraft_states(), dtype=float)
+                    sc_pointings_pre = np.asarray(formation.get_spacecraft_pointings(), dtype=float)
+                    sc_states_post = sc_states_pre.copy()
+                    sc_pointings_post = sc_pointings_pre.copy()
+
+                    x_est = _flatten_vec(getattr(ukf, "x", None), 6)
+                    x_true = _flatten_vec(getattr(minimoon, "curr_state_eme", None), 6)
+                    P_diag = _safe_diag(getattr(ukf, "P", None), 6)
+                    pos_err, vel_err = _best_effort_state_error(x_est, x_true)
+
+                    row_out = {
+                        "run_uid": uid,
+                        "master_row_idx": m_idx,
+                        "rank": rank,
+                        "od_step_idx": int(timer.curr_od_index),
+                        "event_type": event_type,
+                        "termination_reason": termination_reason,
+                        "epoch_start_jdtdb": float(timer.curr_epoch),
+                        "epoch_end_jdtdb": float(timer.curr_epoch),
+                        "processed_epoch_first_jdtdb": np.nan,
+                        "processed_epoch_last_jdtdb": np.nan,
+                        "processed_epoch_count": 0,
+                        "had_detection": False,
+                        "n_detections": 0,
+                        "detecting_ids": "",
+                        "od_time_sec": np.nan,
+                        "attcoord_time_sec": np.nan,
+                        "true_meas_len": 0,
+                        "true_meas_norm": np.nan,
+                        "true_meas_0": np.nan,
+                        "true_meas_1": np.nan,
+                        "noisy_meas_len": 0,
+                        "noisy_meas_norm": np.nan,
+                        "noisy_meas_0": np.nan,
+                        "noisy_meas_1": np.nan,
+                        "pos_err_norm": pos_err,
+                        "vel_err_norm": vel_err,
+                        "chosen_candidate_idx": np.nan,
+                        "chosen_candidate_epoch_jdtdb": np.nan,
+                        "progress_status": progress_status,
+                    }
+                    for i in range(6):
+                        row_out[f"x_est_{i}"] = x_est[i]
+                        row_out[f"x_true_{i}"] = x_true[i]
+                        row_out[f"P_diag_{i}"] = P_diag[i]
+                    for sc_id in range(num_sc):
+                        pre_s = _flatten_vec(sc_states_pre[sc_id], 6)
+                        pre_u = _flatten_vec(sc_pointings_pre[sc_id], 3)
+                        post_s = _flatten_vec(sc_states_post[sc_id], 6)
+                        post_u = _flatten_vec(sc_pointings_post[sc_id], 3)
+                        for i in range(6):
+                            row_out[f"sc{sc_id}_state_pre_{i}"] = pre_s[i]
+                            row_out[f"sc{sc_id}_state_post_{i}"] = post_s[i]
+                        for i in range(3):
+                            row_out[f"sc{sc_id}_pointing_pre_{i}"] = pre_u[i]
+                            row_out[f"sc{sc_id}_pointing_post_{i}"] = post_u[i]
+
+                    if timer.curr_od_index > resume_after_step:
+                        _append_row(outer_csv_path, row_out, outer_header)
+                    break
+
+                epoch_start = float(timer.curr_epoch)
+                sc_states_pre = np.asarray(formation.get_spacecraft_states(), dtype=float)
+                sc_pointings_pre = np.asarray(formation.get_spacecraft_pointings(), dtype=float)
+
+                processed_epoch_first = np.nan
+                processed_epoch_last = np.nan
+                processed_epoch_count = 0
+                had_detection = True
+                n_detections = np.nan
+                detecting_ids_str = ""
+                no_detection_reason = ""
+                all_ems_occluded = False
+                od_time = np.nan
+                attcoord_time = np.nan
+                chosen_candidate_idx = np.nan
+                chosen_candidate_epoch_jdtdb = np.nan
+                p_meas_k = None
+                n_meas_k = None
+
+                # update according to iod
+                if timer.curr_od_index == 0:
+                    event_type = "initial_attcoord"
+
+                    # -------------- REGULAR IOD STEP -------------------
+                    attcoord_startime = time.time()
+
+                    timer.set_attcoord_searchtimes()
+
+                    x_ts, P_ts = ukf.propagate_priors(
+                        timer.curr_epoch,
+                        timer.attcoord_searchtimes_jdtdb,
+                        n_body_propagator.propagate_multiple_objects
+                    )
+
+                    sc_eme_states_kms_piecewise, anchor_info = util.piecewise_anchor_and_propagate_spacecraft_trajs(
+                        formation=formation, minimoon=minimoon, timer=timer,
+                        t_targets_jdtdb=timer.attcoord_searchtimes_jdtdb,
+                        n_body_propagator=n_body_propagator, return_anchor_info=True
+                    )
+
+                    ast_eme_state_kms = minimoon.curr_state_eme
+                    ast_eme_traj_kms = n_body_propagator.propagate(ast_eme_state_kms, timer.curr_epoch,
+                                                                   timer.attcoord_searchtimes_jdtdb)
+
+                    ast_truth_original_eclip = np.array(minimoon.orbit.loc[:, ["Geo x", "Geo y", "Geo z", "Geo vx",
+                                                                               "Geo vy", "Geo vz"]])
+                    ast_truth_original_eclip[:, :3] *= config['AU_TO_M'] / 1000
+                    ast_truth_original_eclip[:, 3:] *= config['AU_TO_M'] / 1000 / config['SECONDS_PER_DAY']
+                    ast_truth_original_eme = util.geo_eclip_to_geo_eme_generic(ast_truth_original_eclip,
+                                                                               hint=("time", "state"))
+
+                    # to visualize the possible att coord scenarios
+                    viz_prop_flag_ini = False
+                    if viz_prop_flag_ini:
+                        util.plot_priors_positions_and_cov_2d(
+                            x_ts,
+                            P_ts,
+                            sc_trajs_km2=sc_eme_states_kms_piecewise,
+                            stride=config['two_d_prop']['stride'],
+                            n_std=config['two_d_prop']['stride'],
+                            planes=("xy", "xz", "yz"),
+                            title_prefix="Asteroid prior + spacecraft"
+                        )
+
+                        util.plot_matched_trajectory_full_range(
+                            formation=formation,
+                            idx_start=0,
+                            idx_stop=2400,
+                            frame="GEO_EME",
+                            plot_3d=True,
+                            plot_xy=False
+                        )
+
+
+                    sc_pointings_eme = formation.get_spacecraft_pointings()
+
+                    sc0 = formation.spacecraft[0]
+                    theta_h_rad = util.fov_deg2_to_half_angle_rad(sc0.fov)
+                    tau_max = sc0.reaction_wheel_torque
+                    h_max = sc0.reaction_wheel_momentum
+                    m_m = sc0.mass
+                    l_m = sc0.length
+                    m_t = sc0.telescope_mass
+                    d_t = sc0.telescope_diameter
+                    l_t = sc0.telescope_length
+                    z_0 = sc0.telescope_offset
+                    I_max = (1 / 6) * m_m * (l_m) ** 2 + (1 /12) * m_t * (3*(d_t / 2) ** 2 + l_t ** 2) + m_t * z_0 ** 2
+                    alpha_max = 1.63 * tau_max / I_max
+                    omega_max = 1.63 * h_max / I_max
+
+                    res_kcoverage, result_mean, result_kcoverage_series, result_mean_series, mean_time = attitude_coordination.step(
+                        sc_eme_states_kms_piecewise[:, :, :3],
+                        sc_pointings_eme,
+                        x_ts[:, :3],
+                        P_ts[:, :3, :3],
+                        timer.attcoord_searchtimes,
+                        theta_h_rad,
+                        alpha_max,
+                        omega_max,
+                        sc_pointings_eme[ list(formation.currently_detecting), :],
+                        list(formation.currently_detecting),
+                        d_M=config['d_mahal'],
+                        use_fixed_agent=True,
+                        fixed_agent_idx=int(formation.currently_detecting[0]),
+                        fixed_agent_u=sc_pointings_eme[int(formation.currently_detecting[0]), :],
+                        coverage_point=ast_eme_traj_kms[:, :3]
+                    )
+
+                    attcoord_endtime = time.time()
+                    timer.set_attcoord_time(attcoord_endtime - attcoord_startime - mean_time)
+                    attcoord_time = attcoord_endtime - attcoord_startime - mean_time
+                    od_time = 0.0
+
+                    timer.set_slew_time(res_kcoverage.chosen_dt)
+
+                    best_epoch = res_kcoverage.chosen_dt
+                    best_idx = int(np.where(timer.attcoord_searchtimes == best_epoch)[0][0])
+                    best_epoch_jdtdb = float(timer.attcoord_searchtimes_jdtdb[best_idx])
+                    k_anchor_best = int(anchor_info["anchor_k_of_t"][best_idx])
+                    t_anchor_best = float(anchor_info["anchor_epoch_of_t"][best_idx])
+
+                    best_attitudes = res_kcoverage.u_cmd
+                    formation.set_spacecraft_pointings(best_attitudes)
+
+                    best_positions = np.squeeze(sc_eme_states_kms_piecewise[best_idx, :, :])
+                    formation.set_spacecraft_states(best_positions)
+
+                    ukf.x = np.squeeze(x_ts[best_idx, :])
+                    ukf.P = np.squeeze(P_ts[best_idx, :, :])
+
+                    minimoon.set_state(np.squeeze(ast_eme_traj_kms[best_idx, :]))
+
+                    timer.step(best_epoch_jdtdb, k_anchor_best, t_anchor_best)
+
+                    # If this no-detection step was a reacquisition planning attempt
+                    # after EMS blackout, count it only after attitude coordination
+                    # has successfully produced and applied a new pointing.
+                    if (not had_detection) and pending_reacquisition:
+                        reacquisition_attempt_count += 1
+
+                    chosen_candidate_idx = best_idx
+                    chosen_candidate_epoch_jdtdb = best_epoch_jdtdb
+                    had_detection = True
+                    n_detections = 1
+                    detecting_ids_str = str(int(setup["sc_detecting_id"]))
+
+                    # visualize att_coord result
+                    att_coord_viz_flag_ini = False
+                    if att_coord_viz_flag_ini:
+                        best_epoch = res_kcoverage.chosen_dt
+                        best_idx = np.where(timer.attcoord_searchtimes == best_epoch)[0]
+
+                        theta_h_rad = util.fov_deg2_to_half_angle_rad(config["fov"])
+                        ems_center_xy = np.array(config["ems"]["p_em"][:2])
+                        ems_center_xyz = np.array(config["ems"]["p_em"])
+                        ems_radius = config["ems"]['R_em']
+                        ray_length = config['ray_length']
+
+                        sc_eme_ae_kms = np.squeeze(sc_eme_states_kms_piecewise[best_idx, :, :3])
+                        sc_pointing_eme_cartesian = res_kcoverage.u_cmd
+                        ang_eme = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_eme_cartesian)
+                        ast_truth_eme = np.squeeze(ast_eme_traj_kms[best_idx, :3])
+
+                        ast_iod_eme = np.squeeze(x_ts[best_idx, :3])
+                        P_cart_eme = np.squeeze(P_ts[best_idx, :3, :3])
+
+                        ast_truth_eme = np.asarray(ast_truth_eme).reshape(-1)
+
+                        best_idx = int(np.where(timer.attcoord_searchtimes == best_epoch)[0][0])
+                        T = len(timer.attcoord_searchtimes)
+
+                        two_d_pot = False
+                        if two_d_pot:
+                            def is_valid(idx):
+                                J = result_kcoverage_series[idx]["J"]
+                                return not (J is None or (isinstance(J, float) and math.isnan(J)))
+
+                            cands = [best_idx, max(0, best_idx - 1), min(T - 1, best_idx + 1)]
+                            selected = []
+                            for c in cands:
+                                if c not in selected and is_valid(c):
+                                    selected.append(c)
+                            if len(selected) < 3:
+                                for c in range(T):
+                                    if len(selected) >= 3:
+                                        break
+                                    if c not in selected and is_valid(c):
+                                        selected.append(c)
+                            if len(selected) < 3:
+                                for c in range(T):
+                                    if len(selected) >= 3:
+                                        break
+                                    if c not in selected:
+                                        selected.append(c)
+
+                            planes = [((0, 1), "XY"), ((0, 2), "XZ"), ((1, 2), "YZ")]
+
+                            def cov2_from_cov3(P3, axes):
+                                i, j = axes
+                                return P3[np.ix_([i, j], [i, j])]
+
+                            def angles_in_plane(u_cmd_xyz, axes):
+                                a, b = axes
+                                u = np.asarray(u_cmd_xyz, dtype=float)
+                                u2 = u[:, [a, b]]
+                                return np.arctan2(u2[:, 1], u2[:, 0])
+
+                            for idx in selected:
+                                epoch = timer.attcoord_searchtimes[idx]
+                                sc_xyz = np.asarray(sc_eme_states_kms_piecewise[idx, :, :3], dtype=float)
+                                ast_truth = np.asarray(ast_eme_traj_kms[idx, :3], dtype=float).reshape(3,)
+                                ast_mean = np.asarray(x_ts[idx, :3], dtype=float).reshape(3,)
+                                P3 = np.asarray(P_ts[idx, :3, :3], dtype=float).reshape(3, 3)
+
+                                u_cmd_xyz = np.asarray(result_kcoverage_series[idx]["u"], dtype=float)
+                                u_curr_xyz = np.asarray(sc_pointings_eme, dtype=float)
+
+                                fig, axes = plt.subplots(1, 3, figsize=(8, 14))
+                                fig.suptitle(f"2D Projections @ epoch {epoch}", y=0.99)
+
+                                for ax, (axpair, name) in zip(axes, planes):
+                                    agents_2d = sc_xyz[:, list(axpair)]
+                                    u_curr_2d = u_curr_xyz[:, list(axpair)]
+                                    mean_2d = ast_mean[list(axpair)]
+                                    truth_2d = ast_truth[list(axpair)]
+                                    cov_2d = cov2_from_cov3(P3, axpair)
+                                    mean_traj_2d = np.asarray(x_ts[:, :3], dtype=float)[:, list(axpair)]
+                                    truth_traj_2d = np.asarray(ast_eme_traj_kms[:, :3], dtype=float)[:, list(axpair)]
+                                    ems_center_2d = np.asarray(ems_center_xyz, dtype=float)[list(axpair)]
+                                    ang_2d = angles_in_plane(u_cmd_xyz, axpair)
+
+                                    util.plot_od_scenario_2d(
+                                        t_label=f"{epoch} ({name})",
+                                        agents_xy=agents_2d,
+                                        pointing_angles_rad=ang_2d,
+                                        theta_h_rad=theta_h_rad,
+                                        ray_length=ray_length * 2,
+                                        u_curr_agents_xy=u_curr_2d,
+                                        boresight_line_len=ray_length * 0.1,
+                                        target_mean_xy=mean_2d,
+                                        target_mean_xy_traj=mean_traj_2d,
+                                        target_cov_xy=cov_2d,
+                                        d_mahal=config['d_mahal'],
+                                        true_target_xy=truth_2d,
+                                        true_target_xy_traj=truth_traj_2d,
+                                        ems_center_xy=ems_center_2d,
+                                        ems_radius=ems_radius,
+                                        xlim=config['two_d_prop']['xlim'], ylim=config['two_d_prop']['ylim'],
+                                        agent_orbit_tracks_xy=None,
+                                        ax=ax,
+                                        title=None
+                                    )
+
+                                plt.tight_layout()
+
+                        agents_xyz = sc_eme_ae_kms
+                        target_cov_xyz = P_cart_eme
+
+                        def range_sigma_from_cov(P_eci, r_obj, r_obs):
+                            """
+                            P_eci : 6x6 or 3x3 covariance in inertial frame
+                            r_obj : object inertial position, shape (3,)
+                            r_obs : observer inertial position, shape (3,)
+
+                            Returns range standard deviation and variance.
+                            """
+                            P_r = P_eci[:3, :3] if P_eci.shape == (6, 6) else P_eci
+
+                            rho_vec = np.asarray(r_obj) - np.asarray(r_obs)
+                            rho_hat = rho_vec / np.linalg.norm(rho_vec)
+
+                            var_rho = rho_hat @ P_r @ rho_hat
+                            sigma_rho = np.sqrt(max(var_rho, 0.0))
+
+                            return sigma_rho, var_rho
+
+                        sigma_rho, var_rho = range_sigma_from_cov(P_cart_eme, ast_iod_eme[:3],
+                                                                  agents_xyz[int(formation.currently_detecting[0])])
+                        print(sigma_rho, var_rho)
+
+                        def build_slew_history_from_opt_series(opt_series, ids, *, key_u="u", normalize=True):
+                            ids = [int(i) for i in ids]
+                            out = {i: [] for i in ids}
+                            for row_idx, rowh in enumerate(opt_series):
+                                if key_u not in rowh:
+                                    raise KeyError(f"Row {row_idx} missing key '{key_u}'")
+                                U = np.asarray(rowh[key_u], dtype=float)
+                                if U.ndim != 2 or U.shape[1] != 3:
+                                    raise ValueError(f"Row {row_idx} '{key_u}' must be (M,3), got {U.shape}")
+                                M = U.shape[0]
+                                for i in ids:
+                                    if not (0 <= i < M):
+                                        raise IndexError(f"Row {row_idx}: id {i} out of range for M={M}")
+                                    out[i].append(U[i].copy())
+                            for i in ids:
+                                Ui = np.asarray(out[i], dtype=float)
+                                if Ui.size == 0:
+                                    Ui = Ui.reshape(0, 3)
+                                if normalize and Ui.shape[0] > 0:
+                                    n = np.linalg.norm(Ui, axis=1, keepdims=True)
+                                    n = np.maximum(n, 1e-12)
+                                    Ui = Ui / n
+                                out[i] = Ui
+                            return out
+
+                        ids = config['three_d_prop'].get('history_ids')
+                        if ids is None:
+                            ids = list(range(config['num_spacecraft']))
+                        slew_history = build_slew_history_from_opt_series(res_kcoverage.extra["history"], ids)
+
+                        fig, ax = util.plot_od_scenario_3d_old(
+                            t_label=best_epoch,
+                            agents_xyz=agents_xyz,
+                            u_opt_agents_xyz=sc_pointing_eme_cartesian,
+                            theta_h_rad=theta_h_rad,
+                            ray_length=ray_length,
+                            u_curr_agents_xyz=sc_pointings_eme,
+                            boresight_line_len=ray_length * 0.1,
+                            u_init_agents_xyz=None,
+                            init_boresight_line_len=ray_length * 1.5,
+                            xlim=config['three_d_prop']['xlim'], ylim=config['three_d_prop']['ylim'],
+                            zlim=config['three_d_prop']['zlim'],
+                            Nx=config['three_d_prop']['Nx'], Ny=config['three_d_prop']['Ny'],
+                            Nz=config['three_d_prop']['Nz'],
+                            max_points_for_scatter=config['three_d_prop']['max_points'],
+                            target_mean_xyz=ast_iod_eme[:3],
+                            target_cov_xyz=target_cov_xyz,
+                            d_mahal=config['d_mahal'],
+                            true_target_xyz=ast_truth_eme[:3],
+                            target_mean_traj_xyz=x_ts[:, :3],
+                            true_target_traj_xyz=ast_eme_traj_kms[:, :3],
+                            true_target_traj_xyz_2=ast_truth_original_eme[:, :3],
+                            ems_center_xyz=ems_center_xyz,
+                            ems_radius=ems_radius,
+                            show_coverage=True,
+                            show_uncertainty=True,
+                            show_truth=True,
+                            show_ems=True,
+                            show_fov_cones=True,
+                            title="3D OD Scenario Demo (EME)",
+                            slew_history=slew_history,
+                            slew_history_line_len=ray_length,
+                            agent_orbit_tracks_xyz=[sc_eme_states_kms_piecewise[:, i, :3] for i in range(config['num_spacecraft'])]
+                        )
+
+                        plot_cost_diagnosis = True
+                        if plot_cost_diagnosis:
+                            util.plot_attcoord_costs_from_series(
+                                result_kcoverage_series,
+                                title="Dual coverage score vs objective (best per epoch)"
+                            )
+
+                            thetas, phis = util.plot_theta_phi_over_history(
+                                res_kcoverage.extra["history"],
+                                int(config["num_spacecraft"]),
+                                deg=True
+                            )
+
+                        viz_cost_map = False
+                        if viz_cost_map:
+                            idx_fix = int(formation.currently_detecting[0])
+                            idx_free = 1 - idx_fix
+                            u_fix = sc_pointings_eme[idx_fix]
+
+                            TH_free_deg, PH_free_deg, J_grid = compute_J_grid_theta_phi_single_free(
+                                ast_iod_eme[:3], target_cov_xyz, agents_xyz, sc_pointings_eme, theta_h_rad,
+                                idx_fix=idx_fix,
+                                u_fix=u_fix,
+                                idx_free=idx_free,
+                                theta_range_rad=(-0.5 * np.pi, 0.5 * np.pi),
+                                phi_range_rad=(0.0, 2 * np.pi),
+                                d_M=config['d_mahal'],
+                                kappa_sigma=config['optimizer_att_coord']['kappa_sigma'],
+                                lambda_k1=config['optimizer_att_coord']['lambda_k1'],
+                                n_mc=config['opt_map']['n_mc'],
+                                n_grid_theta=config['opt_map']['n_grid_theta'],
+                                n_grid_phi=config['opt_map']['n_grid_phi'],
+                            )
+
+                            fig3d = plt.figure(figsize=(9, 6))
+                            ax3d = fig3d.add_subplot(111, projection="3d")
+                            ax3d.plot_surface(
+                                TH_free_deg, PH_free_deg, J_grid,
+                                rstride=config['opt_map']['rstride'], cstride=config['opt_map']['cstride'],
+                                linewidth=config['opt_map']['linewidth_3d'], alpha=config['opt_map']['alpha']
+                            )
+                            ax3d.set_xlabel(rf'$\theta_{{{idx_free}}}$ (deg)')
+                            ax3d.set_ylabel(rf'$\phi_{{{idx_free}}}$ (deg)')
+                            ax3d.set_zlabel(r'$J_t$')
+                            ax3d.set_title(rf'$J_t(\theta,\phi)$ for free agent {idx_free} (fixed agent {idx_fix})')
+                            plt.tight_layout()
+
+                            plt.figure(figsize=(7, 5.5))
+                            cs = plt.contourf(TH_free_deg, PH_free_deg, J_grid, levels=config['opt_map']['levels'])
+                            plt.colorbar(cs, label=r'$J_t$')
+                            plt.xlabel(rf'$\theta_{{{idx_free}}}$ (deg)')
+                            plt.ylabel(rf'$\phi_{{{idx_free}}}$ (deg)')
+                            plt.title(rf'$J_t(\theta,\phi)$ for free agent {idx_free} (fixed agent {idx_fix})')
+                            plt.grid(alpha=0.3)
+
+                            restart_indices = sorted({entry["restart"] for entry in res_kcoverage.extra["history"]})
+                            colors = ['white', 'yellow', 'cyan', 'magenta', 'green', 'orange']
+                            markers = ['o', 's', '^', 'D', 'x', '+']
+
+                            for k, r in enumerate(restart_indices):
+                                path_entries = [entry for entry in res_kcoverage.extra["history"] if entry["restart"] == r]
+                                if not path_entries:
+                                    continue
+
+                                theta_path_deg = []
+                                phi_path_deg = []
+
+                                for entry in path_entries:
+                                    if entry.get("use_fixed_agent", False) and ("x_free" in entry) and (
+                                            entry.get("idx_fix", None) is not None):
+                                        xk = np.asarray(entry["x_free"], dtype=float).ravel()
+                                        th = xk[0]
+                                        ph = xk[1]
+                                    else:
+                                        xk = np.asarray(entry["x"], dtype=float).ravel()
+                                        th = xk[2 * idx_free]
+                                        ph = xk[2 * idx_free + 1]
+
+                                    theta_path_deg.append(np.rad2deg(th))
+                                    phi_path_deg.append(np.rad2deg(ph))
+
+                                theta_path_deg = np.asarray(theta_path_deg)
+                                phi_path_deg = np.asarray(phi_path_deg)
+
+                                col = colors[k % len(colors)]
+                                m = markers[k % len(markers)]
+
+                                label = f"Trial {r}"
+                                if r == 0:
+                                    label += " (warm start)"
+
+                                plt.plot(
+                                    theta_path_deg, phi_path_deg,
+                                    linestyle='-',
+                                    marker=m,
+                                    color=col,
+                                    lw=config['opt_map']['linewidth_2d'],
+                                    ms=config['opt_map']['marker_size'],
+                                    label=label
+                                )
+
+                            plt.legend(loc='upper right')
+
+                    view_other_epoch_res_flag = False
+                    if view_other_epoch_res_flag:
+                        desired_idx = [5, 6, 7, 8, 9]
+                        for des_idx in desired_idx:
+
+                            row = result_kcoverage_series[des_idx]
+
+                            best_epoch = row["dt"]
+                            best_idx = np.where(timer.attcoord_searchtimes == best_epoch)[0]
+
+                            theta_h_rad = util.fov_deg2_to_half_angle_rad(config["fov"])
+                            ems_center_xyz = np.array(config["ems"]["p_em"])
+                            ems_radius = config["ems"]['R_em']
+                            ray_length = config['ray_length']
+
+                            sc_eme_ae_kms = np.squeeze(sc_eme_states_kms_piecewise[best_idx, :, :3])
+                            sc_pointing_eme_cartesian = row['u']
+                            ang_eme = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_eme_cartesian)
+                            ast_truth_eme = np.squeeze(ast_eme_traj_kms[best_idx, :3])
+
+                            ast_iod_eme = np.squeeze(x_ts[best_idx, :3])
+                            P_cart_eme = np.squeeze(P_ts[best_idx, :3, :3])
+
+                            ast_truth_eme = np.asarray(ast_truth_eme).reshape(-1)
+
+                            best_idx = int(np.where(timer.attcoord_searchtimes == best_epoch)[0][0])
+                            T = len(timer.attcoord_searchtimes)
+
+                            agents_xyz = sc_eme_ae_kms
+                            target_cov_xyz = P_cart_eme
+
+                            def build_slew_history_from_opt_series(opt_series, ids, *, key_u="u", normalize=True):
+                                ids = [int(i) for i in ids]
+                                out = {i: [] for i in ids}
+
+                                for row_idx, rowh in enumerate(opt_series):
+                                    if key_u not in rowh:
+                                        raise KeyError(f"Row {row_idx} missing key '{key_u}'")
+                                    U = np.asarray(rowh[key_u], dtype=float)
+                                    if U.ndim != 2 or U.shape[1] != 3:
+                                        raise ValueError(f"Row {row_idx} '{key_u}' must be (M,3), got {U.shape}")
+                                    M = U.shape[0]
+                                    for i in ids:
+                                        if not (0 <= i < M):
+                                            raise IndexError(f"Row {row_idx}: id {i} out of range for M={M}")
+                                        out[i].append(U[i].copy())
+
+                                for i in ids:
+                                    Ui = np.asarray(out[i], dtype=float)
+                                    if Ui.size == 0:
+                                        Ui = Ui.reshape(0, 3)
+
+                                    if normalize and Ui.shape[0] > 0:
+                                        n = np.linalg.norm(Ui, axis=1, keepdims=True)
+                                        n = np.maximum(n, 1e-12)
+                                        Ui = Ui / n
+
+                                    out[i] = Ui
+
+                                return out
+
+                            ids = config['three_d_prop'].get('history_ids')
+                            if ids is None:
+                                ids = list(range(config['num_spacecraft']))
+
+                            slew_history = build_slew_history_from_opt_series(row["history"], ids)
+
+                            fig, ax = util.plot_od_scenario_3d_new(
+                                t_label=best_epoch,
+                                agents_xyz=agents_xyz,
+                                u_opt_agents_xyz=sc_pointing_eme_cartesian,
+                                theta_h_rad=theta_h_rad,
+                                ray_length=ray_length,
+                                u_curr_agents_xyz=sc_pointings_eme,
+                                boresight_line_len=ray_length * 0.1,
+                                u_init_agents_xyz=None,
+                                init_boresight_line_len=ray_length * 1.5,
+                                agent_orbit_tracks_xyz=[sc_eme_states_kms_piecewise[:, i, :3] for i in
+                                                        range(config['num_spacecraft'])],
+                                spacecraft_orbit_xyz=None,
+                                xlim=config['three_d_prop']['xlim'], ylim=config['three_d_prop']['ylim'],
+                                zlim=config['three_d_prop']['zlim'],
+                                target_mean_xyz=ast_iod_eme[:3],
+                                target_cov_xyz=target_cov_xyz,
+                                d_mahal=config['d_mahal'],
+                                true_target_xyz=ast_truth_eme[:3],
+                                target_mean_traj_xyz=x_ts[:, :3],
+                                true_target_traj_xyz=ast_eme_traj_kms[:, :3],
+                                true_target_traj_xyz_2=ast_truth_original_eme[:, :3],
+                                ems_center_xyz=ems_center_xyz,
+                                ems_radius=ems_radius,
+                                show_uncertainty=True,
+                                show_truth=True,  # green circle
+                                show_ems=True,
+                                show_fov_cones=True,
+                                show_legend=True,
+                                show_target_mean_traj=True,
+                                show_true_target_traj=True,
+                                show_true_target_traj_2=False,
+                                show_init_boresights=False,
+                                show_current_boresights=False,
+                                show_slew_angle_annotations=False,
+                                show_agent_name_annotations=True,
+                                show_agent_orbit_tracks=True,
+                                show_spacecraft_orbit=False,
+                                show_coverage=True,
+
+                                Nx=60,
+                                Ny=60,
+                                Nz=40,
+
+                                # coverage display
+                                show_pair_coverage=True,
+                                show_triple_coverage=True,
+                                pair_only_exact=True,
+
+                                pair_coverage_alpha=0.25,
+                                triple_coverage_alpha=0.35,
+
+                                # FOV styling
+                                fov_style="surface",  # "surface", "wire", "both"
+                                fov_surface_alpha=0.12,
+                                fov_surface_color="lightskyblue",
+                                fov_n_rays=2,
+                                fov_n_circle=64,
+                                fov_n_len=20,
+
+                                # styling
+                                title=None,
+                                label_fontsize=9,
+                                label_offset_px=10,
+                                slew_label_offset_px=16,
+                                fill_alpha=0.10,
+                                sparse_wire=True,
+
+                                init_boresight_lw=1.5,
+                                init_boresight_alpha=0.95,
+
+                                # slew history
+                                slew_history=slew_history,
+                                slew_history_line_len=ray_length,
+                                slew_history_lw=1.8,
+                                slew_history_alpha=0.85,
+                                slew_history_cmap="viridis",
+                                slew_history_every=1,
+                                slew_history_colorbar=True,
+                                slew_history_colorbar_label="Slew history step",
+                                slew_history_norm_mode="per_agent",
+                            )
+
+
+
+                #-------------------------
+                # Regular OD Step
+                # -------------------------
+                else:
+                    event_type = "regular_update"
+
+                    #######################################################
+                    # Gather Tracklet data and Detect
+                    ######################################################
+                    p_meas_k, n_meas_k, sc_states_k, ast_states_k, epochs_k, detection_res_k = formation.detect(
+                        minimoon.curr_state_eme,
+                        timer.curr_epoch,
+                        n_body_propagator,
+                        config
+                    )
+
+                    # optional visualization block unchanged
+                    confirm_meas = False
+                    if confirm_meas:
+                        ems_center_xyz = np.array(config["ems"]["p_em"])
+                        ems_radius = config["ems"]['R_em']
+                        util.plot_detection_geometry_3d(
+                            perfect_meas=p_meas_k,
+                            noisy_meas=n_meas_k,
+                            sc_states=sc_states_k,
+                            ast_states=ast_states_k,
+                            detection_results=detection_res_k,
+                            epochs=epochs_k,
+                            los_stride=2,
+                            use_true_range_for_los=True,
+                            # EMS sphere
+                            ems_center_xyz=ems_center_xyz,
+                            ems_radius=ems_radius,
+                            show_ems=True,
+                            ems_alpha=0.10,
+                            show_ems_wires=True,
+                            title="Detection Geometry",
+                            save_path=None,
+                            show=False,
+                        )
+                        two_d_too = False
+                        if two_d_too:
+                            plane = ("x", "y")
+                            plane_str = "".join(plane)
+                            util.plot_detection_geometry_2d(
+                                perfect_meas=p_meas_k,
+                                noisy_meas=n_meas_k,
+                                sc_states=sc_states_k,
+                                ast_states=ast_states_k,
+                                detection_results=detection_res_k,
+                                plane=plane,
+                                los_stride=2,
+                                save_path=None,
+                                show=False,
+                            )
+
+                    # print(detection_res_k)
+                    # plt.show()
+
+                    # -------------------------
+                    # Prediction + UKF update only
+                    # -------------------------
+                    od_time_start = time.time()
+                    od_meas_result = process_tracklet_until_update_with_prior_epoch(
+                        ukf=ukf,
+                        prior_epoch_jdtdb=timer.curr_epoch,
+                        n_body_propagator=n_body_propagator,
+                        epochs_k=epochs_k,
+                        noisy_meas_k=n_meas_k,
+                        sc_states_k=sc_states_k,
+                        detection_res_k=detection_res_k,
+                    )
+                    od_time = time.time() - od_time_start
+
+                    had_detection = od_meas_result["had_detection"]
+                    detecting_ids = od_meas_result["detecting_ids"]
+                    n_detections = od_meas_result["n_detections"]
+                    processed_epochs = od_meas_result["processed_epochs"]
+
+                    x_post_k = od_meas_result["posterior_x"]
+                    P_post_k = od_meas_result["posterior_P"]
+                    update_history_k = od_meas_result["update_history"]
+
+                    formation.currently_detecting = detecting_ids
+
+                    ems_flags = _ems_detection_flags(detection_res_k)
+                    all_ems_occluded = bool(ems_flags["all_ems_occluded"])
+                    no_detection_reason = ""
+                    terminate_for_object_lost = False
+                    ems_blackout_prediction_only = False
+
+                    if had_detection and int(n_detections) > 0:
+                        no_detection_reason = ""
+                        all_ems_occluded = False
+                        in_ems_blackout = False
+                        pending_reacquisition = False
+                        reacquisition_attempt_count = 0
+                    else:
+                        # EMS blackout dominates: if every spacecraft LOS is EMS-occluded,
+                        # do not spend compute on attitude coordination. Just advance by the
+                        # configured blackout cadence with prediction only.
+                        if all_ems_occluded:
+                            no_detection_reason = "ems_blackout_all"
+                            event_type = "ems_blackout_prediction_only"
+                            in_ems_blackout = True
+                            pending_reacquisition = False
+                            reacquisition_attempt_count = 0
+                            ems_blackout_prediction_only = True
+                        elif in_ems_blackout:
+                            # EMS just became clear after a blackout. The current no-detection
+                            # happened with pre-reacquisition pointings, so allow attitude
+                            # coordination once before declaring the object lost.
+                            no_detection_reason = "ems_visible_after_blackout_reacquisition"
+                            event_type = "ems_reacquisition_attcoord"
+                            in_ems_blackout = False
+                            pending_reacquisition = True
+                        elif pending_reacquisition:
+                            # A reacquisition attempt has already been performed. If the next
+                            # EMS-visible detection check still finds nothing, terminate unless
+                            # the config allows more reacquisition attempts.
+                            if (
+                                terminate_if_ems_visible_but_not_detected
+                                and reacquisition_attempt_count >= max_reacquisition_attempts_after_blackout
+                            ):
+                                no_detection_reason = "object_lost_after_ems_reacquisition"
+                                event_type = "termination_object_lost_after_ems_reacquisition"
+                                terminate_for_object_lost = True
+                            else:
+                                no_detection_reason = "ems_reacquisition_retry_no_detection"
+                                event_type = "ems_reacquisition_attcoord"
+                        else:
+                            no_detection_reason = "object_lost_no_detection"
+                            event_type = "termination_object_lost_no_detection"
+                            terminate_for_object_lost = bool(terminate_if_ems_visible_but_not_detected)
+
+                    ast_eme_state_kms_during_detection = minimoon.curr_state_eme
+
+                    update_history = od_meas_result["update_history"]
+                    processed_epochs = od_meas_result["processed_epochs"]
+
+                    x_est_hist = np.array([entry["x_post"] for entry in update_history])  # (K,6)
+                    P_est_hist = np.array([entry["P_post"] for entry in update_history])  # (K,6,6)
+                    x_pred_hist = np.array([entry["x_prior"] for entry in update_history])
+                    P_pred_hist = np.array([entry["P_prior"] for entry in update_history])
+
+                    if len(processed_epochs) > 0:
+                        processed_epoch_first, processed_epoch_last, processed_epoch_count = _first_last_count(processed_epochs)
+
+                    ast_eme_traj_kms_during_detection = n_body_propagator.propagate(
+                        ast_eme_state_kms_during_detection,
+                        timer.curr_epoch,
+                        processed_epochs
+                    ) if len(processed_epochs) > 0 else np.empty((0, 6))
+
+                    propped_initial_state = n_body_propagator.propagate(
+                        x_est_hist[0], timer.curr_epoch, processed_epochs
+                    ) if len(update_history) > 0 else np.empty((0, 6))
+
+                    view_update = False
+                    if view_update and len(update_history) > 0:
+                        fig, ax = util.plot_od_trajectory_with_measurements_3d(
+                            x_est_hist=x_est_hist,
+                            ast_true_hist=ast_eme_traj_kms_during_detection,
+                            P_est_hist=P_est_hist,
+                            noisy_meas=n_meas_k,
+                            sc_states=sc_states_k,
+                            detection_results=detection_res_k,
+                            x_pred_hist=propped_initial_state,
+                            d_mahal=3.0,
+                            los_stride=2,
+                            los_scale_before=0.015,
+                            los_scale_after=0.025,
+                            title="OD estimate vs truth with LOS and 3σ ellipsoid",
+                            save_path=None,
+                            show=False,
+                        )
+                        show_two_d = True
+                        if show_two_d:
+                            fig, ax = util.plot_od_trajectory_with_measurements_2d(
+                                x_est_hist=x_est_hist,
+                                ast_true_hist=ast_eme_traj_kms_during_detection,
+                                P_est_hist=P_est_hist,
+                                noisy_meas=n_meas_k,
+                                sc_states=sc_states_k,
+                                detection_results=detection_res_k,
+                                plane=("x", "y"),
+                                x_pred_hist=propped_initial_state,
+                                d_mahal=3.0,
+                                los_stride=2,
+                                los_scale_before=0.015,
+                                los_scale_after=0.025,
+                                title="OD estimate vs truth with LOS and 3σ ellipse",
+                                save_path=None,
+                                show=False,
+                            )
+
+                    # -----------------------------------------------------
+                    # Inner KF diagnostics
+                    # -----------------------------------------------------
+                    detecting_ids_str = _ids_to_str(detecting_ids)
+
+                    if log_inner_kf and timer.curr_od_index > resume_after_step:
+                        for j, entry in enumerate(update_history):
+                            row_in = {
+                                "run_uid": uid,
+                                "master_row_idx": m_idx,
+                                "rank": rank,
+                                "od_step_idx": int(timer.curr_od_index),
+                                "inner_update_idx": j,
+                                "epoch_jdtdb": float(processed_epochs[j]) if j < len(processed_epochs) else np.nan,
+                                "detecting_ids": detecting_ids_str,
+                            }
+
+                            xpr = _flatten_vec(entry.get("x_prior", None), 6)
+                            xpo = _flatten_vec(entry.get("x_post", None), 6)
+                            Ppr = _safe_diag(entry.get("P_prior", None), 6)
+                            Ppo = _safe_diag(entry.get("P_post", None), 6)
+
+                            for i in range(6):
+                                row_in[f"x_prior_{i}"] = xpr[i]
+                                row_in[f"x_post_{i}"] = xpo[i]
+                                row_in[f"P_prior_diag_{i}"] = Ppr[i]
+                                row_in[f"P_post_diag_{i}"] = Ppo[i]
+
+                            xtrue_i = [np.nan] * 6
+                            if len(ast_eme_traj_kms_during_detection) > j:
+                                xtrue_i = _flatten_vec(ast_eme_traj_kms_during_detection[j], 6)
+                            for i in range(6):
+                                row_in[f"x_true_{i}"] = xtrue_i[i]
+
+                            obs_i = _extract_inner_obs_state(sc_states_k, j, detecting_ids)
+                            for i in range(6):
+                                row_in[f"observer_state_{i}"] = obs_i[i]
+
+                            true_i, noisy_i = _extract_inner_meas_pair(p_meas_k, n_meas_k, j, detecting_ids)
+                            for i in range(2):
+                                row_in[f"true_meas_{i}"] = true_i[i]
+                                row_in[f"noisy_meas_{i}"] = noisy_i[i]
+
+                            _append_row(inner_csv_path, row_in, inner_header)
+
+                    # No detections are no longer terminal. The UKF/SPKF function
+                    # now runs a prediction-only pass through the missed tracklet,
+                    # and attitude coordination below continues from that propagated prior.
+                    if False and ((not had_detection) or (int(n_detections) == 0)):
+                        termination_reason = "no_detection"
+                        progress_status = "completed"
+                        event_type = "termination_no_detection"
+
+                        sc_states_post = np.asarray(formation.get_spacecraft_states(), dtype=float)
+                        sc_pointings_post = np.asarray(formation.get_spacecraft_pointings(), dtype=float)
+
+                        x_est = _flatten_vec(getattr(ukf, "x", None), 6)
+                        x_true = _flatten_vec(getattr(minimoon, "curr_state_eme", None), 6)
+                        P_diag = _safe_diag(getattr(ukf, "P", None), 6)
+                        pos_err, vel_err = _best_effort_state_error(x_est, x_true)
+
+                        row_out = {
+                            "run_uid": uid,
+                            "master_row_idx": m_idx,
+                            "rank": rank,
+                            "od_step_idx": int(timer.curr_od_index),
+                            "event_type": event_type,
+                            "termination_reason": termination_reason,
+                            "epoch_start_jdtdb": epoch_start,
+                            "epoch_end_jdtdb": epoch_start,
+                            "processed_epoch_first_jdtdb": processed_epoch_first,
+                            "processed_epoch_last_jdtdb": processed_epoch_last,
+                            "processed_epoch_count": processed_epoch_count,
+                            "had_detection": had_detection,
+                            "n_detections": 0,
+                            "detecting_ids": "",
+                            "od_time_sec": od_time,
+                            "attcoord_time_sec": np.nan,
+                            "true_meas_len": 0,
+                            "true_meas_norm": np.nan,
+                            "true_meas_0": np.nan,
+                            "true_meas_1": np.nan,
+                            "noisy_meas_len": 0,
+                            "noisy_meas_norm": np.nan,
+                            "noisy_meas_0": np.nan,
+                            "noisy_meas_1": np.nan,
+                            "pos_err_norm": pos_err,
+                            "vel_err_norm": vel_err,
+                            "chosen_candidate_idx": np.nan,
+                            "chosen_candidate_epoch_jdtdb": np.nan,
+                            "progress_status": progress_status,
+                        }
+                        for i in range(6):
+                            row_out[f"x_est_{i}"] = x_est[i]
+                            row_out[f"x_true_{i}"] = x_true[i]
+                            row_out[f"P_diag_{i}"] = P_diag[i]
+
+                        for sc_id in range(num_sc):
+                            pre_s = _flatten_vec(sc_states_pre[sc_id], 6)
+                            pre_u = _flatten_vec(sc_pointings_pre[sc_id], 3)
+                            post_s = _flatten_vec(sc_states_post[sc_id], 6)
+                            post_u = _flatten_vec(sc_pointings_post[sc_id], 3)
+                            for i in range(6):
+                                row_out[f"sc{sc_id}_state_pre_{i}"] = pre_s[i]
+                                row_out[f"sc{sc_id}_state_post_{i}"] = post_s[i]
+                            for i in range(3):
+                                row_out[f"sc{sc_id}_pointing_pre_{i}"] = pre_u[i]
+                                row_out[f"sc{sc_id}_pointing_post_{i}"] = post_u[i]
+
+                        if timer.curr_od_index > resume_after_step:
+                            _append_row(outer_csv_path, row_out, outer_header)
+
+                        _write_progress(progress_path, {
+                            "uid": uid,
+                            "last_completed_outer_step": int(timer.curr_od_index),
+                            "last_epoch_jdtdb": float(epoch_start),
+                            "completed": True,
+                            "termination_reason": termination_reason,
+                            "outer_csv_path": outer_csv_path,
+                        })
+                        break
+
+                    # -----------------------------------------------------
+                    # Optional OD stop criterion: covariance trace + NIS
+                    # -----------------------------------------------------
+                    should_stop_od, od_convergence_streak, last_od_stop_metrics, od_stop_reason = _od_stop_metrics_and_decision(
+                        config,
+                        getattr(ukf, "P", None),
+                        update_history,
+                        od_convergence_streak,
+                    )
+
+                    # A prediction-only no-detection step should not by itself satisfy
+                    # OD convergence/termination logic. Keep the metrics for logging,
+                    # but require at least one actual detection for stop decisions.
+                    if (not had_detection) or (int(n_detections) == 0):
+                        should_stop_od = False
+                        od_convergence_streak = 0
+                        last_od_stop_metrics["convergence_streak"] = 0
+                        od_stop_reason = "no_detection_continue"
+
+                    if terminate_for_object_lost:
+                        termination_reason = no_detection_reason
+                        progress_status = "completed"
+
+                        sc_states_post = np.asarray(formation.get_spacecraft_states(), dtype=float)
+                        sc_pointings_post = np.asarray(formation.get_spacecraft_pointings(), dtype=float)
+
+                        x_est = _flatten_vec(getattr(ukf, "x", None), 6)
+                        x_true = _flatten_vec(getattr(minimoon, "curr_state_eme", None), 6)
+                        P_diag = _safe_diag(getattr(ukf, "P", None), 6)
+                        pos_err, vel_err = _best_effort_state_error(x_est, x_true)
+                        true_meas_len, true_meas_norm, true_pair = _summarize_meas_outer(p_meas_k)
+                        noisy_meas_len, noisy_meas_norm, noisy_pair = _summarize_meas_outer(n_meas_k)
+
+                        row_out = {
+                            "run_uid": uid,
+                            "master_row_idx": m_idx,
+                            "rank": rank,
+                            "od_step_idx": int(timer.curr_od_index),
+                            "event_type": event_type,
+                            "termination_reason": termination_reason,
+                            "epoch_start_jdtdb": epoch_start,
+                            "epoch_end_jdtdb": float(processed_epoch_last) if np.isfinite(processed_epoch_last) else epoch_start,
+                            "processed_epoch_first_jdtdb": processed_epoch_first,
+                            "processed_epoch_last_jdtdb": processed_epoch_last,
+                            "processed_epoch_count": processed_epoch_count,
+                            "had_detection": had_detection,
+                            "n_detections": n_detections,
+                            "detecting_ids": detecting_ids_str,
+                            "no_detection_reason": no_detection_reason,
+                            "all_ems_occluded": int(bool(all_ems_occluded)),
+                            "in_ems_blackout": int(bool(in_ems_blackout)),
+                            "pending_reacquisition": int(bool(pending_reacquisition)),
+                            "reacquisition_attempt_count": int(reacquisition_attempt_count),
+                            "od_time_sec": od_time,
+                            "attcoord_time_sec": np.nan,
+                            "true_meas_len": true_meas_len,
+                            "true_meas_norm": true_meas_norm,
+                            "true_meas_0": true_pair[0],
+                            "true_meas_1": true_pair[1],
+                            "noisy_meas_len": noisy_meas_len,
+                            "noisy_meas_norm": noisy_meas_norm,
+                            "noisy_meas_0": noisy_pair[0],
+                            "noisy_meas_1": noisy_pair[1],
+                            "P_pos_trace": last_od_stop_metrics["trace_pos"],
+                            "P_vel_trace": last_od_stop_metrics["trace_vel"],
+                            "P_pos_sigma_3d": last_od_stop_metrics["sigma_pos_3d"],
+                            "P_vel_sigma_3d": last_od_stop_metrics["sigma_vel_3d"],
+                            "NIS_last": last_od_stop_metrics["nis_last"],
+                            "NIS_mean": last_od_stop_metrics["nis_mean"],
+                            "NIS_count": last_od_stop_metrics["nis_count"],
+                            "OD_convergence_streak": last_od_stop_metrics["convergence_streak"],
+                            "pos_err_norm": pos_err,
+                            "vel_err_norm": vel_err,
+                            "chosen_candidate_idx": np.nan,
+                            "chosen_candidate_epoch_jdtdb": np.nan,
+                            "progress_status": progress_status,
+                        }
+                        for i in range(6):
+                            row_out[f"x_est_{i}"] = x_est[i]
+                            row_out[f"x_true_{i}"] = x_true[i]
+                            row_out[f"P_diag_{i}"] = P_diag[i]
+                        for sc_id in range(num_sc):
+                            pre_s = _flatten_vec(sc_states_pre[sc_id], 6)
+                            pre_u = _flatten_vec(sc_pointings_pre[sc_id], 3)
+                            post_s = _flatten_vec(sc_states_post[sc_id], 6)
+                            post_u = _flatten_vec(sc_pointings_post[sc_id], 3)
+                            for i in range(6):
+                                row_out[f"sc{sc_id}_state_pre_{i}"] = pre_s[i]
+                                row_out[f"sc{sc_id}_state_post_{i}"] = post_s[i]
+                            for i in range(3):
+                                row_out[f"sc{sc_id}_pointing_pre_{i}"] = pre_u[i]
+                                row_out[f"sc{sc_id}_pointing_post_{i}"] = post_u[i]
+
+                        if timer.curr_od_index > resume_after_step:
+                            _append_row(outer_csv_path, row_out, outer_header)
+
+                        _write_progress(progress_path, {
+                            "uid": uid,
+                            "last_completed_outer_step": int(timer.curr_od_index),
+                            "last_epoch_jdtdb": float(row_out["epoch_end_jdtdb"]),
+                            "completed": True,
+                            "termination_reason": termination_reason,
+                            "outer_csv_path": outer_csv_path,
+                        })
+                        break
+
+                    if ems_blackout_prediction_only:
+                        progress_status = "running"
+                        termination_reason = ""
+                        attcoord_time = 0.0
+                        chosen_candidate_idx = np.nan
+                        chosen_candidate_epoch_jdtdb = np.nan
+
+                        t_after_tracklet = float(processed_epoch_last) if np.isfinite(processed_epoch_last) else float(timer.curr_epoch)
+                        target_epoch = float(timer.curr_epoch) + float(ems_blackout_dt_sec) / 86400.0
+                        target_epoch = max(target_epoch, t_after_tracklet)
+                        target_epoch = min(target_epoch, float(timer.end_time))
+
+                        # The no-detection UKF routine already predicted through the tracklet.
+                        # If the configured blackout step goes beyond that, keep predicting
+                        # to the blackout target epoch.
+                        if target_epoch > t_after_tracklet + 1e-15:
+                            ukf.predict(
+                                t_after_tracklet,
+                                target_epoch,
+                                n_body_propagator.propagate_multiple_objects
+                            )
+                            processed_epochs = np.append(np.asarray(processed_epochs, dtype=float), target_epoch)
+                            processed_epoch_first, processed_epoch_last, processed_epoch_count = _first_last_count(processed_epochs)
+
+                        # Propagate truth/minimoon and spacecraft states to the same blackout target.
+                        ast_blackout = n_body_propagator.propagate(
+                            minimoon.curr_state_eme,
+                            timer.curr_epoch,
+                            np.asarray([target_epoch], dtype=float),
+                        )
+                        ast_blackout = np.asarray(ast_blackout, dtype=float).reshape(-1, 6)
+
+                        sc_blackout, anchor_info_blackout = util.piecewise_anchor_and_propagate_spacecraft_trajs(
+                            formation=formation, minimoon=minimoon, timer=timer,
+                            t_targets_jdtdb=np.asarray([target_epoch], dtype=float),
+                            n_body_propagator=n_body_propagator, return_anchor_info=True
+                        )
+                        sc_blackout = np.asarray(sc_blackout, dtype=float).reshape(1, num_sc, 6)
+
+                        formation.set_spacecraft_states(sc_blackout[0, :, :])
+                        # Keep existing pointings during EMS blackout.
+                        minimoon.set_state(ast_blackout[0, :])
+
+                        k_anchor_best = int(anchor_info_blackout["anchor_k_of_t"][0])
+                        t_anchor_best = float(anchor_info_blackout["anchor_epoch_of_t"][0])
+                        timer.set_attcoord_time(0.0)
+                        timer.set_slew_time(0.0)
+                        timer.step(target_epoch, k_anchor_best, t_anchor_best)
+
+                        sc_states_post = np.asarray(formation.get_spacecraft_states(), dtype=float)
+                        sc_pointings_post = np.asarray(formation.get_spacecraft_pointings(), dtype=float)
+
+                        x_est = _flatten_vec(getattr(ukf, "x", None), 6)
+                        x_true = _flatten_vec(getattr(minimoon, "curr_state_eme", None), 6)
+                        P_diag = _safe_diag(getattr(ukf, "P", None), 6)
+                        pos_err, vel_err = _best_effort_state_error(x_est, x_true)
+                        true_meas_len, true_meas_norm, true_pair = _summarize_meas_outer(p_meas_k)
+                        noisy_meas_len, noisy_meas_norm, noisy_pair = _summarize_meas_outer(n_meas_k)
+
+                        row_out = {
+                            "run_uid": uid,
+                            "master_row_idx": m_idx,
+                            "rank": rank,
+                            "od_step_idx": int(timer.curr_od_index),
+                            "event_type": event_type,
+                            "termination_reason": termination_reason,
+                            "epoch_start_jdtdb": epoch_start,
+                            "epoch_end_jdtdb": float(timer.curr_epoch),
+                            "processed_epoch_first_jdtdb": processed_epoch_first,
+                            "processed_epoch_last_jdtdb": processed_epoch_last,
+                            "processed_epoch_count": processed_epoch_count,
+                            "had_detection": had_detection,
+                            "n_detections": n_detections,
+                            "detecting_ids": detecting_ids_str,
+                            "no_detection_reason": no_detection_reason,
+                            "all_ems_occluded": int(bool(all_ems_occluded)),
+                            "in_ems_blackout": int(bool(in_ems_blackout)),
+                            "pending_reacquisition": int(bool(pending_reacquisition)),
+                            "reacquisition_attempt_count": int(reacquisition_attempt_count),
+                            "od_time_sec": od_time,
+                            "attcoord_time_sec": attcoord_time,
+                            "true_meas_len": true_meas_len,
+                            "true_meas_norm": true_meas_norm,
+                            "true_meas_0": true_pair[0],
+                            "true_meas_1": true_pair[1],
+                            "noisy_meas_len": noisy_meas_len,
+                            "noisy_meas_norm": noisy_meas_norm,
+                            "noisy_meas_0": noisy_pair[0],
+                            "noisy_meas_1": noisy_pair[1],
+                            "P_pos_trace": last_od_stop_metrics["trace_pos"],
+                            "P_vel_trace": last_od_stop_metrics["trace_vel"],
+                            "P_pos_sigma_3d": last_od_stop_metrics["sigma_pos_3d"],
+                            "P_vel_sigma_3d": last_od_stop_metrics["sigma_vel_3d"],
+                            "NIS_last": last_od_stop_metrics["nis_last"],
+                            "NIS_mean": last_od_stop_metrics["nis_mean"],
+                            "NIS_count": last_od_stop_metrics["nis_count"],
+                            "OD_convergence_streak": last_od_stop_metrics["convergence_streak"],
+                            "pos_err_norm": pos_err,
+                            "vel_err_norm": vel_err,
+                            "chosen_candidate_idx": chosen_candidate_idx,
+                            "chosen_candidate_epoch_jdtdb": chosen_candidate_epoch_jdtdb,
+                            "progress_status": progress_status,
+                        }
+                        for i in range(6):
+                            row_out[f"x_est_{i}"] = x_est[i]
+                            row_out[f"x_true_{i}"] = x_true[i]
+                            row_out[f"P_diag_{i}"] = P_diag[i]
+                        for sc_id in range(num_sc):
+                            pre_s = _flatten_vec(sc_states_pre[sc_id], 6)
+                            pre_u = _flatten_vec(sc_pointings_pre[sc_id], 3)
+                            post_s = _flatten_vec(sc_states_post[sc_id], 6)
+                            post_u = _flatten_vec(sc_pointings_post[sc_id], 3)
+                            for i in range(6):
+                                row_out[f"sc{sc_id}_state_pre_{i}"] = pre_s[i]
+                                row_out[f"sc{sc_id}_state_post_{i}"] = post_s[i]
+                            for i in range(3):
+                                row_out[f"sc{sc_id}_pointing_pre_{i}"] = pre_u[i]
+                                row_out[f"sc{sc_id}_pointing_post_{i}"] = post_u[i]
+
+                        if timer.curr_od_index > resume_after_step:
+                            _append_row(outer_csv_path, row_out, outer_header)
+                            _write_progress(progress_path, {
+                                "uid": uid,
+                                "last_completed_outer_step": int(timer.curr_od_index),
+                                "last_epoch_jdtdb": float(timer.curr_epoch),
+                                "completed": False,
+                                "termination_reason": "",
+                                "outer_csv_path": outer_csv_path,
+                                "checkpoint_path": (checkpoint_path if checkpoint_enabled else None),
+                            })
+                            if checkpoint_enabled:
+                                _save_od_checkpoint(
+                                    checkpoint_path, uid=uid, m_idx=m_idx, rank=rank, ukf=ukf, timer=timer,
+                                    minimoon=minimoon, formation=formation,
+                                    od_convergence_streak=od_convergence_streak,
+                                    last_od_stop_metrics=last_od_stop_metrics,
+                                    last_completed_outer_step=int(timer.curr_od_index),
+                                    outer_csv_path=outer_csv_path,
+                                    termination_reason="",
+                                    progress_status=progress_status,
+                                    no_detection_state=_no_detection_state_dict(
+                                        in_ems_blackout, pending_reacquisition, reacquisition_attempt_count
+                                    ),
+                                )
+
+                        print_od_status(
+                            timer=timer,
+                            ukf=ukf,
+                            minimoon=minimoon,
+                            formation=formation,
+                            x_true=None,
+                            n_detections=n_detections,
+                            status_every=status_every,
+                            prefix=f"[OD r{rank} uid={uid}]",
+                        )
+                        continue
+
+                    if should_stop_od:
+                        termination_reason = od_stop_reason
+                        progress_status = "completed"
+                        event_type = "termination_convergence"
+
+                        sc_states_post = np.asarray(formation.get_spacecraft_states(), dtype=float)
+                        sc_pointings_post = np.asarray(formation.get_spacecraft_pointings(), dtype=float)
+
+                        x_est = _flatten_vec(getattr(ukf, "x", None), 6)
+                        x_true = _flatten_vec(getattr(minimoon, "curr_state_eme", None), 6)
+                        P_diag = _safe_diag(getattr(ukf, "P", None), 6)
+                        pos_err, vel_err = _best_effort_state_error(x_est, x_true)
+                        true_meas_len, true_meas_norm, true_pair = _summarize_meas_outer(p_meas_k)
+                        noisy_meas_len, noisy_meas_norm, noisy_pair = _summarize_meas_outer(n_meas_k)
+
+                        row_out = {
+                            "run_uid": uid,
+                            "master_row_idx": m_idx,
+                            "rank": rank,
+                            "od_step_idx": int(timer.curr_od_index),
+                            "event_type": event_type,
+                            "termination_reason": termination_reason,
+                            "epoch_start_jdtdb": epoch_start,
+                            "epoch_end_jdtdb": float(processed_epoch_last) if np.isfinite(processed_epoch_last) else epoch_start,
+                            "processed_epoch_first_jdtdb": processed_epoch_first,
+                            "processed_epoch_last_jdtdb": processed_epoch_last,
+                            "processed_epoch_count": processed_epoch_count,
+                            "had_detection": had_detection,
+                            "n_detections": n_detections,
+                            "detecting_ids": detecting_ids_str,
+                            "od_time_sec": od_time,
+                            "attcoord_time_sec": np.nan,
+                            "true_meas_len": true_meas_len,
+                            "true_meas_norm": true_meas_norm,
+                            "true_meas_0": true_pair[0],
+                            "true_meas_1": true_pair[1],
+                            "noisy_meas_len": noisy_meas_len,
+                            "noisy_meas_norm": noisy_meas_norm,
+                            "noisy_meas_0": noisy_pair[0],
+                            "noisy_meas_1": noisy_pair[1],
+                            "P_pos_trace": last_od_stop_metrics["trace_pos"],
+                            "P_vel_trace": last_od_stop_metrics["trace_vel"],
+                            "P_pos_sigma_3d": last_od_stop_metrics["sigma_pos_3d"],
+                            "P_vel_sigma_3d": last_od_stop_metrics["sigma_vel_3d"],
+                            "NIS_last": last_od_stop_metrics["nis_last"],
+                            "NIS_mean": last_od_stop_metrics["nis_mean"],
+                            "NIS_count": last_od_stop_metrics["nis_count"],
+                            "OD_convergence_streak": last_od_stop_metrics["convergence_streak"],
+                            "pos_err_norm": pos_err,
+                            "vel_err_norm": vel_err,
+                            "chosen_candidate_idx": np.nan,
+                            "chosen_candidate_epoch_jdtdb": np.nan,
+                            "progress_status": progress_status,
+                        }
+                        for i in range(6):
+                            row_out[f"x_est_{i}"] = x_est[i]
+                            row_out[f"x_true_{i}"] = x_true[i]
+                            row_out[f"P_diag_{i}"] = P_diag[i]
+
+                        for sc_id in range(num_sc):
+                            pre_s = _flatten_vec(sc_states_pre[sc_id], 6)
+                            pre_u = _flatten_vec(sc_pointings_pre[sc_id], 3)
+                            post_s = _flatten_vec(sc_states_post[sc_id], 6)
+                            post_u = _flatten_vec(sc_pointings_post[sc_id], 3)
+                            for i in range(6):
+                                row_out[f"sc{sc_id}_state_pre_{i}"] = pre_s[i]
+                                row_out[f"sc{sc_id}_state_post_{i}"] = post_s[i]
+                            for i in range(3):
+                                row_out[f"sc{sc_id}_pointing_pre_{i}"] = pre_u[i]
+                                row_out[f"sc{sc_id}_pointing_post_{i}"] = post_u[i]
+
+                        if timer.curr_od_index > resume_after_step:
+                            _append_row(outer_csv_path, row_out, outer_header)
+
+                        _write_progress(progress_path, {
+                            "uid": uid,
+                            "last_completed_outer_step": int(timer.curr_od_index),
+                            "last_epoch_jdtdb": float(row_out["epoch_end_jdtdb"]),
+                            "completed": True,
+                            "termination_reason": termination_reason,
+                            "outer_csv_path": outer_csv_path,
+                        })
+                        break
+
+                    # -----------------------------------------------------
+                    # Perform Attitude Coordination - with uncertainty growth
+                    # -------------------------------------------------------
+                    attcoord_startime = time.time()
+
+                    timer.set_attcoord_searchtimes(od_time=od_time)
+
+                    x_ts, P_ts = ukf.propagate_priors(
+                        epochs_k[-1],
+                        timer.attcoord_searchtimes_jdtdb,
+                        n_body_propagator.propagate_multiple_objects
+                    )
+
+                    sc_eme_states_kms_piecewise, anchor_info = util.piecewise_anchor_and_propagate_spacecraft_trajs(
+                        formation=formation, minimoon=minimoon, timer=timer,
+                        t_targets_jdtdb=timer.attcoord_searchtimes_jdtdb,
+                        n_body_propagator=n_body_propagator, return_anchor_info=True
+                    )
+
+                    ast_eme_state_kms = minimoon.curr_state_eme
+                    ast_eme_traj_kms = n_body_propagator.propagate(ast_eme_state_kms, timer.curr_epoch,
+                                                                   timer.attcoord_searchtimes_jdtdb)
+
+                    ast_truth_original_eclip = np.array(minimoon.orbit.loc[:, ["Geo x", "Geo y", "Geo z", "Geo vx",
+                                                                               "Geo vy", "Geo vz"]])
+                    ast_truth_original_eclip[:, :3] *= config['AU_TO_M'] / 1000
+                    ast_truth_original_eclip[:, 3:] *= config['AU_TO_M'] / 1000 / config['SECONDS_PER_DAY']
+                    ast_truth_original_eme = util.geo_eclip_to_geo_eme_generic(ast_truth_original_eclip,
+                                                                               hint=("time", "state"))
+
+                    viz_prop_flag = False
+                    if viz_prop_flag:
+                        util.plot_priors_positions_and_cov_2d(
+                            x_ts,
+                            P_ts,
+                            sc_trajs_km2=sc_eme_states_kms_piecewise,
+                            stride=config['two_d_prop']['stride'],
+                            n_std=config['two_d_prop']['stride'],
+                            planes=("xy", "xz", "yz"),
+                            title_prefix="Asteroid prior + spacecraft"
+                        )
+
+                        plot_matched_flag = False
+                        if plot_matched_flag:
+                            util.plot_matched_trajectory_full_range(
+                                formation=formation,
+                                idx_start=0,
+                                idx_stop=2400,
+                                frame="GEO_EME",
+                                plot_3d=True,
+                                plot_xy=False
+                            )
+
+                    sc_pointings_eme = formation.get_spacecraft_pointings()
+
+                    sc0 = formation.spacecraft[0]
+                    theta_h_rad = util.fov_deg2_to_half_angle_rad(sc0.fov)
+                    tau_max = sc0.reaction_wheel_torque
+                    h_max = sc0.reaction_wheel_momentum
+                    m_m = sc0.mass
+                    l_m = sc0.length
+                    m_t = sc0.telescope_mass
+                    d_t = sc0.telescope_diameter
+                    l_t = sc0.telescope_length
+                    z_0 = sc0.telescope_offset
+                    I_max = (1 / 6) * m_m * (l_m) ** 2 + (1 / 12) * m_t * (
+                                3 * (d_t / 2) ** 2 + l_t ** 2) + m_t * z_0 ** 2
+                    alpha_max = 1.63 * tau_max / I_max
+                    omega_max = 1.63 * h_max / I_max
+
+                    use_tracking = bool(config_global['use_tracking'])
+                    detecting_list = list(formation.currently_detecting)
+                    detecting_u = sc_pointings_eme[detecting_list, :] if len(detecting_list) > 0 else np.empty((0, 3))
+                    first_detecting_idx = int(detecting_list[0]) if len(detecting_list) > 0 else None
+                    first_detecting_u = sc_pointings_eme[first_detecting_idx, :] if first_detecting_idx is not None else None
+
+                    if use_tracking:
+                        # Tracking mode does not require a fixed detector. With no detections,
+                        # pass an empty fixed/detecting set and let the coordinator optimize from
+                        # the propagated prior.
+                        res_kcoverage, result_mean, result_kcoverage_series, result_mean_series, mean_time = attitude_coordination.step(
+                            sc_eme_states_kms_piecewise[:, :, :3],
+                            sc_pointings_eme,
+                            x_ts[:, :3],
+                            P_ts[:, :3, :3],
+                            timer.attcoord_searchtimes,
+                            theta_h_rad,
+                            alpha_max,
+                            omega_max,
+                            detecting_u,
+                            detecting_list,
+                            d_M=config['d_mahal'],
+                            use_fixed_agent=False,
+                            fixed_agent_idx=None,
+                            fixed_agent_u=first_detecting_u,
+                            coverage_point=ast_eme_traj_kms[:, :3],
+                        )
+                    else:
+                        if len(detecting_list) == 1:
+                            res_kcoverage, result_mean, result_kcoverage_series, result_mean_series, mean_time = attitude_coordination.step(
+                                sc_eme_states_kms_piecewise[:, :, :3],
+                                sc_pointings_eme,
+                                x_ts[:, :3],
+                                P_ts[:, :3, :3],
+                                timer.attcoord_searchtimes,
+                                theta_h_rad,
+                                alpha_max,
+                                omega_max,
+                                detecting_u,
+                                detecting_list,
+                                d_M=config['d_mahal'],
+                                use_fixed_agent=True,
+                                fixed_agent_idx=first_detecting_idx,
+                                fixed_agent_u=first_detecting_u,
+                                coverage_point=ast_eme_traj_kms[:, :3]
+                            )
+                        else:
+                            # Multi-detection and no-detection cases both use free-agent
+                            # coordination. In the no-detection case detecting_u/list are empty,
+                            # so no spacecraft is treated as fixed by the caller.
+                            res_kcoverage, result_mean, result_kcoverage_series, result_mean_series, mean_time = attitude_coordination.step(
+                                sc_eme_states_kms_piecewise[:, :, :3],
+                                sc_pointings_eme,
+                                x_ts[:, :3],
+                                P_ts[:, :3, :3],
+                                timer.attcoord_searchtimes,
+                                theta_h_rad,
+                                alpha_max,
+                                omega_max,
+                                detecting_u,
+                                detecting_list,
+                                d_M=config['d_mahal'],
+                                use_fixed_agent=False,
+                                fixed_agent_idx=first_detecting_idx,
+                                fixed_agent_u=first_detecting_u,
+                                coverage_point=ast_eme_traj_kms[:, :3]
+                            )
+
+                    attcoord_endtime = time.time()
+                    timer.set_attcoord_time(attcoord_endtime - attcoord_startime - mean_time)
+                    attcoord_time = attcoord_endtime - attcoord_startime - mean_time
+
+                    timer.set_slew_time(res_kcoverage.chosen_dt)
+
+                    best_epoch = res_kcoverage.chosen_dt
+                    best_idx = int(np.where(timer.attcoord_searchtimes == best_epoch)[0][0])
+                    best_epoch_jdtdb = float(timer.attcoord_searchtimes_jdtdb[best_idx])
+                    k_anchor_best = int(anchor_info["anchor_k_of_t"][best_idx])
+                    t_anchor_best = float(anchor_info["anchor_epoch_of_t"][best_idx])
+
+                    best_attitudes = res_kcoverage.u_cmd
+                    formation.set_spacecraft_pointings(best_attitudes)
+
+                    best_positions = np.squeeze(sc_eme_states_kms_piecewise[best_idx, :, :])
+                    formation.set_spacecraft_states(best_positions)
+
+                    ukf.x = np.squeeze(x_ts[best_idx, :])
+                    ukf.P = np.squeeze(P_ts[best_idx, :, :])
+
+                    minimoon.set_state(np.squeeze(ast_eme_traj_kms[best_idx, :]))
+
+                    timer.step(best_epoch_jdtdb, k_anchor_best, t_anchor_best)
+
+                    chosen_candidate_idx = best_idx
+                    chosen_candidate_epoch_jdtdb = best_epoch_jdtdb
+
+                    # detailed attcoord logging
+                    if log_attcoord and timer.curr_od_index > resume_after_step:
+                        for cand_idx in range(len(timer.attcoord_searchtimes_jdtdb)):
+                            row_att = {
+                                "run_uid": uid,
+                                "master_row_idx": m_idx,
+                                "rank": rank,
+                                "od_step_idx": int(timer.curr_od_index),
+                                "candidate_idx": cand_idx,
+                                "candidate_epoch_jdtdb": float(timer.attcoord_searchtimes_jdtdb[cand_idx]),
+                                "is_chosen": int(cand_idx == best_idx),
+                            }
+                            xpred = _flatten_vec(x_ts[cand_idx], 6)
+                            Ppred = _safe_diag(P_ts[cand_idx], 6)
+                            for i in range(6):
+                                row_att[f"x_pred_{i}"] = xpred[i]
+                                row_att[f"P_pred_diag_{i}"] = Ppred[i]
+
+                            sc_cand = np.asarray(sc_eme_states_kms_piecewise[cand_idx], dtype=float)
+                            for sc_id in range(num_sc):
+                                vals = _flatten_vec(sc_cand[sc_id], 6)
+                                for i in range(6):
+                                    row_att[f"sc{sc_id}_state_{i}"] = vals[i]
+
+                            u_cand = None
+                            J_cand = np.nan
+                            coverage_cand = np.nan
+                            if cand_idx < len(result_kcoverage_series):
+                                if isinstance(result_kcoverage_series[cand_idx], dict):
+                                    u_cand = result_kcoverage_series[cand_idx].get("u", None)
+                                    J_cand = _safe_scalar(result_kcoverage_series[cand_idx].get("J", np.nan))
+                                    coverage_cand = _safe_scalar(result_kcoverage_series[cand_idx].get("kcoverage", np.nan))
+                            if u_cand is None:
+                                u_cand = best_attitudes if cand_idx == best_idx else np.full((num_sc, 3), np.nan)
+                            u_cand = np.asarray(u_cand, dtype=float)
+                            for sc_id in range(num_sc):
+                                vals = _flatten_vec(u_cand[sc_id], 3)
+                                for i in range(3):
+                                    row_att[f"u_cmd_sc{sc_id}_{i}"] = vals[i]
+
+                            row_att["J"] = J_cand
+                            row_att["coverage_score"] = coverage_cand
+                            _append_row(attcoord_csv_path, row_att, attcoord_header)
+
+                    # optimizer logging based on actual history structure
+                    if log_optimizer and hasattr(res_kcoverage, "extra") and isinstance(res_kcoverage.extra, dict):
+                        hist = res_kcoverage.extra.get("history", [])
+                        if timer.curr_od_index > resume_after_step:
+                            for h_idx, entry in enumerate(hist):
+                                row_opt = {
+                                    "run_uid": uid,
+                                    "master_row_idx": m_idx,
+                                    "rank": rank,
+                                    "od_step_idx": int(timer.curr_od_index),
+                                    "optimizer_row_idx": h_idx,
+                                    "restart_idx": entry.get("restart", np.nan),
+                                    "use_fixed_agent": entry.get("use_fixed_agent", np.nan),
+                                    "idx_fix": entry.get("idx_fix", np.nan),
+                                    "J": _safe_scalar(entry.get("J", np.nan)),
+                                }
+
+                                x_full = _flatten_vec(entry.get("x", None), 12)
+                                x_free = _flatten_vec(entry.get("x_free", None), 12)
+                                for i in range(12):
+                                    row_opt[f"x_param_{i}"] = x_full[i]
+                                    row_opt[f"x_free_param_{i}"] = x_free[i]
+
+                                u_hist = np.asarray(entry.get("u", np.full((num_sc, 3), np.nan)), dtype=float)
+                                if u_hist.ndim == 1:
+                                    u_hist = u_hist.reshape(-1, 3)
+                                for sc_id in range(min(num_sc, u_hist.shape[0])):
+                                    vals = _flatten_vec(u_hist[sc_id], 3)
+                                    for i in range(3):
+                                        row_opt[f"u_sc{sc_id}_{i}"] = vals[i]
+
+                                slews_hist = np.asarray(entry.get("slew", np.full((num_sc,), np.nan))).reshape(-1)
+                                for sc_id in range(num_sc):
+                                    row_opt[f"slew_sc{sc_id}"] = float(slews_hist[sc_id]) if sc_id < slews_hist.size else np.nan
+
+                                _append_row(optimizer_csv_path, row_opt, optimizer_header)
+
+                    # visualize att_coord result
+                    # The visualization block assumes at least one detecting spacecraft
+                    # in a few diagnostic calculations, so skip it for prediction-only
+                    # no-detection steps.
+                    att_coord_viz_flag = False
+                    if att_coord_viz_flag and had_detection:
+                        best_epoch = res_kcoverage.chosen_dt
+                        best_idx = np.where(timer.attcoord_searchtimes == best_epoch)[0]
+
+                        theta_h_rad = util.fov_deg2_to_half_angle_rad(config["fov"])
+                        ems_center_xy = np.array(config["ems"]["p_em"][:2])
+                        ems_center_xyz = np.array(config["ems"]["p_em"])
+                        ems_radius = config["ems"]['R_em']
+                        ray_length = config['ray_length']
+
+                        sc_eme_ae_kms = np.squeeze(sc_eme_states_kms_piecewise[best_idx, :, :3])
+                        sc_pointing_eme_cartesian = res_kcoverage.u_cmd
+                        ang_eme = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_eme_cartesian)
+                        ast_truth_eme = np.squeeze(ast_eme_traj_kms[best_idx, :3])
+
+                        ast_iod_eme = np.squeeze(x_ts[best_idx, :3])
+                        P_cart_eme = np.squeeze(P_ts[best_idx, :3, :3])
+
+                        ast_truth_eme = np.asarray(ast_truth_eme).reshape(-1)
+
+                        best_idx = int(np.where(timer.attcoord_searchtimes == best_epoch)[0][0])
+                        T = len(timer.attcoord_searchtimes)
+
+                        two_d_pot = False
+                        if two_d_pot:
+                            def is_valid(idx):
+                                J = result_kcoverage_series[idx]["J"]
+                                return not (J is None or (isinstance(J, float) and math.isnan(J)))
+
+                            cands = [best_idx, max(0, best_idx - 1), min(T - 1, best_idx + 1)]
+                            selected = []
+
+                            for c in cands:
+                                if c not in selected and is_valid(c):
+                                    selected.append(c)
+
+                            if len(selected) < 3:
+                                for c in range(T):
+                                    if len(selected) >= 3:
+                                        break
+                                    if c not in selected and is_valid(c):
+                                        selected.append(c)
+
+                            if len(selected) < 3:
+                                for c in range(T):
+                                    if len(selected) >= 3:
+                                        break
+                                    if c not in selected:
+                                        selected.append(c)
+
+                            planes = [((0, 1), "XY"), ((0, 2), "XZ"), ((1, 2), "YZ")]
+
+                            def cov2_from_cov3(P3, axes):
+                                i, j = axes
+                                return P3[np.ix_([i, j], [i, j])]
+
+                            def angles_in_plane(u_cmd_xyz, axes):
+                                a, b = axes
+                                u = np.asarray(u_cmd_xyz, dtype=float)
+                                u2 = u[:, [a, b]]
+                                return np.arctan2(u2[:, 1], u2[:, 0])
+
+                            for idx in selected:
+                                epoch = timer.attcoord_searchtimes[idx]
+                                sc_xyz = np.asarray(sc_eme_states_kms_piecewise[idx, :, :3], dtype=float)
+                                ast_truth = np.asarray(ast_eme_traj_kms[idx, :3], dtype=float).reshape(3,)
+                                ast_mean = np.asarray(x_ts[idx, :3], dtype=float).reshape(3,)
+                                P3 = np.asarray(P_ts[idx, :3, :3], dtype=float).reshape(3, 3)
+                                u_cmd_xyz = np.asarray(result_kcoverage_series[idx]["u"], dtype=float)
+                                u_curr_xyz = np.asarray(sc_pointings_eme, dtype=float)
+
+                                fig, axes = plt.subplots(1, 3, figsize=(8, 14))
+                                fig.suptitle(f"2D Projections @ epoch {epoch}", y=0.99)
+
+                                for ax, (axpair, name) in zip(axes, planes):
+                                    agents_2d = sc_xyz[:, list(axpair)]
+                                    u_curr_2d = u_curr_xyz[:, list(axpair)]
+                                    mean_2d = ast_mean[list(axpair)]
+                                    truth_2d = ast_truth[list(axpair)]
+                                    cov_2d = cov2_from_cov3(P3, axpair)
+                                    mean_traj_2d = np.asarray(x_ts[:, :3], dtype=float)[:, list(axpair)]
+                                    truth_traj_2d = np.asarray(ast_eme_traj_kms[:, :3], dtype=float)[:, list(axpair)]
+                                    ems_center_2d = np.asarray(ems_center_xyz, dtype=float)[list(axpair)]
+                                    ang_2d = angles_in_plane(u_cmd_xyz, axpair)
+
+                                    util.plot_od_scenario_2d(
+                                        t_label=f"{epoch} ({name})",
+                                        agents_xy=agents_2d,
+                                        pointing_angles_rad=ang_2d,
+                                        theta_h_rad=theta_h_rad,
+                                        ray_length=ray_length * 2,
+                                        u_curr_agents_xy=u_curr_2d,
+                                        boresight_line_len=ray_length * 0.1,
+                                        target_mean_xy=mean_2d,
+                                        target_mean_xy_traj=mean_traj_2d,
+                                        target_cov_xy=cov_2d,
+                                        d_mahal=config['d_mahal'],
+                                        true_target_xy=truth_2d,
+                                        true_target_xy_traj=truth_traj_2d,
+                                        ems_center_xy=ems_center_2d,
+                                        ems_radius=ems_radius,
+                                        xlim=config['two_d_prop']['xlim'], ylim=config['two_d_prop']['ylim'],
+                                        agent_orbit_tracks_xy=None,
+                                        ax=ax,
+                                        title=None
+                                    )
+
+                                plt.tight_layout()
+
+
+
+                        agents_xyz = sc_eme_ae_kms
+                        target_cov_xyz = P_cart_eme
+
+                        def range_sigma_from_cov(P_eci, r_obj, r_obs):
+                            """
+                            P_eci : 6x6 or 3x3 covariance in inertial frame
+                            r_obj : object inertial position, shape (3,)
+                            r_obs : observer inertial position, shape (3,)
+
+                            Returns range standard deviation and variance.
+                            """
+                            P_r = P_eci[:3, :3] if P_eci.shape == (6, 6) else P_eci
+
+                            rho_vec = np.asarray(r_obj) - np.asarray(r_obs)
+                            rho_hat = rho_vec / np.linalg.norm(rho_vec)
+
+                            var_rho = rho_hat @ P_r @ rho_hat
+                            sigma_rho = np.sqrt(max(var_rho, 0.0))
+
+                            return sigma_rho, var_rho
+
+                        sigma_rho, var_rho = range_sigma_from_cov(P_cart_eme, ast_iod_eme[:3],
+                                                                  agents_xyz[formation.currently_detecting[0]])
+                        print(sigma_rho, var_rho)
+
+                        def build_slew_history_from_opt_series(opt_series, ids, *, key_u="u", normalize=True):
+                            ids = [int(i) for i in ids]
+                            out = {i: [] for i in ids}
+
+                            for row_idx, rowh in enumerate(opt_series):
+                                if key_u not in rowh:
+                                    raise KeyError(f"Row {row_idx} missing key '{key_u}'")
+                                U = np.asarray(rowh[key_u], dtype=float)
+                                if U.ndim != 2 or U.shape[1] != 3:
+                                    raise ValueError(f"Row {row_idx} '{key_u}' must be (M,3), got {U.shape}")
+                                M = U.shape[0]
+                                for i in ids:
+                                    if not (0 <= i < M):
+                                        raise IndexError(f"Row {row_idx}: id {i} out of range for M={M}")
+                                    out[i].append(U[i].copy())
+
+                            for i in ids:
+                                Ui = np.asarray(out[i], dtype=float)
+                                if Ui.size == 0:
+                                    Ui = Ui.reshape(0, 3)
+
+                                if normalize and Ui.shape[0] > 0:
+                                    n = np.linalg.norm(Ui, axis=1, keepdims=True)
+                                    n = np.maximum(n, 1e-12)
+                                    Ui = Ui / n
+
+                                out[i] = Ui
+
+                            return out
+
+                        ids = config['three_d_prop'].get('history_ids')
+                        if ids is None:
+                            ids = list(range(config['num_spacecraft']))
+
+                        slew_history = build_slew_history_from_opt_series(res_kcoverage.extra["history"], ids)
+
+                        fig, ax = util.plot_od_scenario_3d_new(
+                            t_label=best_epoch,
+                            agents_xyz=agents_xyz,
+                            u_opt_agents_xyz=sc_pointing_eme_cartesian,
+                            theta_h_rad=theta_h_rad,
+                            ray_length=ray_length,
+                            u_curr_agents_xyz=sc_pointings_eme,
+                            boresight_line_len=ray_length * 0.1,
+                            u_init_agents_xyz=None,
+                            init_boresight_line_len=ray_length * 1.5,
+                            agent_orbit_tracks_xyz=[sc_eme_states_kms_piecewise[:, i, :3] for i in
+                                                    range(config['num_spacecraft'])],
+                            spacecraft_orbit_xyz=None,
+                            xlim=config['three_d_prop']['xlim'], ylim=config['three_d_prop']['ylim'],
+                            zlim=config['three_d_prop']['zlim'],
+                            target_mean_xyz=ast_iod_eme[:3],
+                            target_cov_xyz=target_cov_xyz,
+                            d_mahal=config['d_mahal'],
+                            true_target_xyz=ast_truth_eme[:3],
+                            target_mean_traj_xyz=x_ts[:, :3],
+                            true_target_traj_xyz=ast_eme_traj_kms[:, :3],
+                            true_target_traj_xyz_2=ast_truth_original_eme[:, :3],
+                            ems_center_xyz=ems_center_xyz,
+                            ems_radius=ems_radius,
+                            show_uncertainty=True,
+                            show_truth=True,  # green circle
+                            show_ems=True,
+                            show_fov_cones=True,
+                            show_legend=True,
+                            show_target_mean_traj=True,
+                            show_true_target_traj=True,
+                            show_true_target_traj_2=False,
+                            show_init_boresights=False,
+                            show_current_boresights=False,
+                            show_slew_angle_annotations=False,
+                            show_agent_name_annotations=True,
+                            show_agent_orbit_tracks=True,
+                            show_spacecraft_orbit=False,
+                            show_coverage=False,
+
+                            Nx=60,
+                            Ny=60,
+                            Nz=40,
+
+                            # coverage display
+                            show_pair_coverage=True,
+                            show_triple_coverage=True,
+                            pair_only_exact=True,
+
+                            pair_coverage_alpha=0.25,
+                            triple_coverage_alpha=0.35,
+
+                            # FOV styling
+                            fov_style="surface",  # "surface", "wire", "both"
+                            fov_surface_alpha=0.12,
+                            fov_surface_color="lightskyblue",
+                            fov_n_rays=2,
+                            fov_n_circle=64,
+                            fov_n_len=20,
+
+                            # styling
+                            title=None,
+                            label_fontsize=9,
+                            label_offset_px=10,
+                            slew_label_offset_px=16,
+                            fill_alpha=0.10,
+                            sparse_wire=True,
+
+                            init_boresight_lw=1.5,
+                            init_boresight_alpha=0.95,
+
+                            # slew history
+                            slew_history=None,
+                            slew_history_line_len=ray_length,
+                            slew_history_lw=1.8,
+                            slew_history_alpha=0.85,
+                            slew_history_cmap="viridis",
+                            slew_history_every=1,
+                            slew_history_colorbar=True,
+                            slew_history_colorbar_label="Slew history step",
+                            slew_history_norm_mode="per_agent",
+                        )
+
+                        cost_func_plots = True
+                        if cost_func_plots:
+                            util.plot_attcoord_costs_from_series(
+                                result_kcoverage_series,
+                                title="Dual coverage score vs objective (best per epoch)"
+                            )
+
+                            thetas, phis = util.plot_theta_phi_over_history(
+                                res_kcoverage.extra["history"],
+                                int(config["num_spacecraft"]),
+                                deg=True
+                            )
+
+                        viz_cost_map = False
+                        if viz_cost_map:
+                            idx_fix = formation.currently_detecting
+                            idx_free = 1 - idx_fix
+                            u_fix = sc_pointings_eme[idx_fix]
+
+                            TH_free_deg, PH_free_deg, J_grid = compute_J_grid_theta_phi_single_free(
+                                ast_iod_eme[:3], target_cov_xyz, agents_xyz, sc_pointings_eme, theta_h_rad,
+                                idx_fix=idx_fix,
+                                u_fix=u_fix,
+                                idx_free=idx_free,
+                                theta_range_rad=(-0.5 * np.pi, 0.5 * np.pi),
+                                phi_range_rad=(0.0, 2 * np.pi),
+                                d_M=config['d_mahal'], kappa_sigma=config['optimizer_att_coord']['kappa_sigma'],
+                                lambda_k1=config['optimizer_att_coord']['lambda_k1'],
+                                n_mc=config['opt_map']['n_mc'],
+                                n_grid_theta=config['opt_map']['n_grid_theta'],
+                                n_grid_phi=config['opt_map']['n_grid_phi'],
+                            )
+
+                            fig3d = plt.figure(figsize=(9, 6))
+                            ax3d = fig3d.add_subplot(111, projection="3d")
+                            ax3d.plot_surface(
+                                TH_free_deg, PH_free_deg, J_grid,
+                                rstride=config['opt_map']['rstride'], cstride=config['opt_map']['cstride'],
+                                linewidth=config['opt_map']['linewidth_3d'], alpha=config['opt_map']['alpha']
+                            )
+                            ax3d.set_xlabel(rf'$\theta_{{{idx_free}}}$ (deg)')
+                            ax3d.set_ylabel(rf'$\phi_{{{idx_free}}}$ (deg)')
+                            ax3d.set_zlabel(r'$J_t$')
+                            ax3d.set_title(rf'$J_t(\theta,\phi)$ for free agent {idx_free} (fixed agent {idx_fix})')
+                            plt.tight_layout()
+
+                            plt.figure(figsize=(7, 5.5))
+                            cs = plt.contourf(TH_free_deg, PH_free_deg, J_grid, levels=config['opt_map']['levels'])
+                            plt.colorbar(cs, label=r'$J_t$')
+                            plt.xlabel(rf'$\theta_{{{idx_free}}}$ (deg)')
+                            plt.ylabel(rf'$\phi_{{{idx_free}}}$ (deg)')
+                            plt.title(rf'$J_t(\theta,\phi)$ for free agent {idx_free} (fixed agent {idx_fix})')
+                            plt.grid(alpha=0.3)
+
+                            restart_indices = sorted({entry["restart"] for entry in res_kcoverage.extra["history"]})
+                            colors = ['white', 'yellow', 'cyan', 'magenta', 'green', 'orange']
+                            markers = ['o', 's', '^', 'D', 'x', '+']
+
+                            for k, r in enumerate(restart_indices):
+                                path_entries = [entry for entry in res_kcoverage.extra["history"] if entry["restart"] == r]
+                                if not path_entries:
+                                    continue
+
+                                theta_path_deg = []
+                                phi_path_deg = []
+
+                                for entry in path_entries:
+                                    if entry.get("use_fixed_agent", False) and ("x_free" in entry) and (
+                                            entry.get("idx_fix", None) is not None):
+                                        xk = np.asarray(entry["x_free"], dtype=float).ravel()
+                                        th = xk[0]
+                                        ph = xk[1]
+                                    else:
+                                        xk = np.asarray(entry["x"], dtype=float).ravel()
+                                        th = xk[2 * idx_free]
+                                        ph = xk[2 * idx_free + 1]
+
+                                    theta_path_deg.append(np.rad2deg(th))
+                                    phi_path_deg.append(np.rad2deg(ph))
+
+                                theta_path_deg = np.asarray(theta_path_deg)
+                                phi_path_deg = np.asarray(phi_path_deg)
+
+                                col = colors[k % len(colors)]
+                                m = markers[k % len(markers)]
+
+                                label = f"Trial {r}"
+                                if r == 0:
+                                    label += " (warm start)"
+
+                                plt.plot(
+                                    theta_path_deg, phi_path_deg,
+                                    linestyle='-',
+                                    marker=m,
+                                    color=col,
+                                    lw=config['opt_map']['linewidth_2d'],
+                                    ms=config['opt_map']['marker_size'],
+                                    label=label
+                                )
+
+                            plt.legend(loc='upper right')
+
+                    view_other_epoch_res_flag = False
+                    if view_other_epoch_res_flag:
+                        desired_idx = [15, 16, 17, 18, 19, 20, 21, 22]
+                        for des_idx in desired_idx:
+
+                            row = result_kcoverage_series[des_idx]
+
+                            best_epoch = row["dt"]
+                            best_idx = np.where(timer.attcoord_searchtimes == best_epoch)[0]
+
+                            theta_h_rad = util.fov_deg2_to_half_angle_rad(config["fov"])
+                            ems_center_xyz = np.array(config["ems"]["p_em"])
+                            ems_radius = config["ems"]['R_em']
+                            ray_length = config['ray_length']
+
+                            sc_eme_ae_kms = np.squeeze(sc_eme_states_kms_piecewise[best_idx, :, :3])
+                            sc_pointing_eme_cartesian = row['u']
+                            ang_eme = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_eme_cartesian)
+                            ast_truth_eme = np.squeeze(ast_eme_traj_kms[best_idx, :3])
+
+                            ast_iod_eme = np.squeeze(x_ts[best_idx, :3])
+                            P_cart_eme = np.squeeze(P_ts[best_idx, :3, :3])
+
+                            ast_truth_eme = np.asarray(ast_truth_eme).reshape(-1)
+
+                            best_idx = int(np.where(timer.attcoord_searchtimes == best_epoch)[0][0])
+                            T = len(timer.attcoord_searchtimes)
+
+                            agents_xyz = sc_eme_ae_kms
+                            target_cov_xyz = P_cart_eme
+
+
+                            def build_slew_history_from_opt_series(opt_series, ids, *, key_u="u", normalize=True):
+                                ids = [int(i) for i in ids]
+                                out = {i: [] for i in ids}
+
+                                for row_idx, rowh in enumerate(opt_series):
+                                    if key_u not in rowh:
+                                        raise KeyError(f"Row {row_idx} missing key '{key_u}'")
+                                    U = np.asarray(rowh[key_u], dtype=float)
+                                    if U.ndim != 2 or U.shape[1] != 3:
+                                        raise ValueError(f"Row {row_idx} '{key_u}' must be (M,3), got {U.shape}")
+                                    M = U.shape[0]
+                                    for i in ids:
+                                        if not (0 <= i < M):
+                                            raise IndexError(f"Row {row_idx}: id {i} out of range for M={M}")
+                                        out[i].append(U[i].copy())
+
+                                for i in ids:
+                                    Ui = np.asarray(out[i], dtype=float)
+                                    if Ui.size == 0:
+                                        Ui = Ui.reshape(0, 3)
+
+                                    if normalize and Ui.shape[0] > 0:
+                                        n = np.linalg.norm(Ui, axis=1, keepdims=True)
+                                        n = np.maximum(n, 1e-12)
+                                        Ui = Ui / n
+
+                                    out[i] = Ui
+
+                                return out
+
+                            ids = config['three_d_prop'].get('history_ids')
+                            if ids is None:
+                                ids = list(range(config['num_spacecraft']))
+
+                            slew_history = build_slew_history_from_opt_series(row["history"], ids)
+
+                            fig, ax = util.plot_od_scenario_3d_new(
+                                t_label=best_epoch,
+                                agents_xyz=agents_xyz,
+                                u_opt_agents_xyz=sc_pointing_eme_cartesian,
+                                theta_h_rad=theta_h_rad,
+                                ray_length=ray_length,
+                                u_curr_agents_xyz=sc_pointings_eme,
+                                boresight_line_len=ray_length * 0.1,
+                                u_init_agents_xyz=None,
+                                init_boresight_line_len=ray_length * 1.5,
+                                agent_orbit_tracks_xyz=[sc_eme_states_kms_piecewise[:, i, :3] for i in
+                                                        range(config['num_spacecraft'])],
+                                spacecraft_orbit_xyz=None,
+                                xlim=config['three_d_prop']['xlim'], ylim=config['three_d_prop']['ylim'],
+                                zlim=config['three_d_prop']['zlim'],
+                                target_mean_xyz=ast_iod_eme[:3],
+                                target_cov_xyz=target_cov_xyz,
+                                d_mahal=config['d_mahal'],
+                                true_target_xyz=ast_truth_eme[:3],
+                                target_mean_traj_xyz=x_ts[:, :3],
+                                true_target_traj_xyz=ast_eme_traj_kms[:, :3],
+                                true_target_traj_xyz_2=ast_truth_original_eme[:, :3],
+                                ems_center_xyz=ems_center_xyz,
+                                ems_radius=ems_radius,
+                                show_uncertainty=True,
+                                show_truth=True,  # green circle
+                                show_ems=True,
+                                show_fov_cones=True,
+                                show_legend=True,
+                                show_target_mean_traj=True,
+                                show_true_target_traj=True,
+                                show_true_target_traj_2=False,
+                                show_init_boresights=False,
+                                show_current_boresights=False,
+                                show_slew_angle_annotations=False,
+                                show_agent_name_annotations=True,
+                                show_agent_orbit_tracks=True,
+                                show_spacecraft_orbit=False,
+                                show_coverage=True,
+
+                                Nx=60,
+                                Ny=60,
+                                Nz=40,
+
+                                # coverage display
+                                show_pair_coverage=True,
+                                show_triple_coverage=True,
+                                pair_only_exact=True,
+
+                                pair_coverage_alpha=0.25,
+                                triple_coverage_alpha=0.35,
+
+                                # FOV styling
+                                fov_style="surface",  # "surface", "wire", "both"
+                                fov_surface_alpha=0.12,
+                                fov_surface_color="lightskyblue",
+                                fov_n_rays=2,
+                                fov_n_circle=64,
+                                fov_n_len=20,
+
+                                # styling
+                                title=None,
+                                label_fontsize=9,
+                                label_offset_px=10,
+                                slew_label_offset_px=16,
+                                fill_alpha=0.10,
+                                sparse_wire=True,
+
+                                init_boresight_lw=1.5,
+                                init_boresight_alpha=0.95,
+
+                                # slew history
+                                slew_history=slew_history,
+                                slew_history_line_len=ray_length,
+                                slew_history_lw=1.8,
+                                slew_history_alpha=0.85,
+                                slew_history_cmap="viridis",
+                                slew_history_every=1,
+                                slew_history_colorbar=True,
+                                slew_history_colorbar_label="Slew history step",
+                                slew_history_norm_mode="per_agent",
+                            )
+
+
+                    # plt.show()
+
+                # ---------------------------------------------------------
+                # Outer-loop diagnostics row
+                # ---------------------------------------------------------
+                sc_states_post = np.asarray(formation.get_spacecraft_states(), dtype=float)
+                sc_pointings_post = np.asarray(formation.get_spacecraft_pointings(), dtype=float)
+
+                x_est = _flatten_vec(getattr(ukf, "x", None), 6)
+                x_true = _flatten_vec(getattr(minimoon, "curr_state_eme", None), 6)
+                P_diag = _safe_diag(getattr(ukf, "P", None), 6)
+                pos_err, vel_err = _best_effort_state_error(x_est, x_true)
+
+                true_meas_len, true_meas_norm, true_pair = _summarize_meas_outer(p_meas_k)
+                noisy_meas_len, noisy_meas_norm, noisy_pair = _summarize_meas_outer(n_meas_k)
+
+                row_out = {
+                    "run_uid": uid,
+                    "master_row_idx": m_idx,
+                    "rank": rank,
+                    "od_step_idx": int(timer.curr_od_index),
+                    "event_type": event_type,
+                    "termination_reason": termination_reason,
+                    "epoch_start_jdtdb": epoch_start,
+                    "epoch_end_jdtdb": float(timer.curr_epoch),
+                    "processed_epoch_first_jdtdb": processed_epoch_first,
+                    "processed_epoch_last_jdtdb": processed_epoch_last,
+                    "processed_epoch_count": processed_epoch_count,
+                    "had_detection": had_detection,
+                    "n_detections": n_detections,
+                    "detecting_ids": detecting_ids_str,
+                    "no_detection_reason": no_detection_reason,
+                    "all_ems_occluded": int(bool(all_ems_occluded)),
+                    "in_ems_blackout": int(bool(in_ems_blackout)),
+                    "pending_reacquisition": int(bool(pending_reacquisition)),
+                    "reacquisition_attempt_count": int(reacquisition_attempt_count),
+                    "od_time_sec": od_time,
+                    "attcoord_time_sec": attcoord_time,
+                    "true_meas_len": true_meas_len,
+                    "true_meas_norm": true_meas_norm,
+                    "true_meas_0": true_pair[0],
+                    "true_meas_1": true_pair[1],
+                    "noisy_meas_len": noisy_meas_len,
+                    "noisy_meas_norm": noisy_meas_norm,
+                    "noisy_meas_0": noisy_pair[0],
+                    "noisy_meas_1": noisy_pair[1],
+                    "P_pos_trace": last_od_stop_metrics["trace_pos"],
+                    "P_vel_trace": last_od_stop_metrics["trace_vel"],
+                    "P_pos_sigma_3d": last_od_stop_metrics["sigma_pos_3d"],
+                    "P_vel_sigma_3d": last_od_stop_metrics["sigma_vel_3d"],
+                    "NIS_last": last_od_stop_metrics["nis_last"],
+                    "NIS_mean": last_od_stop_metrics["nis_mean"],
+                    "NIS_count": last_od_stop_metrics["nis_count"],
+                    "OD_convergence_streak": last_od_stop_metrics["convergence_streak"],
+                    "pos_err_norm": pos_err,
+                    "vel_err_norm": vel_err,
+                    "chosen_candidate_idx": chosen_candidate_idx,
+                    "chosen_candidate_epoch_jdtdb": chosen_candidate_epoch_jdtdb,
+                    "progress_status": progress_status,
+                }
+
+                for i in range(6):
+                    row_out[f"x_est_{i}"] = x_est[i]
+                    row_out[f"x_true_{i}"] = x_true[i]
+                    row_out[f"P_diag_{i}"] = P_diag[i]
+
+                for sc_id in range(num_sc):
+                    pre_s = _flatten_vec(sc_states_pre[sc_id], 6)
+                    pre_u = _flatten_vec(sc_pointings_pre[sc_id], 3)
+                    post_s = _flatten_vec(sc_states_post[sc_id], 6)
+                    post_u = _flatten_vec(sc_pointings_post[sc_id], 3)
+                    for i in range(6):
+                        row_out[f"sc{sc_id}_state_pre_{i}"] = pre_s[i]
+                        row_out[f"sc{sc_id}_state_post_{i}"] = post_s[i]
+                    for i in range(3):
+                        row_out[f"sc{sc_id}_pointing_pre_{i}"] = pre_u[i]
+                        row_out[f"sc{sc_id}_pointing_post_{i}"] = post_u[i]
+
+                if timer.curr_od_index > resume_after_step:
+                    _append_row(outer_csv_path, row_out, outer_header)
+                    _write_progress(progress_path, {
+                        "uid": uid,
+                        "last_completed_outer_step": int(timer.curr_od_index),
+                        "last_epoch_jdtdb": float(timer.curr_epoch),
+                        "completed": False,
+                        "termination_reason": "",
+                        "outer_csv_path": outer_csv_path,
+                        "checkpoint_path": (checkpoint_path if checkpoint_enabled else None),
+                    })
+                    if checkpoint_enabled:
+                        _save_od_checkpoint(
+                            checkpoint_path, uid=uid, m_idx=m_idx, rank=rank, ukf=ukf, timer=timer,
+                            minimoon=minimoon, formation=formation,
+                            od_convergence_streak=od_convergence_streak,
+                            last_od_stop_metrics=last_od_stop_metrics,
+                            last_completed_outer_step=int(timer.curr_od_index),
+                            outer_csv_path=outer_csv_path,
+                            termination_reason="",
+                            progress_status=progress_status,
+                            no_detection_state=_no_detection_state_dict(
+                                in_ems_blackout, pending_reacquisition, reacquisition_attempt_count
+                            ),
+                        )
+
+                print_od_status(
+                    timer=timer,
+                    ukf=ukf,
+                    minimoon=minimoon,
+                    formation=formation,
+                    x_true=None,
+                    n_detections=n_detections,
+                    status_every=status_every,
+                    prefix=f"[OD r{rank} uid={uid}]",
+                )
+
+            # after loop
+            final_epoch = float(getattr(timer, "curr_epoch", np.nan))
+            final_steps = int(getattr(timer, "curr_od_index", 0))
+
+            if row_paused_for_walltime:
+                # Incomplete by design: leave no .done marker so the next job resumes this row.
+                # Stop this rank's row loop too; near walltime, starting another row is unsafe.
+                break
+
+            if od_master_enabled:
+                od_summary = _build_od_master_row_from_outer_last(
+                    uid=uid, m_idx=m_idx, rank=rank, outer_csv_path=outer_csv_path, num_sc=num_sc,
+                    termination_reason_fallback=termination_reason,
+                    final_epoch_fallback=final_epoch,
+                    final_steps_fallback=final_steps,
+                )
+                _append_od_master_row(od_master_rank_path, od_summary, od_master_header)
+
+            _write_progress(progress_path, {
+                "uid": uid,
+                "last_completed_outer_step": final_steps,
+                "last_epoch_jdtdb": final_epoch,
+                "completed": True,
+                "termination_reason": termination_reason,
+                "outer_csv_path": outer_csv_path,
+                "checkpoint_path": (checkpoint_path if checkpoint_enabled else None),
+            })
+            write_done(uid)
+            processed += 1
+
+        except Exception as e:
+            errors += 1
+            traceback.print_exc()
+
+            try:
+                row_out = {
+                    "run_uid": uid,
+                    "master_row_idx": m_idx,
+                    "rank": rank,
+                    "od_step_idx": int(getattr(timer, "curr_od_index", -1)) if "timer" in locals() else -1,
+                    "event_type": "termination_error",
+                    "termination_reason": f"{type(e).__name__}: {e}",
+                    "epoch_start_jdtdb": float(getattr(timer, "curr_epoch", np.nan)) if "timer" in locals() else np.nan,
+                    "epoch_end_jdtdb": float(getattr(timer, "curr_epoch", np.nan)) if "timer" in locals() else np.nan,
+                    "processed_epoch_first_jdtdb": np.nan,
+                    "processed_epoch_last_jdtdb": np.nan,
+                    "processed_epoch_count": 0,
+                    "had_detection": False,
+                    "n_detections": 0,
+                    "detecting_ids": "",
+                    "od_time_sec": np.nan,
+                    "attcoord_time_sec": np.nan,
+                    "true_meas_len": 0,
+                    "true_meas_norm": np.nan,
+                    "true_meas_0": np.nan,
+                    "true_meas_1": np.nan,
+                    "noisy_meas_len": 0,
+                    "noisy_meas_norm": np.nan,
+                    "noisy_meas_0": np.nan,
+                    "noisy_meas_1": np.nan,
+                    "pos_err_norm": np.nan,
+                    "vel_err_norm": np.nan,
+                    "chosen_candidate_idx": np.nan,
+                    "chosen_candidate_epoch_jdtdb": np.nan,
+                    "progress_status": "error",
+                }
+                for i in range(6):
+                    row_out[f"x_est_{i}"] = np.nan
+                    row_out[f"x_true_{i}"] = np.nan
+                    row_out[f"P_diag_{i}"] = np.nan
+                for sc_id in range(num_sc):
+                    for i in range(6):
+                        row_out[f"sc{sc_id}_state_pre_{i}"] = np.nan
+                        row_out[f"sc{sc_id}_state_post_{i}"] = np.nan
+                    for i in range(3):
+                        row_out[f"sc{sc_id}_pointing_pre_{i}"] = np.nan
+                        row_out[f"sc{sc_id}_pointing_post_{i}"] = np.nan
+
+                _append_row(outer_csv_path, row_out, outer_header)
+                err_final_epoch = float(getattr(timer, "curr_epoch", np.nan)) if "timer" in locals() else np.nan
+                err_final_step = int(getattr(timer, "curr_od_index", -1)) if "timer" in locals() else -1
+                _write_progress(progress_path, {
+                    "uid": uid,
+                    "last_completed_outer_step": err_final_step,
+                    "last_epoch_jdtdb": err_final_epoch,
+                    "completed": True,
+                    "termination_reason": f"ERROR_TERMINAL: {type(e).__name__}: {e}",
+                    "outer_csv_path": outer_csv_path,
+                    "checkpoint_path": (checkpoint_path if checkpoint_enabled else None),
+                })
+                if od_master_enabled:
+                    od_summary = _build_od_master_row_from_outer_last(
+                        uid=uid, m_idx=m_idx, rank=rank, outer_csv_path=outer_csv_path, num_sc=num_sc,
+                        termination_reason_fallback=f"ERROR_TERMINAL: {type(e).__name__}: {e}",
+                        final_epoch_fallback=err_final_epoch,
+                        final_steps_fallback=err_final_step,
+                    )
+                    _append_od_master_row(od_master_rank_path, od_summary, od_master_header)
+                write_done(uid)
+            except Exception:
+                try:
+                    write_done(uid)
+                except Exception:
+                    pass
+
+    # ---------------------------------------------------------
+    # Optional rank-0 merge: per-rank OD master rows -> MASTER_IOD.csv
+    # ---------------------------------------------------------
+    comm.Barrier()
+
+    if rank == 0:
+        merged_rows = 0
+        if od_master_enabled and od_master_merge_at_end:
+            try:
+                merged_rows = _merge_od_master_rows_into_master(
+                    master_fn, od_master_dir, od_master_glob, od_master_header
+                )
+                print(f"[Stage: OD] merged {merged_rows} OD summary rows into {master_fn}", flush=True)
+            except Exception as e:
+                print(f"[Stage: OD] WARNING: could not merge OD master rows into MASTER_IOD.csv: {e}", flush=True)
+                traceback.print_exc()
+
+        print(f"[Stage: OD] rank0 summary: processed={processed}, skipped={skipped}, errors={errors}")
+
+
+def run_OD_legacy(config_global):
+    """
+    Stage 4: Orbit Determination (OD)
+
+    Added diagnostics:
+      - one outer-loop CSV per run in a common folder
+      - optional per-run detailed CSVs:
+            * inner_kf_updates.csv
+            * attcoord_candidates.csv
+            * optimizer_history.csv
+      - per-run progress marker for resume
+      - final termination row on no-detection / time-limit / step-limit / error
+
+    Notes:
+      - Existing visualization flags/blocks are preserved.
+      - Outer-loop log is the primary analysis log.
+      - Inner KF / att-coord / optimizer logs are optional detailed logs.
+      - Resume is append-safe and replays deterministically unless you later add full state snapshots.
+    """
+
+    # --- MPI setup ---
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    size = comm.Get_size()
+
+    # Paths & MASTER
+    iod_dir = util._iod_dir(config_global)
+    master_fn = os.path.join(iod_dir, "MASTER_IOD.csv")
+    if rank == 0 and not os.path.exists(master_fn):
+        print(f"[Stage: OD] No MASTER_IOD.csv at {master_fn} -> skip")
+    comm.Barrier()
+    if not os.path.exists(master_fn):
+        return
+
+    # Rank 0: inspect MASTER and broadcast row count
+    if rank == 0:
+        try:
+            _head = pd.read_csv(master_fn, nrows=1)
+            n_rows = sum(1 for _ in open(master_fn, "r", encoding="utf-8")) - 1
+            print(f"[Stage: OD] MASTER rows = {n_rows}")
+        except Exception as e:
+            print(f"[Stage: OD] Failed to inspect MASTER: {e}")
+            n_rows = 0
+    else:
+        n_rows = 0
+
+    n_rows = comm.bcast(n_rows, root=0)
+    if n_rows <= 0:
+        return
+
+    # Round-robin assignment
+    my_indices = list(range(n_rows))[rank::size]
+
+    # Resume markers (commit-after-write; separate dir from Stage 3)
+    od_done_dir = os.path.join(iod_dir, "iod_stage4_od_done")
+    if rank == 0:
+        os.makedirs(od_done_dir, exist_ok=True)
+    comm.Barrier()
+
+    # ---------------------------------------------------------
+    # Helpers
+    # ---------------------------------------------------------
+    def uid_from_saved_as(saved_as_str: str, fallback_idx: int):
+        s = str(saved_as_str or "")
+        if s.strip():
+            first = s.split(";")[0].strip()
+            if first:
+                return os.path.splitext(os.path.basename(first))[0]
+        return f"rowidx_{fallback_idx}"
+
+    def done_marker_path(uid: str):
+        return os.path.join(od_done_dir, f"{uid}.done")
+
+    def is_done(uid: str) -> bool:
+        return os.path.exists(done_marker_path(uid))
+
+    def write_done(uid: str):
+        with open(done_marker_path(uid), "w", encoding="utf-8") as f:
+            f.write("done\n")
+
+    def make_unique_filename(out_dir: str, base: str, ext: str = ".csv"):
+        """Return a unique path like '<out_dir>/<base>.csv', or <base>__1.csv, ..."""
+        name = f"{base}{ext}"
+        path = os.path.join(out_dir, name)
+        k = 1
+        while os.path.exists(path):
+            name = f"{base}__{k}{ext}"
+            path = os.path.join(out_dir, name)
+            k += 1
+        return path, name
+
+    def _fmt_vec(v, n=3, prec=3):
+        if v is None:
+            return ""
+        v = np.asarray(v).reshape(-1)
+        n = min(n, v.size)
+        return "[" + ", ".join(f"{v[i]:.{prec}g}" for i in range(n)) + (", ..." if v.size > n else "") + "]"
+
+    def _safe_norm(v):
+        if v is None:
+            return np.nan
+        v = np.asarray(v).reshape(-1)
+        return float(np.linalg.norm(v)) if v.size else np.nan
+
+    def _safe_diag(P, n=6):
+        if P is None:
+            return [np.nan] * n
+        try:
+            P = np.asarray(P)
+            if P.ndim != 2:
+                return [np.nan] * n
+            d = np.diag(P).reshape(-1)
+            out = [np.nan] * n
+            for i in range(min(n, d.size)):
+                out[i] = float(d[i])
+            return out
+        except Exception:
+            return [np.nan] * n
+
+    def _flatten_vec(v, n_expected=None):
+        try:
+            if v is None:
+                return [np.nan] * n_expected if n_expected is not None else []
+            arr = np.asarray(v).reshape(-1)
+            out = [float(x) for x in arr]
+            if n_expected is not None:
+                if len(out) < n_expected:
+                    out += [np.nan] * (n_expected - len(out))
+                else:
+                    out = out[:n_expected]
+            return out
+        except Exception:
+            return [np.nan] * n_expected if n_expected is not None else []
+
+    def _ids_to_str(ids):
+        if ids is None:
+            return ""
+        if isinstance(ids, (list, tuple, np.ndarray)):
+            return ";".join(str(int(x)) for x in np.asarray(ids).reshape(-1))
+        return str(ids)
+
+    def _first_last_count(x):
+        try:
+            arr = np.asarray(x).reshape(-1)
+            if arr.size == 0:
+                return np.nan, np.nan, 0
+            return float(arr[0]), float(arr[-1]), int(arr.size)
+        except Exception:
+            return np.nan, np.nan, 0
+
+    def _best_effort_state_error(x_est, x_true):
+        try:
+            xe = np.asarray(x_est).reshape(-1)
+            xt = np.asarray(x_true).reshape(-1)
+            if xe.size < 6 or xt.size < 6:
+                return np.nan, np.nan
+            pos = float(np.linalg.norm(xe[:3] - xt[:3]))
+            vel = float(np.linalg.norm(xe[3:6] - xt[3:6]))
+            return pos, vel
+        except Exception:
+            return np.nan, np.nan
+
+    def _safe_scalar(x):
+        try:
+            if x is None:
+                return np.nan
+            if isinstance(x, (float, int, np.floating, np.integer)):
+                return float(x)
+            arr = np.asarray(x).reshape(-1)
+            if arr.size == 0:
+                return np.nan
+            return float(arr[0])
+        except Exception:
+            return np.nan
+
+    def _append_row(csv_path, row_dict, header):
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        exists = os.path.exists(csv_path)
+        with open(csv_path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=header)
+            if not exists:
+                writer.writeheader()
+            writer.writerow(row_dict)
+
+    def _write_progress(progress_path, payload):
+        os.makedirs(os.path.dirname(progress_path), exist_ok=True)
+        with open(progress_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+    def _read_progress(progress_path):
+        if not os.path.exists(progress_path):
+            return None
+        with open(progress_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _resume_last_outer_idx(outer_csv_path):
+        if not os.path.exists(outer_csv_path):
+            return None
+        try:
+            df = pd.read_csv(outer_csv_path)
+            if len(df) == 0:
+                return None
+            return int(df["od_step_idx"].max())
+        except Exception:
+            return None
+
+    def _atomic_pickle_dump(obj, path):
+        """Atomically write a pickle file so a killed job does not leave a half-written checkpoint."""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp_path = f"{path}.tmp"
+        with open(tmp_path, "wb") as f:
+            pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+
+    def _safe_np_random_state():
+        try:
+            return np.random.get_state()
+        except Exception:
+            return None
+
+    def _restore_np_random_state(state):
+        if state is None:
+            return
+        try:
+            np.random.set_state(state)
+        except Exception:
+            pass
+
+    def _checkpoint_path_for(run_dir, checkpoint_name="checkpoint_state.pkl"):
+        return os.path.join(run_dir, checkpoint_name)
+
+    def _get_sc_epochs(formation):
+        try:
+            return [getattr(sc, "curr_sc_epoch", None) for sc in formation.spacecraft]
+        except Exception:
+            return None
+
+    def _set_sc_epochs(formation, epochs):
+        if epochs is None:
+            return
+        try:
+            for sc, ep in zip(formation.spacecraft, epochs):
+                sc.curr_sc_epoch = ep
+        except Exception:
+            pass
+
+    def _save_od_checkpoint(
+            checkpoint_path, *, uid, m_idx, rank, ukf, timer, minimoon, formation,
+            od_convergence_streak, last_od_stop_metrics, last_completed_outer_step,
             outer_csv_path, termination_reason="", progress_status="running"
     ):
         """Save the minimum state needed to resume from the last completed outer OD step."""

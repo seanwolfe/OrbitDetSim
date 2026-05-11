@@ -202,7 +202,7 @@ od_diagnostics:
 base_seed: 1765220306
 num_od_runs: 1
 od_file_dir: 'OD_results'
-od_duration_days: 1
+od_duration_days: 30
 od_max_steps: 1000
 od_status_every: 1
 iod_cov_topo_std: [4.4, 2.31, 1.28e+6, 3.27e-5, 2.44e-5, 1.09]  # ra, dec, rho, ra dot, dec dot, rho dot (deg, km, deg/s, km/s)
@@ -263,6 +263,17 @@ od_master:
   merge_into_master_at_end: true
 
   merge_glob: "od_master_rank_*.csv"
+
+od_no_detection:
+  # During EMS blackout, skip attitude coordination and advance by this amount.
+  ems_blackout_dt_sec: 600
+
+  # After EMS blackout clears, allow this many attitude-coordination
+  # reacquisition attempts before declaring the object lost.
+  max_reacquisition_attempts_after_blackout: 1
+
+  # If EMS is visible but there is still no detection, terminate as object lost.
+  terminate_if_ems_visible_but_not_detected: true
 
 #############################
 # Visualization relevant parameters
