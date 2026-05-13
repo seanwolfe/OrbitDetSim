@@ -865,108 +865,99 @@ class OD_UKF:
 
         return Xa, Wm, Wc, n, qn
 
-
     def propagate_priors(self, t0, t_grid, propagate_many_fn):
         """
         Propagate priors (mean/cov) to a set of future epochs WITHOUT measurements.
 
-        This is a "distribution push-forward" using a single sigma-point set at t0:
-          1) Generate sigma points from (self.x, self.P) at t0
-          2) Propagate ALL sigma points to ALL epochs in t_grid in one call
-          3) Recombine mean/cov at each epoch
-          4) Add process noise Q(dt) for dt = (t_k - t0) in seconds
+        Always returns time-major arrays, even if only one epoch is provided:
 
-        Parameters
-        ----------
-        t0 : float
-            Initial epoch (JDTDB).
-        t_grid : float OR array-like
-            Target epoch(s) in JDTDB. Must be >= t0 and non-decreasing.
-        propagate_many_fn : callable
-            Must support:
-                X_sig_t = propagate_many_fn(X_sigma, t0, t_grid)
-            where:
-                X_sigma: (Ns,6)
-            and returns:
-                - if t_grid is scalar: (Ns,6)
-                - if t_grid is length K: (K, Ns, 6)   (time-major)
+            X_pred shape: (K, 6)
+            P_pred shape: (K, 6, 6)
 
-            This matches your NBodyPropagator.propagate_multiple_objects.
+        where K = number of epochs in t_grid.
 
-        Returns
-        -------
-        If t_grid is scalar:
-            (x_pred, P_pred) with shapes (6,), (6,6)
-        If t_grid is array-like with K entries:
-            (X_pred, P_pred) with shapes (K,6), (K,6,6)
-
-        Notes
-        -----
-        - Does NOT update self.x, self.P.
-        - Uses dt_seconds = (t_k - t0) * 86400 for Q().
+        This avoids caller-side shape ambiguity such as:
+            x_ts[:, :3]
+        failing when K == 1.
         """
         SEC_PER_DAY = 86400.0
 
-        t_arr = np.asarray(t_grid, dtype=float).ravel()
-        scalar_input = (t_arr.size == 1)
+        # Treat input uniformly as a 1D array of epochs.
+        t_arr = np.asarray(t_grid, dtype=float).reshape(-1)
 
         if t_arr.size == 0:
             raise ValueError("t_grid must be non-empty")
 
         t0 = float(t0)
+
         if np.any(t_arr < t0 - 1e-15):
             raise ValueError("t_grid must be >= t0")
+
         if t_arr.size > 1 and np.any(np.diff(t_arr) < -1e-15):
             raise ValueError("t_grid must be non-decreasing")
 
-        # Sigma points at t0 from current filter state (do NOT modify self.x/self.P)
-        # print(".propogate priors")
-        X0_sigma, Wm, Wc = self._sigma_points(self.x, self.P)  # (Ns,6), (Ns,), (Ns,)
+        # Sigma points at t0 from current filter state.
+        # This does NOT modify self.x or self.P.
+        X0_sigma, Wm, Wc = self._sigma_points(self.x, self.P)
         Ns = X0_sigma.shape[0]
+        K = t_arr.size
 
-        # Propagate sigma points to all requested epochs in one call
+        # Propagate sigma points to all requested epochs.
         Xsig_t = propagate_many_fn(X0_sigma, t0, t_arr)
+        Xsig_t = np.asarray(Xsig_t, dtype=float)
 
-        # Normalize return shape to (K, Ns, 6)
-        if scalar_input:
-            Xsig_t = np.asarray(Xsig_t, dtype=float)
-            if Xsig_t.shape != (Ns, 6):
-                raise ValueError(f"Expected propagated sigma points (Ns,6) for scalar t_grid, got {Xsig_t.shape}")
-            Xsig_t = Xsig_t.reshape(1, Ns, 6)
-        else:
-            Xsig_t = np.asarray(Xsig_t, dtype=float)
-            if Xsig_t.shape != (t_arr.size, Ns, 6):
+        # Normalize propagated sigma-point shape to (K, Ns, 6).
+        #
+        # Some propagators may return:
+        #   - (Ns, 6) when K == 1
+        #   - (1, Ns, 6) when K == 1
+        #   - (K, Ns, 6) when K > 1
+        #
+        # Accept both valid K == 1 forms.
+        if K == 1:
+            if Xsig_t.shape == (Ns, 6):
+                Xsig_t = Xsig_t.reshape(1, Ns, 6)
+            elif Xsig_t.shape == (1, Ns, 6):
+                pass
+            else:
                 raise ValueError(
-                    f"Expected propagated sigma points (K,Ns,6) with K={t_arr.size}, Ns={Ns}, got {Xsig_t.shape}"
+                    f"Expected propagated sigma points shape (Ns,6) or (1,Ns,6) "
+                    f"for one target epoch, got {Xsig_t.shape}; Ns={Ns}"
+                )
+        else:
+            if Xsig_t.shape != (K, Ns, 6):
+                raise ValueError(
+                    f"Expected propagated sigma points shape (K,Ns,6) with "
+                    f"K={K}, Ns={Ns}, got {Xsig_t.shape}"
                 )
 
-        K = Xsig_t.shape[0]
         X_pred = np.zeros((K, 6), dtype=float)
         P_pred = np.zeros((K, 6, 6), dtype=float)
 
-        # Recombine at each epoch
         for k in range(K):
-            Xk = Xsig_t[k]  # (Ns,6)
+            Xk = Xsig_t[k]  # (Ns, 6)
 
-            # mean
-            xk = np.sum(Wm[:, None] * Xk, axis=0)  # (6,)
+            # Mean
+            xk = np.sum(Wm[:, None] * Xk, axis=0)
             X_pred[k] = xk
 
-            # covariance from transformed sigma points
+            # Covariance from transformed sigma points
             Pk = np.zeros((6, 6), dtype=float)
             for i in range(Ns):
                 dx = (Xk[i] - xk).reshape(6, 1)
                 Pk += Wc[i] * (dx @ dx.T)
 
-            # add process noise for whole interval t0 -> t_k (dt in seconds!)
+            # Add process noise for interval t0 -> t_k.
             dt_sec = float((t_arr[k] - t0) * SEC_PER_DAY)
             if dt_sec > 0.0:
-                Pk += self.build_Q(dt_sec, r_eme_km=xk[:3], v_eme_km_s=xk[3:])
+                Pk += self.build_Q(
+                    dt_sec,
+                    r_eme_km=xk[:3],
+                    v_eme_km_s=xk[3:]
+                )
 
             P_pred[k] = self._symmetrize(Pk)
 
-        if scalar_input:
-            return X_pred[0], P_pred[0]
         return X_pred, P_pred
 
 
