@@ -207,9 +207,9 @@ od_max_steps: 1000
 od_status_every: 1
 iod_cov_topo_std: [4.4, 2.31, 1.28e+6, 3.27e-5, 2.44e-5, 1.09]  # ra, dec, rho, ra dot, dec dot, rho dot (deg, km, deg/s, km/s)
 INCLUDE_EMS_EXCLUSION: 1
-radial_process_noise: 1.0e-10  # radial noise in RTN frame (km/s^2)^2 /s
-track_process_noise: 1.0e-10 # along track noise in RTN frame (km/s^2)^2 /s
-normal_process_noise: 1.0e-10 # normal to track noise in RTN frame (km/s^2)^2 / s
+radial_process_noise: 1.0e-15  # radial noise in RTN frame (km/s^2)^2 /s
+track_process_noise: 1.0e-15 # along track noise in RTN frame (km/s^2)^2 /s
+normal_process_noise: 1.0e-15 # normal to track noise in RTN frame (km/s^2)^2 / s
 sigma_meas_noise: 1.0e+7  # measurement uncertainty in mas
 
 adaptive_R:
@@ -266,14 +266,29 @@ od_master:
 
 od_no_detection:
   # During EMS blackout, skip attitude coordination and advance by this amount.
-  ems_blackout_dt_sec: 600
+  ems_blackout_dt_sec: 7200
 
   # After EMS blackout clears, allow this many attitude-coordination
   # reacquisition attempts before declaring the object lost.
-  max_reacquisition_attempts_after_blackout: 1
+  max_reacquisition_attempts_after_blackout: 2
 
   # If EMS is visible but there is still no detection, terminate as object lost.
   terminate_if_ems_visible_but_not_detected: true
+
+attcoord_tracking:
+  preserve_detector_anchor: true
+
+  # Current implementation supports this policy:
+  # old detectors stay ahead of new detectors in the custody queue.
+  anchor_policy: "oldest_still_detecting"
+
+  # Recompute fixed anchor boresight for each candidate epoch:
+  # u_fix_k = normalize(p_hat_k - p_anchor_k)
+  anchor_fixed_mode: "mean_los_per_epoch"
+
+  # If the current anchor cannot point to the mean LOS over the candidate horizon,
+  # try the next-oldest detector. If all anchors fail, release and optimize freely.
+  anchor_infeasible_fallback: "next_oldest"
 
 #############################
 # Visualization relevant parameters

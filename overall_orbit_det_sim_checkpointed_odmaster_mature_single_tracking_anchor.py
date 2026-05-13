@@ -20,7 +20,7 @@ import gc
 import glob
 import datetime as dt
 import matplotlib.pyplot as plt
-from od_attcoord_coverage_mode_v2 import AttitudeCoordinator, compute_J_grid_theta_phi_single_free
+from od_attcoord_coverage_mode_v2_tracking_anchor import AttitudeCoordinator, compute_J_grid_theta_phi_single_free
 import math
 import time
 from datetime import datetime
@@ -1513,7 +1513,8 @@ def run_OD(config_global):
     def _save_od_checkpoint(
             checkpoint_path, *, uid, m_idx, rank, ukf, timer, minimoon, formation,
             od_convergence_streak, last_od_stop_metrics, last_completed_outer_step,
-            outer_csv_path, termination_reason="", progress_status="running", no_detection_state=None
+            outer_csv_path, termination_reason="", progress_status="running", no_detection_state=None,
+            tracking_state=None
     ):
         """Save the minimum state needed to resume from the last completed outer OD step."""
         payload = {
@@ -1539,6 +1540,7 @@ def run_OD(config_global):
             "od_convergence_streak": int(od_convergence_streak),
             "last_od_stop_metrics": copy.deepcopy(last_od_stop_metrics),
             "no_detection_state": copy.deepcopy(no_detection_state or {}),
+            "tracking_state": copy.deepcopy(tracking_state or {}),
         }
         _atomic_pickle_dump(payload, checkpoint_path)
 
@@ -1654,6 +1656,10 @@ def run_OD(config_global):
             "OD_IN_EMS_BLACKOUT": _csv_scalar(last.get("in_ems_blackout", np.nan)),
             "OD_PENDING_REACQUISITION": _csv_scalar(last.get("pending_reacquisition", np.nan)),
             "OD_REACQUISITION_ATTEMPT_COUNT": _csv_scalar(last.get("reacquisition_attempt_count", np.nan)),
+            "OD_TRACKING_ANCHOR_QUEUE": _csv_scalar(last.get("tracking_anchor_queue", "")),
+            "OD_TRACKING_ANCHOR_SID": _csv_scalar(last.get("tracking_anchor_sid", np.nan)),
+            "OD_TRACKING_ANCHOR_MODE": _csv_scalar(last.get("tracking_anchor_mode", "")),
+            "OD_TRACKING_ANCHOR_FEASIBLE": _csv_scalar(last.get("tracking_anchor_feasible", np.nan)),
             "OD_PROCESSED_EPOCH_FIRST_JDTDB": _csv_scalar(last.get("processed_epoch_first_jdtdb", np.nan)),
             "OD_PROCESSED_EPOCH_LAST_JDTDB": _csv_scalar(last.get("processed_epoch_last_jdtdb", np.nan)),
             "OD_PROCESSED_EPOCH_COUNT": _csv_scalar(last.get("processed_epoch_count", np.nan)),
@@ -1976,6 +1982,43 @@ def run_OD(config_global):
             "reacquisition_attempt_count": int(reacquisition_attempt_count),
         }
 
+    def _tracking_state_dict(tracking_anchor_queue, tracking_anchor_sid=None):
+        q = [int(x) for x in list(tracking_anchor_queue or [])]
+        return {
+            "tracking_anchor_queue": q,
+            "tracking_anchor_sid": (None if tracking_anchor_sid is None else int(tracking_anchor_sid)),
+        }
+
+    def _ids_to_int_list(ids):
+        if ids is None:
+            return []
+        try:
+            return [int(x) for x in np.asarray(ids).reshape(-1)]
+        except Exception:
+            try:
+                return [int(x) for x in list(ids)]
+            except Exception:
+                return []
+
+    def _update_tracking_anchor_queue(anchor_queue, current_detecting_ids):
+        """Oldest-still-detecting custody queue.
+
+        Existing anchors that are still detecting keep their order; newly
+        detecting spacecraft are appended to the back.  The active anchor is
+        always queue[0].
+        """
+        current = _ids_to_int_list(current_detecting_ids)
+        current_set = set(current)
+        q_old = [int(x) for x in list(anchor_queue or [])]
+        q_new = [sid for sid in q_old if sid in current_set]
+        for sid in current:
+            if sid not in q_new:
+                q_new.append(sid)
+        return q_new
+
+    def _tracking_queue_to_str(anchor_queue):
+        return ";".join(str(int(x)) for x in list(anchor_queue or []))
+
 
     def _od_stop_metrics_and_decision(config, P, update_history, convergence_streak):
         """
@@ -2122,6 +2165,22 @@ def run_OD(config_global):
         od_no_det_cfg.get("terminate_if_ems_visible_but_not_detected", True)
     )
 
+    # Tracking-anchor behavior for attitude coordination.  This is separate
+    # from the fixed-agent optimizer mechanism: run_OD maintains the custody
+    # queue and passes one selected anchor to AttitudeCoordinator.step().
+    attcoord_tracking_cfg = config_global.get("attcoord_tracking", {})
+    preserve_detector_anchor = bool(attcoord_tracking_cfg.get("preserve_detector_anchor", True))
+    tracking_anchor_policy = str(attcoord_tracking_cfg.get("anchor_policy", "oldest_still_detecting")).lower().strip()
+    tracking_anchor_fixed_mode = str(attcoord_tracking_cfg.get("anchor_fixed_mode", "mean_los_per_epoch")).lower().strip()
+    tracking_anchor_fallback = str(attcoord_tracking_cfg.get("anchor_infeasible_fallback", "next_oldest")).lower().strip()
+
+    if tracking_anchor_policy != "oldest_still_detecting":
+        raise ValueError("attcoord_tracking.anchor_policy currently supports only 'oldest_still_detecting'")
+    if tracking_anchor_fixed_mode not in ("mean_los_per_epoch", "provided"):
+        raise ValueError("attcoord_tracking.anchor_fixed_mode must be 'mean_los_per_epoch' or 'provided'")
+    if tracking_anchor_fallback not in ("next_oldest", "release"):
+        raise ValueError("attcoord_tracking.anchor_infeasible_fallback must be 'next_oldest' or 'release'")
+
     # Per-rank OD master files: durable, low-memory OD summary output for MPI/HPC.
     od_master_cfg = config_global.get("od_master", {})
     od_master_enabled = bool(od_master_cfg.get("enabled", True))
@@ -2161,6 +2220,10 @@ def run_OD(config_global):
         "in_ems_blackout",
         "pending_reacquisition",
         "reacquisition_attempt_count",
+        "tracking_anchor_queue",
+        "tracking_anchor_sid",
+        "tracking_anchor_mode",
+        "tracking_anchor_feasible",
         "od_time_sec",
         "attcoord_time_sec",
         "true_meas_len",
@@ -2275,6 +2338,10 @@ def run_OD(config_global):
         "OD_IN_EMS_BLACKOUT",
         "OD_PENDING_REACQUISITION",
         "OD_REACQUISITION_ATTEMPT_COUNT",
+        "OD_TRACKING_ANCHOR_QUEUE",
+        "OD_TRACKING_ANCHOR_SID",
+        "OD_TRACKING_ANCHOR_MODE",
+        "OD_TRACKING_ANCHOR_FEASIBLE",
         "OD_PROCESSED_EPOCH_FIRST_JDTDB",
         "OD_PROCESSED_EPOCH_LAST_JDTDB",
         "OD_PROCESSED_EPOCH_COUNT",
@@ -2418,6 +2485,13 @@ def run_OD(config_global):
             formation.set_spacecraft_pointings(setup["frames"]["sc_pointing_eme_cartesian"])
             formation.currently_detecting = tuple([int(setup["sc_detecting_id"])])
 
+            # Tracking-anchor custody queue: oldest still-detecting spacecraft
+            # remains anchor; new detectors are appended behind it.
+            tracking_anchor_queue = [int(setup["sc_detecting_id"])]
+            tracking_anchor_sid = int(tracking_anchor_queue[0])
+            tracking_anchor_mode = "initial"
+            tracking_anchor_feasible = int(True)
+
             timer = SimTime(
                 config,
                 current_od_index=0,
@@ -2474,6 +2548,10 @@ def run_OD(config_global):
                 in_ems_blackout = bool(nd_state.get("in_ems_blackout", in_ems_blackout))
                 pending_reacquisition = bool(nd_state.get("pending_reacquisition", pending_reacquisition))
                 reacquisition_attempt_count = int(nd_state.get("reacquisition_attempt_count", reacquisition_attempt_count))
+                tr_state = chk.get("tracking_state", {}) if isinstance(chk, dict) else {}
+                tracking_anchor_queue = [int(x) for x in tr_state.get("tracking_anchor_queue", tracking_anchor_queue)]
+                restored_anchor_sid = tr_state.get("tracking_anchor_sid", None)
+                tracking_anchor_sid = None if restored_anchor_sid is None else int(restored_anchor_sid)
                 resume_after_step = int(chk.get("last_completed_outer_step", resume_after_step))
                 print(
                     f"[OD r{rank} uid={uid}] Resumed from checkpoint at "
@@ -2498,6 +2576,7 @@ def run_OD(config_global):
                             no_detection_state=_no_detection_state_dict(
                                 in_ems_blackout, pending_reacquisition, reacquisition_attempt_count
                             ),
+                            tracking_state=_tracking_state_dict(tracking_anchor_queue, tracking_anchor_sid),
                         )
                     _write_incomplete_progress(
                         progress_path, uid=uid, timer=timer, outer_csv_path=outer_csv_path,
@@ -2731,6 +2810,17 @@ def run_OD(config_global):
                     alpha_max = 1.63 * tau_max / I_max
                     omega_max = 1.63 * h_max / I_max
 
+                    # Initial attitude coordination preserves the initial detector
+                    # as a tracking anchor and fixes it to the predicted mean LOS
+                    # separately for each candidate epoch.
+                    initial_detecting_list = list(formation.currently_detecting)
+                    tracking_anchor_queue = _update_tracking_anchor_queue(
+                        tracking_anchor_queue, initial_detecting_list
+                    )
+                    tracking_anchor_sid = int(tracking_anchor_queue[0]) if tracking_anchor_queue else None
+                    tracking_anchor_mode = tracking_anchor_fixed_mode if (preserve_detector_anchor and tracking_anchor_sid is not None) else "none"
+                    tracking_anchor_feasible = int(tracking_anchor_sid is not None)
+
                     res_kcoverage, result_mean, result_kcoverage_series, result_mean_series, mean_time = attitude_coordination.step(
                         sc_eme_states_kms_piecewise[:, :, :3],
                         sc_pointings_eme,
@@ -2740,12 +2830,13 @@ def run_OD(config_global):
                         theta_h_rad,
                         alpha_max,
                         omega_max,
-                        sc_pointings_eme[ list(formation.currently_detecting), :],
-                        list(formation.currently_detecting),
+                        sc_pointings_eme[initial_detecting_list, :] if len(initial_detecting_list) > 0 else np.empty((0, 3)),
+                        initial_detecting_list,
                         d_M=config['d_mahal'],
-                        use_fixed_agent=True,
-                        fixed_agent_idx=int(formation.currently_detecting[0]),
-                        fixed_agent_u=sc_pointings_eme[int(formation.currently_detecting[0]), :],
+                        use_fixed_agent=bool(preserve_detector_anchor and tracking_anchor_sid is not None),
+                        fixed_agent_idx=tracking_anchor_sid,
+                        fixed_agent_u=None if tracking_anchor_fixed_mode == "mean_los_per_epoch" else (sc_pointings_eme[tracking_anchor_sid, :] if tracking_anchor_sid is not None else None),
+                        fixed_agent_u_mode=tracking_anchor_fixed_mode,
                         coverage_point=ast_eme_traj_kms[:, :3]
                     )
 
@@ -3326,6 +3417,20 @@ def run_OD(config_global):
 
                     formation.currently_detecting = detecting_ids
 
+                    # Update tracking-anchor custody only when there is an actual
+                    # detection.  During no-detection / EMS blackout intervals,
+                    # the queue is retained but not used unless a detector reappears.
+                    if bool(had_detection) and int(n_detections) > 0:
+                        tracking_anchor_queue = _update_tracking_anchor_queue(
+                            tracking_anchor_queue, detecting_ids
+                        )
+                        tracking_anchor_sid = int(tracking_anchor_queue[0]) if tracking_anchor_queue else None
+                    else:
+                        tracking_anchor_sid = None
+
+                    tracking_anchor_mode = "none"
+                    tracking_anchor_feasible = int(False)
+
                     ems_flags = _ems_detection_flags(detection_res_k)
                     all_ems_occluded = bool(ems_flags["all_ems_occluded"])
                     no_detection_reason = ""
@@ -3612,6 +3717,10 @@ def run_OD(config_global):
                             "in_ems_blackout": int(bool(in_ems_blackout)),
                             "pending_reacquisition": int(bool(pending_reacquisition)),
                             "reacquisition_attempt_count": int(reacquisition_attempt_count),
+                            "tracking_anchor_queue": _tracking_queue_to_str(tracking_anchor_queue),
+                            "tracking_anchor_sid": (np.nan if tracking_anchor_sid is None else int(tracking_anchor_sid)),
+                            "tracking_anchor_mode": tracking_anchor_mode,
+                            "tracking_anchor_feasible": int(bool(tracking_anchor_feasible)),
                             "od_time_sec": od_time,
                             "attcoord_time_sec": np.nan,
                             "true_meas_len": true_meas_len,
@@ -3744,6 +3853,10 @@ def run_OD(config_global):
                             "in_ems_blackout": int(bool(in_ems_blackout)),
                             "pending_reacquisition": int(bool(pending_reacquisition)),
                             "reacquisition_attempt_count": int(reacquisition_attempt_count),
+                            "tracking_anchor_queue": _tracking_queue_to_str(tracking_anchor_queue),
+                            "tracking_anchor_sid": (np.nan if tracking_anchor_sid is None else int(tracking_anchor_sid)),
+                            "tracking_anchor_mode": tracking_anchor_mode,
+                            "tracking_anchor_feasible": int(bool(tracking_anchor_feasible)),
                             "od_time_sec": od_time,
                             "attcoord_time_sec": attcoord_time,
                             "true_meas_len": true_meas_len,
@@ -3808,6 +3921,7 @@ def run_OD(config_global):
                                     no_detection_state=_no_detection_state_dict(
                                         in_ems_blackout, pending_reacquisition, reacquisition_attempt_count
                                     ),
+                                    tracking_state=_tracking_state_dict(tracking_anchor_queue, tracking_anchor_sid),
                                 )
 
                         print_od_status(
@@ -3976,16 +4090,71 @@ def run_OD(config_global):
                     alpha_max = 1.63 * tau_max / I_max
                     omega_max = 1.63 * h_max / I_max
 
-                    use_tracking = bool(config_global['use_tracking'])
+                    use_tracking = bool(config_global.get('use_tracking', False))
                     detecting_list = list(formation.currently_detecting)
                     detecting_u = sc_pointings_eme[detecting_list, :] if len(detecting_list) > 0 else np.empty((0, 3))
-                    first_detecting_idx = int(detecting_list[0]) if len(detecting_list) > 0 else None
-                    first_detecting_u = sc_pointings_eme[first_detecting_idx, :] if first_detecting_idx is not None else None
 
-                    if use_tracking:
-                        # Tracking mode does not require a fixed detector. With no detections,
-                        # pass an empty fixed/detecting set and let the coordinator optimize from
-                        # the propagated prior.
+                    # Tracking-anchor policy: keep the oldest still-detecting spacecraft
+                    # as custody anchor.  The attitude coordinator recomputes that
+                    # anchor's fixed boresight as LOS-to-mean for each candidate epoch.
+                    anchor_candidates = list(tracking_anchor_queue) if (preserve_detector_anchor and len(detecting_list) > 0) else []
+                    if len(anchor_candidates) == 0 and (not use_tracking):
+                        # Backward-compatible fallback for old non-tracking behavior.
+                        anchor_candidates = detecting_list[:1] if len(detecting_list) == 1 else []
+
+                    res_kcoverage = result_mean = result_kcoverage_series = result_mean_series = None
+                    mean_time = 0.0
+                    chosen_anchor_sid = None
+                    chosen_anchor_mode = "none"
+                    chosen_anchor_feasible = False
+
+                    def _call_attcoord_with_anchor(anchor_sid):
+                        use_anchor = anchor_sid is not None
+                        fixed_u = None
+                        fixed_mode = tracking_anchor_fixed_mode
+                        if use_anchor and fixed_mode != "mean_los_per_epoch":
+                            fixed_u = sc_pointings_eme[int(anchor_sid), :]
+                        return attitude_coordination.step(
+                            sc_eme_states_kms_piecewise[:, :, :3],
+                            sc_pointings_eme,
+                            x_ts[:, :3],
+                            P_ts[:, :3, :3],
+                            timer.attcoord_searchtimes,
+                            theta_h_rad,
+                            alpha_max,
+                            omega_max,
+                            detecting_u,
+                            detecting_list,
+                            d_M=config['d_mahal'],
+                            use_fixed_agent=bool(use_anchor),
+                            fixed_agent_idx=(None if not use_anchor else int(anchor_sid)),
+                            fixed_agent_u=fixed_u,
+                            fixed_agent_u_mode=fixed_mode,
+                            coverage_point=ast_eme_traj_kms[:, :3],
+                        )
+
+                    # Try the oldest still-detecting anchor first.  If the entire
+                    # candidate horizon is infeasible for that anchor and config allows
+                    # it, promote to the next-oldest detector.
+                    if preserve_detector_anchor and len(anchor_candidates) > 0:
+                        for anchor_sid_try in anchor_candidates:
+                            tmp = _call_attcoord_with_anchor(int(anchor_sid_try))
+                            res_try = tmp[0]
+                            if getattr(res_try, "u_cmd", None) is not None and np.isfinite(float(getattr(res_try, "chosen_dt", np.nan))):
+                                res_kcoverage, result_mean, result_kcoverage_series, result_mean_series, mean_time = tmp
+                                chosen_anchor_sid = int(anchor_sid_try)
+                                chosen_anchor_mode = tracking_anchor_fixed_mode
+                                chosen_anchor_feasible = True
+                                break
+                            if tracking_anchor_fallback != "next_oldest":
+                                res_kcoverage, result_mean, result_kcoverage_series, result_mean_series, mean_time = tmp
+                                chosen_anchor_sid = int(anchor_sid_try)
+                                chosen_anchor_mode = tracking_anchor_fixed_mode
+                                chosen_anchor_feasible = False
+                                break
+
+                    if res_kcoverage is None:
+                        # No usable anchor or anchor preservation disabled: optimize freely.
                         res_kcoverage, result_mean, result_kcoverage_series, result_mean_series, mean_time = attitude_coordination.step(
                             sc_eme_states_kms_piecewise[:, :, :3],
                             sc_pointings_eme,
@@ -4000,49 +4169,17 @@ def run_OD(config_global):
                             d_M=config['d_mahal'],
                             use_fixed_agent=False,
                             fixed_agent_idx=None,
-                            fixed_agent_u=first_detecting_u,
+                            fixed_agent_u=None,
+                            fixed_agent_u_mode="provided",
                             coverage_point=ast_eme_traj_kms[:, :3],
                         )
-                    else:
-                        if len(detecting_list) == 1:
-                            res_kcoverage, result_mean, result_kcoverage_series, result_mean_series, mean_time = attitude_coordination.step(
-                                sc_eme_states_kms_piecewise[:, :, :3],
-                                sc_pointings_eme,
-                                x_ts[:, :3],
-                                P_ts[:, :3, :3],
-                                timer.attcoord_searchtimes,
-                                theta_h_rad,
-                                alpha_max,
-                                omega_max,
-                                detecting_u,
-                                detecting_list,
-                                d_M=config['d_mahal'],
-                                use_fixed_agent=True,
-                                fixed_agent_idx=first_detecting_idx,
-                                fixed_agent_u=first_detecting_u,
-                                coverage_point=ast_eme_traj_kms[:, :3]
-                            )
-                        else:
-                            # Multi-detection and no-detection cases both use free-agent
-                            # coordination. In the no-detection case detecting_u/list are empty,
-                            # so no spacecraft is treated as fixed by the caller.
-                            res_kcoverage, result_mean, result_kcoverage_series, result_mean_series, mean_time = attitude_coordination.step(
-                                sc_eme_states_kms_piecewise[:, :, :3],
-                                sc_pointings_eme,
-                                x_ts[:, :3],
-                                P_ts[:, :3, :3],
-                                timer.attcoord_searchtimes,
-                                theta_h_rad,
-                                alpha_max,
-                                omega_max,
-                                detecting_u,
-                                detecting_list,
-                                d_M=config['d_mahal'],
-                                use_fixed_agent=False,
-                                fixed_agent_idx=first_detecting_idx,
-                                fixed_agent_u=first_detecting_u,
-                                coverage_point=ast_eme_traj_kms[:, :3]
-                            )
+                        chosen_anchor_sid = None
+                        chosen_anchor_mode = "free"
+                        chosen_anchor_feasible = False
+
+                    tracking_anchor_sid = chosen_anchor_sid
+                    tracking_anchor_mode = chosen_anchor_mode
+                    tracking_anchor_feasible = int(bool(chosen_anchor_feasible))
 
                     attcoord_endtime = time.time()
                     timer.set_attcoord_time(attcoord_endtime - attcoord_startime - mean_time)
@@ -4703,6 +4840,10 @@ def run_OD(config_global):
                     "in_ems_blackout": int(bool(in_ems_blackout)),
                     "pending_reacquisition": int(bool(pending_reacquisition)),
                     "reacquisition_attempt_count": int(reacquisition_attempt_count),
+                    "tracking_anchor_queue": _tracking_queue_to_str(tracking_anchor_queue),
+                    "tracking_anchor_sid": (np.nan if tracking_anchor_sid is None else int(tracking_anchor_sid)),
+                    "tracking_anchor_mode": tracking_anchor_mode,
+                    "tracking_anchor_feasible": int(bool(tracking_anchor_feasible)),
                     "od_time_sec": od_time,
                     "attcoord_time_sec": attcoord_time,
                     "true_meas_len": true_meas_len,
@@ -4769,6 +4910,7 @@ def run_OD(config_global):
                             no_detection_state=_no_detection_state_dict(
                                 in_ems_blackout, pending_reacquisition, reacquisition_attempt_count
                             ),
+                            tracking_state=_tracking_state_dict(tracking_anchor_queue, tracking_anchor_sid),
                         )
 
                 print_od_status(
