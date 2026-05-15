@@ -566,7 +566,7 @@ def run_sim_runnumbers_MPI_getIOD(config):
 
                 # ---- asteroid orbit at detection ----
                 orbit_path = os.path.join(config["minimoon_files_folder"], f"{mm_id}.csv")
-                orbit = pd.read_csv(orbit_path, sep=" ", header=0, names=config["minimoon_column_names"])
+                orbit = util.read_csv_comma_or_space(orbit_path, header=0)
 
                 asteroid_state_helio = orbit.loc[
                     idx0, ["Helio x", "Helio y", "Helio z", "Helio vx", "Helio vy", "Helio vz"]
@@ -2501,7 +2501,7 @@ def run_OD(config_global):
                 current_integration_index=row['INDEX_USED']
             )
 
-            att_coord_viz_flag_ini_ini = True
+            att_coord_viz_flag_ini_ini = False
             if att_coord_viz_flag_ini_ini:
 
                 theta_h_rad = util.fov_deg2_to_half_angle_rad(config["fov"])
@@ -2832,7 +2832,7 @@ def run_OD(config_global):
                                                                                hint=("time", "state"))
 
                     # to visualize the possible att coord scenarios
-                    viz_prop_flag_ini = True
+                    viz_prop_flag_ini = False
                     if viz_prop_flag_ini:
                         util.plot_priors_positions_and_cov_2d(
                             x_ts,
@@ -2939,7 +2939,7 @@ def run_OD(config_global):
                     detecting_ids_str = str(int(setup["sc_detecting_id"]))
 
                     # visualize att_coord result
-                    att_coord_viz_flag_ini = True
+                    att_coord_viz_flag_ini = False
                     if att_coord_viz_flag_ini:
                         best_epoch = res_kcoverage.chosen_dt
                         best_idx = np.where(timer.attcoord_searchtimes == best_epoch)[0]
@@ -3448,8 +3448,8 @@ def run_OD(config_global):
                                 show=False,
                             )
 
-                    print(detection_res_k)
-                    plt.show()
+                    # print(detection_res_k)
+                    # plt.show()
 
                     # -------------------------
                     # Prediction + UKF update only
@@ -4354,7 +4354,7 @@ def run_OD(config_global):
                     # The visualization block assumes at least one detecting spacecraft
                     # in a few diagnostic calculations, so skip it for prediction-only
                     # no-detection steps.
-                    att_coord_viz_flag = True
+                    att_coord_viz_flag = False
                     if att_coord_viz_flag and had_detection:
                         best_epoch = res_kcoverage.chosen_dt
                         best_idx = np.where(timer.attcoord_searchtimes == best_epoch)[0]
@@ -8505,7 +8505,7 @@ with open(args.config, 'r') as file:
     config = yaml.safe_load(file)
 
 # get the master file
-master = util.parse_master_new_new_new(config['minimoon_master_file_path'])
+master = util.read_csv_comma_or_space(config['minimoon_master_file_path'], header=0)
 
 ###################################
 # Run parallel for number of runs using MPI

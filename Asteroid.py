@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import utilities as util
 
 
 class Asteroid:
@@ -7,7 +8,7 @@ class Asteroid:
     def __init__(self, id, ini_index, configs, current_state_eme=None, current_epoch=None):
         self.id = id
         file_path = configs['minimoon_files_folder'] + id + '.csv'
-        self.orbit = pd.read_csv(file_path, sep=' ', header=0, names=configs['minimoon_column_names'])
+        self.orbit = util.read_csv_comma_or_space(file_path)
         temp_x = self.orbit['Synodic x']
         temp_y = self.orbit['Synodic y']
         moon_temp_x = self.orbit['Moon Synodic x']

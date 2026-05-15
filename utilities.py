@@ -1,7 +1,6 @@
 import yaml
 import os
 import pandas as pd
-from Asteroid import Asteroid
 from Formation import Formation
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
@@ -7794,6 +7793,27 @@ def parse_master_new_new_new(file_path):
 
     return master_data
 
+
+def read_csv_comma_or_space(file_path, header=0):
+    """
+    Read a CSV/text table using comma first, then whitespace.
+
+    This preserves whatever column names are actually in the file.
+    It does not override names.
+    """
+
+    # Try comma-separated first.
+    try:
+        df = pd.read_csv(file_path, sep=",", header=header)
+
+        # If comma read produced only one column, it probably was not comma-separated.
+        if df.shape[1] > 1:
+            return df
+    except Exception:
+        pass
+
+    # Fall back to whitespace-separated.
+    return pd.read_csv(file_path, sep=" ", header=header)
 
 def fov_deg2_to_half_angle_rad(FOV_deg2):
     """
