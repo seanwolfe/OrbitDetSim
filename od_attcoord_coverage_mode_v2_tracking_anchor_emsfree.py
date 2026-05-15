@@ -2740,6 +2740,15 @@ class AttitudeCoordinator:
                 "fixed_agent_u_mode must be one of 'provided' or 'mean_los_per_epoch'"
             )
 
+        tracking_cfg = self.cfg.get("attcoord_tracking", {}) if isinstance(self.cfg, dict) else {}
+        fixed_agent_ems_infeasible_behavior = str(
+            tracking_cfg.get("anchor_ems_infeasible_fallback", "free")
+        ).lower().strip()
+        if fixed_agent_ems_infeasible_behavior not in ("free", "skip"):
+            raise ValueError(
+                "attcoord_tracking.anchor_ems_infeasible_fallback must be 'free' or 'skip'"
+            )
+
         if use_fixed_agent:
             if fixed_agent_idx is None:
                 raise ValueError("use_fixed_agent=True requires fixed_agent_idx")
@@ -2808,9 +2817,12 @@ class AttitudeCoordinator:
             fixed_agent_feasible_k = True
             fixed_agent_infeasible_reason = ""
             fixed_agent_theta_req_rad = float("nan")
+            use_fixed_agent_k = bool(use_fixed_agent)
+            fixed_agent_idx_k = fixed_agent_idx
+            fixed_agent_mode_k = fixed_agent_u_mode
 
-            if bool(use_fixed_agent) and fixed_agent_idx is not None:
-                idx_fix_i = int(fixed_agent_idx)
+            if bool(use_fixed_agent_k) and fixed_agent_idx_k is not None:
+                idx_fix_i = int(fixed_agent_idx_k)
 
                 if fixed_agent_u_mode == "mean_los_per_epoch":
                     r_fix = np.asarray(p_hat_k, dtype=float).reshape(3,) - np.asarray(p_agents_k[idx_fix_i], dtype=float).reshape(3,)
@@ -2838,6 +2850,20 @@ class AttitudeCoordinator:
                         fixed_agent_feasible_k = False
                         fixed_agent_infeasible_reason = "fixed_anchor_ems_infeasible"
 
+                if (not fixed_agent_feasible_k) and fixed_agent_infeasible_reason == "fixed_anchor_ems_infeasible" and fixed_agent_ems_infeasible_behavior == "free":
+                    # The tracking anchor's mean-LOS violates the conservative EMS/FOV-cone
+                    # keepout for this candidate epoch.  Do not kill the candidate.
+                    # Instead, revert to the pre-anchor/free attitude-coordination behaviour
+                    # for this epoch.  This keeps EMS infeasibility from making the entire
+                    # search horizon NaN while still logging why the anchor was released.
+                    use_fixed_agent_k = False
+                    fixed_agent_idx_k = None
+                    fixed_agent_u_k = None
+                    fixed_agent_mode_k = "free_due_to_anchor_ems_infeasible"
+                    fixed_agent_feasible_k = True
+
+                print(fixed_agent_mode_k)
+
                 if not fixed_agent_feasible_k:
                     opt_series.append(dict(
                         k=k, dt=dt, feasible=False,
@@ -2849,7 +2875,7 @@ class AttitudeCoordinator:
                         coverage=-1,
                         history=None,
                         fixed_agent_idx=idx_fix_i,
-                        fixed_agent_u_mode=fixed_agent_u_mode,
+                        fixed_agent_u_mode=fixed_agent_mode_k,
                         fixed_agent_feasible=False,
                         fixed_agent_infeasible_reason=fixed_agent_infeasible_reason,
                         fixed_agent_theta_req_deg=float(np.rad2deg(fixed_agent_theta_req_rad)) if np.isfinite(fixed_agent_theta_req_rad) else float("nan"),
@@ -2874,8 +2900,8 @@ class AttitudeCoordinator:
                 maxiter=int(self.max_iterations),
                 ftol=float(self.ftolerance),
                 display=bool(self.display),
-                use_fixed_agent=bool(use_fixed_agent),
-                idx_fix=fixed_agent_idx,
+                use_fixed_agent=bool(use_fixed_agent_k),
+                idx_fix=fixed_agent_idx_k,
                 u_fix=fixed_agent_u_k,
                 num_candidates=int(self.num_candidates),
                 detecting_u=detecting_u,
@@ -2893,8 +2919,8 @@ class AttitudeCoordinator:
                     theta_s_allowed=float(theta_s_t),
                     coverage=-1,
                     history=history,
-                    fixed_agent_idx=(None if fixed_agent_idx is None else int(fixed_agent_idx)),
-                    fixed_agent_u_mode=fixed_agent_u_mode,
+                    fixed_agent_idx=(None if fixed_agent_idx_k is None else int(fixed_agent_idx_k)),
+                    fixed_agent_u_mode=fixed_agent_mode_k,
                     fixed_agent_feasible=bool(fixed_agent_feasible_k),
                     fixed_agent_infeasible_reason=fixed_agent_infeasible_reason,
                     fixed_agent_theta_req_deg=float(np.rad2deg(fixed_agent_theta_req_rad)) if np.isfinite(fixed_agent_theta_req_rad) else float("nan"),
@@ -2931,8 +2957,8 @@ class AttitudeCoordinator:
                 n_mean_full_cover=n_mean_full_cover,
                 mean_full_cover_flags=mean_full_cover_flags,
                 history=history,
-                fixed_agent_idx=(None if fixed_agent_idx is None else int(fixed_agent_idx)),
-                fixed_agent_u_mode=fixed_agent_u_mode,
+                fixed_agent_idx=(None if fixed_agent_idx_k is None else int(fixed_agent_idx_k)),
+                fixed_agent_u_mode=fixed_agent_mode_k,
                 fixed_agent_feasible=bool(fixed_agent_feasible_k),
                 fixed_agent_infeasible_reason=fixed_agent_infeasible_reason,
                 fixed_agent_theta_req_deg=float(np.rad2deg(fixed_agent_theta_req_rad)) if np.isfinite(fixed_agent_theta_req_rad) else float("nan"),
@@ -2949,8 +2975,8 @@ class AttitudeCoordinator:
                     n_mean_full_cover=n_mean_full_cover,
                     mean_full_cover_flags=mean_full_cover_flags,
                     history=history,
-                    fixed_agent_idx=(None if fixed_agent_idx is None else int(fixed_agent_idx)),
-                    fixed_agent_u_mode=fixed_agent_u_mode,
+                    fixed_agent_idx=(None if fixed_agent_idx_k is None else int(fixed_agent_idx_k)),
+                    fixed_agent_u_mode=fixed_agent_mode_k,
                     fixed_agent_theta_req_deg=float(np.rad2deg(fixed_agent_theta_req_rad)) if np.isfinite(fixed_agent_theta_req_rad) else float("nan"),
                 )
 
@@ -3126,6 +3152,7 @@ def keepout_safe_single(p_sc, u_boresight, theta_h, p_em, R_em, alpha_s, eps=1e-
     if d <= R_em:
         return False  # inside/at sphere
     alpha_em = float(np.arcsin(np.clip(R_em / d, 0.0, 1.0)))
+
     return gamma >= (alpha_em + theta_h + alpha_s)
 
 

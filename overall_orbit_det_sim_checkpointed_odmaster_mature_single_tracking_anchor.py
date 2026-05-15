@@ -20,7 +20,7 @@ import gc
 import glob
 import datetime as dt
 import matplotlib.pyplot as plt
-from od_attcoord_coverage_mode_v2_tracking_anchor import AttitudeCoordinator, compute_J_grid_theta_phi_single_free
+from od_attcoord_coverage_mode_v2_tracking_anchor_emsfree import AttitudeCoordinator, compute_J_grid_theta_phi_single_free
 import math
 import time
 from datetime import datetime
@@ -2501,6 +2501,66 @@ def run_OD(config_global):
                 current_integration_index=row['INDEX_USED']
             )
 
+            att_coord_viz_flag_ini_ini = True
+            if att_coord_viz_flag_ini_ini:
+
+                theta_h_rad = util.fov_deg2_to_half_angle_rad(config["fov"])
+                ems_center_xy = np.array(config["ems"]["p_em"][:2])
+                ems_center_xyz = np.array(config["ems"]["p_em"])
+                ems_radius = config["ems"]['R_em']
+                ray_length = config['ray_length']
+
+                sc_eme_ae_kms = formation.get_spacecraft_states()[:, :3]
+                sc_pointing_eme_cartesian = formation.get_spacecraft_pointings()
+                ang_eme = util.proj_angle_xy_from_plus_x_ccw(sc_pointing_eme_cartesian)
+                ast_truth_eme = minimoon.curr_state_eme
+
+                ast_iod_eme = ukf.x
+                P_cart_eme = ukf.P[:3,:3]
+
+                ast_truth_eme = np.asarray(ast_truth_eme).reshape(-1)
+
+                agents_xyz = sc_eme_ae_kms
+                target_cov_xyz = P_cart_eme
+                fig, ax = util.plot_od_scenario_3d_old(
+                    t_label=None,
+                    agents_xyz=agents_xyz,
+                    u_opt_agents_xyz=sc_pointing_eme_cartesian,
+                    theta_h_rad=theta_h_rad,
+                    ray_length=ray_length,
+                    u_curr_agents_xyz=sc_pointing_eme_cartesian,
+                    boresight_line_len=ray_length * 0.1,
+                    u_init_agents_xyz=None,
+                    init_boresight_line_len=ray_length * 1.5,
+                    xlim=config['three_d_prop']['xlim'], ylim=config['three_d_prop']['ylim'],
+                    zlim=config['three_d_prop']['zlim'],
+                    Nx=config['three_d_prop']['Nx'], Ny=config['three_d_prop']['Ny'],
+                    Nz=config['three_d_prop']['Nz'],
+                    max_points_for_scatter=config['three_d_prop']['max_points'],
+                    target_mean_xyz=ast_iod_eme[:3],
+                    target_cov_xyz=target_cov_xyz,
+                    d_mahal=config['d_mahal'],
+                    true_target_xyz=ast_truth_eme[:3],
+                    target_mean_traj_xyz=None,
+                    true_target_traj_xyz=None,
+                    true_target_traj_xyz_2=None,
+                    ems_center_xyz=ems_center_xyz,
+                    ems_radius=ems_radius,
+                    show_coverage=True,
+                    show_uncertainty=True,
+                    show_truth=True,
+                    show_ems=True,
+                    show_fov_cones=True,
+                    title="3D OD Scenario Demo (EME)",
+                    slew_history=None,
+                    slew_history_line_len=ray_length,
+                    agent_orbit_tracks_xyz=None
+                )
+
+
+
+
+
             status_every = int(config.get("od_status_every", 1))
 
             last_pos_rmse = np.nan
@@ -2772,7 +2832,7 @@ def run_OD(config_global):
                                                                                hint=("time", "state"))
 
                     # to visualize the possible att coord scenarios
-                    viz_prop_flag_ini = False
+                    viz_prop_flag_ini = True
                     if viz_prop_flag_ini:
                         util.plot_priors_positions_and_cov_2d(
                             x_ts,
@@ -2833,10 +2893,10 @@ def run_OD(config_global):
                         sc_pointings_eme[initial_detecting_list, :] if len(initial_detecting_list) > 0 else np.empty((0, 3)),
                         initial_detecting_list,
                         d_M=config['d_mahal'],
-                        use_fixed_agent=bool(preserve_detector_anchor and tracking_anchor_sid is not None),
-                        fixed_agent_idx=tracking_anchor_sid,
-                        fixed_agent_u=None if tracking_anchor_fixed_mode == "mean_los_per_epoch" else (sc_pointings_eme[tracking_anchor_sid, :] if tracking_anchor_sid is not None else None),
-                        fixed_agent_u_mode=tracking_anchor_fixed_mode,
+                        use_fixed_agent=True,
+                        fixed_agent_idx=int(initial_detecting_list[0]),
+                        fixed_agent_u=sc_pointings_eme[int(initial_detecting_list[0]), :],
+                        fixed_agent_u_mode="provided",
                         coverage_point=ast_eme_traj_kms[:, :3]
                     )
 
@@ -3072,7 +3132,7 @@ def run_OD(config_global):
                             show_ems=True,
                             show_fov_cones=True,
                             title="3D OD Scenario Demo (EME)",
-                            slew_history=None,
+                            slew_history=slew_history,
                             slew_history_line_len=ray_length,
                             agent_orbit_tracks_xyz=[sc_eme_states_kms_piecewise[:, i, :3] for i in range(config['num_spacecraft'])]
                         )
@@ -6487,7 +6547,7 @@ def run_OD_legacy(config_global):
                     detecting_ids_str = str(int(setup["sc_detecting_id"]))
 
                     # visualize att_coord result
-                    att_coord_viz_flag_ini = False
+                    att_coord_viz_flag_ini = True
                     if att_coord_viz_flag_ini:
                         best_epoch = res_kcoverage.chosen_dt
                         best_idx = np.where(timer.attcoord_searchtimes == best_epoch)[0]

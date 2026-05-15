@@ -276,7 +276,8 @@ od_no_detection:
   terminate_if_ems_visible_but_not_detected: true
 
 attcoord_tracking:
-  preserve_detector_anchor: true
+  preserve_detector_anchor: True
+  anchor_ems_infeasible_fallback: "free"  # release anchor and run old/free behaviour
 
   # Current implementation supports this policy:
   # old detectors stay ahead of new detectors in the custody queue.
