@@ -2862,7 +2862,7 @@ class AttitudeCoordinator:
                     fixed_agent_mode_k = "free_due_to_anchor_ems_infeasible"
                     fixed_agent_feasible_k = True
 
-                print(fixed_agent_mode_k)
+                # print(fixed_agent_mode_k)
 
                 if not fixed_agent_feasible_k:
                     opt_series.append(dict(

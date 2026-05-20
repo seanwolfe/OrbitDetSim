@@ -116,7 +116,7 @@ def run_runs_x_minimoons_MPI(minimoon_master, config):
         master_i = minimoon_master.iloc[mm_idx]
         current_minimoon = Asteroid(
             master_i['Object id'],
-            master_i['Min_SunEarthL1_V_index'],
+            master_i['Capture Index'],
             config
         )
         formation = Formation(config)

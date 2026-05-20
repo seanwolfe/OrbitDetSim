@@ -17,9 +17,9 @@ class Asteroid:
         self.orbit['Synodic y'] = temp_y
         self.orbit['Moon Synodic x'] = moon_temp_x
         self.orbit['Moon Synodic y'] = moon_temp_y
-        self.start_index = ini_index  # point of min apparant magnitude in traj
-        self.position = np.array([self.orbit['Synodic x'].iloc[ini_index], self.orbit['Synodic y'].iloc[ini_index],
-                                  self.orbit['Synodic z'].iloc[ini_index]])
+        self.start_index = int(ini_index)  # point of min apparant magnitude in traj
+        self.position = np.array([self.orbit['Synodic x'].iloc[self.start_index], self.orbit['Synodic y'].iloc[self.start_index],
+                                  self.orbit['Synodic z'].iloc[self.start_index]])
         self.velocity = None
         self.curr_state_eme = current_state_eme
         self.curr_epoch = current_epoch
