@@ -1,0 +1,71 @@
+# Example config for run_orekit_angles_only_iod_from_yaml.py
+# Run with:
+#   conda activate orekit-gooding
+#   python run_orekit_angles_only_iod_from_yaml.py iod_angles_only_config_example.yaml
+
+input:
+  # Change this to your actual local file path.
+#  csv_path: results/iod_results/spacecraft_6/minimoon-NESC000000B3_sc-1_index-11630_initial_tests_spacecraft_6_rank_0_part_1.csv
+#  csv_path: results/iod_results/spacecraft_6/minimoon-NESC000000B3_sc-2_index-8501_initial_tests_spacecraft_6_rank_0_part_1.csv
+#  csv_path: results/iod_results/spacecraft_6/minimoon-NESC000000B3_sc-3_index-12020_initial_tests_spacecraft_6_rank_0_part_1.csv
+#   csv_path: results/iod_results/spacecraft_6/minimoon-NESC000000B3_sc-4_index-28691_initial_tests_spacecraft_6_rank_0_part_1.csv
+#   csv_path: results/iod_results/spacecraft_6/minimoon-NESC000000B3_sc-5_index-25777_initial_tests_spacecraft_6_rank_0_part_1.csv
+#   csv_path: results/iod_results/spacecraft_6/minimoon-NESC000000B3_sc-6_index-8205_initial_tests_spacecraft_6_rank_0_part_1.csv
+#   csv_path: results/iod_results/spacecraft_6/minimoon-NESC000000C8_sc-1_index-11285_initial_tests_spacecraft_6_rank_1_part_1.csv
+#   csv_path: results/iod_results/spacecraft_6/minimoon-NESC000000C8_sc-2_index-11171_initial_tests_spacecraft_6_rank_1_part_1.csv
+#   csv_path: results/iod_results/spacecraft_6/minimoon-NESC000000C8_sc-5_index-11573_initial_tests_spacecraft_6_rank_1_part_1.csv
+#   csv_path: results/iod_results/spacecraft_6/minimoon-NESC000000GM_sc-1_index-10285_initial_tests_spacecraft_6_rank_1_part_1.csv
+#   csv_path: results/iod_results/spacecraft_6/minimoon-NESC000000GM_sc-5_index-8310_initial_tests_spacecraft_6_rank_1_part_1.csv
+#   csv_path: results/iod_results/spacecraft_6/minimoon-NESC000000J9_sc-1_index-9177_initial_tests_spacecraft_6_rank_2_part_1.csv
+#   csv_path: results/iod_results/spacecraft_6/minimoon-NESC000000J9_sc-6_index-8514_initial_tests_spacecraft_6_rank_2_part_1.csv
+#   csv_path: results/iod_results/spacecraft_6/minimoon-NESC000000MP_sc-4_index-9008_initial_tests_spacecraft_6_rank_2_part_1.csv
+#   csv_path: results/iod_results/spacecraft_6/minimoon-NESC000000ru_sc-2_index-13784_initial_tests_spacecraft_6_rank_3_part_1.csv
+#   csv_path: results/iod_results/spacecraft_6/minimoon-NESC000000ru_sc-3_index-10731_initial_tests_spacecraft_6_rank_3_part_1.csv
+#   csv_path: results/iod_results/spacecraft_6/minimoon-NESC000000wl_sc-1_index-9183_initial_tests_spacecraft_6_rank_3_part_1.csv
+#   csv_path: results/iod_results/spacecraft_6/minimoon-NESC000000wl_sc-4_index-8893_initial_tests_spacecraft_6_rank_3_part_1.csv
+   csv_path: results/iod_results/spacecraft_6/minimoon-NESC0000001a_sc-6_index-33002_initial_tests_spacecraft_6_rank_0_part_1.csv
+
+orekit:
+  # Use an absolute path if your current working directory does not contain orekit-data.
+  # Example: /home/aeromec/Documents/sean/OrbitDetSim/orekit-data
+  data_path: orekit-data
+  frame: EME2000
+  # Earth gravitational parameter, SI units.
+  mu_m3_s2: 3.986004418e14
+
+columns:
+  epoch_jd_tdb: EPOCH(JDTDB)
+  observer_position_km: [SC_GEO_X(KM)_PHYS, SC_GEO_Y(KM)_PHYS, SC_GEO_Z(KM)_PHYS]
+  observer_velocity_km_s: [SC_GEO_VX(KM/S)_PHYS, SC_GEO_VY(KM/S)_PHYS, SC_GEO_VZ(KM/S)_PHYS]
+  # Stored as sin(RA), cos(RA), sin(Dec), all in the same inertial frame as the observer states.
+  los_sin_cos: [SIN_RA_PHYS, COS_RA_PHYS, SIN_DEC_PHYS]
+  # Optional, but needed for Cartesian, angular, range, and rate error metrics.
+  truth_position_km: [GEO_X(KM), GEO_Y(KM), GEO_Z(KM)]
+  truth_velocity_km_s: [GEO_VX(KM/S), GEO_VY(KM/S), GEO_VZ(KM/S)]
+
+observations:
+  # Must be exactly three observations. Examples: [first, middle, last], [0, 5, 10], [0, 1, 2]
+  rows: [first, middle, last]
+
+evaluation:
+  # Errors are evaluated at the central selected row by default.
+  epoch: central_selected
+
+methods:
+  # Angles-only options: all, gauss, laplace, gooding
+  - all
+
+gooding:
+  # 'truth' is useful for validating/failure-rate testing, but is not blind IOD.
+  # Use 'manual' with rho1_km/rho3_km for a non-truth initialization.
+  range_init: truth
+  rho1_km: 1200000.0
+  rho3_km: 1200000.0
+  n_rev: 0
+  # Try both Lambert branches and record failures instead of crashing the whole run.
+  directions_to_try: [true, false]
+
+output:
+  results_csv: results/iod_results/orekit_angles_only_iod_summary.csv
+  verbose: true
+  include_traceback: false
