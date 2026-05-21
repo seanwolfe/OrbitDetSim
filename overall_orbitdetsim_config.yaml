@@ -192,6 +192,7 @@ ems:
 ###################################
 # Running the overall OD algorithm
 ##################################
+run_od: True
 od_diagnostics:
     log_inner_kf: True
     log_attcoord_candidates: True

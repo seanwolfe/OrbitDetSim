@@ -9,40 +9,15 @@ import n_body_integrator as nbody
 import utilities as util
 import time
 import os
-import random
 
 # Load SPICE kernels (Ensure you downloaded DE440 as mentioned before)
 spice.furnsh("de430.bsp")
 spice.furnsh('naif0012.tls')
 
-
-def _set_reproducibility_seed(config):
-    """Best-effort deterministic seeding for one IOD/hyperparameter task.
-
-    The hyperparameter runner sets TASK_SEED and seed in a per-task copy of
-    the config. This helper makes NumPy/Python/Torch randomness deterministic
-    for noise injection, collocation sampling, ELM weights, and basin-hopping
-    perturbations.
-    """
-    seed = config.get("TASK_SEED", config.get("seed", None))
-    if seed is None:
-        return
-    try:
-        seed = int(seed) % (2**32 - 1)
-    except Exception:
-        return
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
 ####
 # generate data
 ###
 def generate_data(config, parameters, *, master_row=None, saved_as=None):
-    _set_reproducibility_seed(config)
     """
     Build inputs for the IOD solver using the per-row file(s) recorded in MASTER.
     One run per MASTER row.
@@ -330,7 +305,6 @@ def epoch_normalization(epoch, z_range, configuration):
 
 
 def run(data, config, parameters):
-    _set_reproducibility_seed(config)
     # get the collocation points
     colloc_points = sample_time_points(parameters['SAMPLING_METHOD'], data[2], parameters['TIME_DELTA'],
                                        parameters['TOTAL_POINTS'], layer_ratios=parameters['LAYER_RATIOS'], config=config)

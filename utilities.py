@@ -1092,10 +1092,18 @@ def plot_od_scenario_3d_new(
         ems_center_xyz=None,
         ems_radius=None,
 
+        # Earth
+        earth_location=None,
+
+        # Moon
+        moon_trajectory=None,
+
         # main toggles
         show_uncertainty=True,
         show_truth=True,
         show_ems=True,
+        show_earth=False,
+        show_moon_traj=False,
         show_fov_cones=True,
         show_legend=True,
 
@@ -1427,7 +1435,7 @@ def plot_od_scenario_3d_new(
             alpha=0.8,
             color="green",
             linestyle="--",
-            label="True trajectory 2",
+            label="Object Trajectory",
         )
 
     # ---- initial optimizer boresights ----
@@ -1466,7 +1474,7 @@ def plot_od_scenario_3d_new(
                     n_len=int(fov_n_len),
                     color=fov_surface_color,
                     alpha=float(fov_surface_alpha),
-                    label="Agent FOV volume" if i == 0 else None,
+                    label="Spacecraft FOV" if i == 0 else None,
                 )
 
             if fov_style in ("wire", "both"):
@@ -1488,7 +1496,7 @@ def plot_od_scenario_3d_new(
                 A[i, 0], A[i, 1], A[i, 2],
                 s=40,
                 color="tab:blue",
-                label="Agent position" if i == 0 else None,
+                label="Spacecraft position" if i == 0 else None,
             )
 
     # ---- current boresights + slew angle labels ----
@@ -1588,7 +1596,7 @@ def plot_od_scenario_3d_new(
             s=40,
             color="green",
             marker="o",
-            label="True position",
+            label="Detection Instant",
         )
 
     # ---- EMS sphere ----
@@ -1615,8 +1623,14 @@ def plot_od_scenario_3d_new(
                 color="orange",
                 lw=1.1,
                 alpha=0.65,
-                label="EMS wires",
+                label="EMS",
             )
+
+    if show_earth and earth_location is not None:
+        ax.scatter(earth_location[0], earth_location[1], earth_location[2], color='blue', s=50, label='Earth')
+
+    if show_moon_traj and moon_trajectory is not None:
+        ax.plot(moon_trajectory[:, 0], moon_trajectory[:, 1], moon_trajectory[:, 2], color='purple', label='Moon')
 
     # ---- axes ----
     ax.set_xlim(xlim)
