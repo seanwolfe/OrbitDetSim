@@ -64,9 +64,8 @@ def generate_data(config, parameters, *, master_row=None, saved_as=None):
     """
 
     def _iod_dir(config):
-        num_sc = int(config['num_spacecraft'])
-        root = os.path.abspath(config['IOD_folder_path'])
-        return os.path.join(root, f"spacecraft_{num_sc}")
+        root = os.path.abspath(os.path.join(config['top_dir'], config['IOD_folder_path']))
+        return root
 
     # ----- resolve which per-row file to use -----
     if saved_as is None:

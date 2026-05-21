@@ -1,7 +1,44 @@
+##################################
+# Overall sim parameters
+#############################
+num_spacecraft: 3
+ADD_NOISE: 1
+INCLUDE_EMS_EXCLUSION: 1
+run_IOD_hyperparameter: False
+run_OD: True
+
+
+###################################
+# paths & file names
+####################################
+# top-level dir for results
+top_dir: "results_3"
+
+# LPF halo related
+orbit_file_path: 'LPF_orbit_2.csv'
+
+# minimoon related
+# minimoon_files_folder: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb/'
+# minimoon_files_folder: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb_testset/'
+minimoon_files_folder: 'minimoon_files_oorb_testset/'
+# minimoon_master_file_path: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb/minimoon_master_new.csv'
+# minimoon_master_file_path: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb_testset/minimoon_master_new_testset.csv'
+minimoon_master_file_path: 'minimoon_files_oorb_testset/minimoon_master_new_testset.csv'
+
+# detection (visible) related
+visible_files_folder: "visible_dir"
+output_df_file_name: 'initial_tests'
+
+# pure IOD related
+IOD_folder_path: "iod_results"
+error_file_dir: 'Error_files_for_IOD'
+
+# od
+od_file_dir: 'OD_results'
+
 ####################################################
 # Spacecraft Specifications
 ###################################################
-
 pixel_scale: 1.27  # arcsec/pixel
 fov: 17.80  # degrees squared
 number_of_pixels: [ 11960, 11960 ]  # height x length
@@ -26,92 +63,36 @@ time_between_frames: 31.25 # the time between consecutive frames from detection 
 patch_time: 1.6  # time for detection algo to process one patch
 patch_size: [224, 224]  # height x length in pixels
 
+
 ##################################################
 # Formation parameters
 #################################################
-orbit_file_path: 'LPF_orbit_2.csv'
-orbit_column_names: [
-  "Time", "GEO_EME_X_(km)", "GEO_EME_Y_(km)", "GEO_EME_Z_(km)",
-  "GEO_EME_Vx_(km/s)", "GEO_EME_Vy_(km/s)", "GEO_EME_Vz_(km/s)",
-  "GEO_ECLIP_X_(km)", "GEO_ECLIP_Y_(km)", "GEO_ECLIP_Z_(km)",
-  "SUN_EARTH_CO_X_(km)", "SUN_EARTH_CO_Y_(km)", "SUN_EARTH_CO_Z_(km)",
-  "MOON_SUN_EARTH_CO_X_(km)", "MOON_SUN_EARTH_CO_Y_(km)", "MOON_SUN_EARTH_CO_Z_(km)"
-]
 quasi_halo_start: 140000  # index number where the quasi-halo orbit for Lisa pathfinder starts in the dataframe
 quasi_halo_one_period_end: 247500  # index number where one 'period' of the orbit has been reached
 quasi_halo_end: 350500 # 355000  # practically  # esthetically 350500  # index number where lisa pathfinder exits quasi-halo orbit
 
 
-
 #####################################################
 # Asteroid parameters
 #####################################################
-# minimoon_files_folder: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb/'
-# minimoon_files_folder: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb_testset/'
-minimoon_files_folder: 'minimoon_files_oorb_testset/'
-minimoon_column_names: [ "Object id", "Julian Date", "Distance", "Helio q", "Helio e", "Helio i", "Helio Omega",
-                         "Helio omega", "Helio M", "Helio x", "Helio y", "Helio z", "Helio vx", "Helio vy", "Helio vz",
-                         "Geo x", "Geo y", "Geo z", "Geo vx", "Geo vy", "Geo vz", "Geo q", "Geo e", "Geo i",
-                         "Geo Omega", "Geo omega", "Geo M", "Earth x (Helio)", "Earth y (Helio)", "Earth z (Helio)",
-                         "Earth vx (Helio)", "Earth vy (Helio)", "Earth vz (Helio)", "Moon x (Helio)",
-                         "Moon y (Helio)", "Moon z (Helio)", "Moon vx (Helio)", "Moon vy (Helio)", "Moon vz (Helio)",
-                         "Synodic x", "Synodic y", "Synodic z", "Eclip Long", "sun-ast-dist", "sunearthl1-ast-dist",
-                         "phase_angle", "apparent_magnitude", "Moon Synodic x", "Moon Synodic y", "Moon Synodic z" ]
+asteroid_mass: 1.0e+5
 
 
 #######################################################
 # Visible simulation parameters
 ######################################################
-# minimoon_master_file_path: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb/minimoon_master_new.csv'
-# minimoon_master_file_path: '/media/aeromec/Seagate Desktop Drive/minimoon_files_oorb_testset/minimoon_master_new_testset.csv'
-minimoon_master_file_path: 'minimoon_files_oorb_testset/minimoon_master_new_testset.csv'
-num_spacecraft: 6
 number_of_runs: 1  # number of runs per minimoon (the formation is reinitiallized each time)
-# number_of_process: 1  # number of processes to use when usen multiprocess for parallel implementation
-output_df_file_name: 'results/initial_tests'
 number_of_rows_per_part: 10000000
 save_format: 'csv' # csv or parquet, also needs to be specified when expecting to read files
 
 
-#####################################################
-# Getting IOD data parameters
-####################################################
-visible_files_folder: "results/visible_dir"
-visible_file_columns: ['values', "total_length", 'spacecraft_1_ini_pos']
-IOD_folder_path: "results/iod_results"
-IOD_data_columns: ["EPOCH(JDTDB)", "HELIO_X(AU)", "HELIO_Y(AU)", "HELIO_Z(AU)", "HELIO_VX(AU/D)", "HELIO_VY(AU/D)",
-                   "HELIO_VZ(AU/D)", "SC_HELIO_X(AU)", "SC_HELIO_Y(AU)", "SC_HELIO_Z(AU)", "SC_HELIO_VX(AU/D)",
-                   "SC_HELIO_VY(AU/D)", "SC_HELIO_VZ(AU/D)", 'SIN_RA', 'COS_RA', 'SIN_DEC']
-IOD_data_columns_geo: ["EPOCH(JDTDB)", "GEO_X(KM)", "GEO_Y(KM)", "GEO_Z(KM)", "GEO_VX(KM/S)", "GEO_VY(KM/S)",
-                   "GEO_VZ(KM/S)", "SC_GEO_X(KM)", "SC_GEO_Y(KM)", "SC_GEO_Z(KM)", "SC_GEO_VX(KM/S)",
-                   "SC_GEO_VY(KM/S)", "SC_GEO_VZ(KM/S)", 'SIN_RA', 'COS_RA', 'SIN_DEC']
-IOD_data_columns_geo_and_phys: ["EPOCH(JDTDB)", "GEO_X(KM)", "GEO_Y(KM)", "GEO_Z(KM)", "GEO_VX(KM/S)", "GEO_VY(KM/S)",
-                   "GEO_VZ(KM/S)", "SC_GEO_X(KM)", "SC_GEO_Y(KM)", "SC_GEO_Z(KM)", "SC_GEO_VX(KM/S)",
-                   "SC_GEO_VY(KM/S)", "SC_GEO_VZ(KM/S)", 'SIN_RA', 'COS_RA', 'SIN_DEC', "SC_GEO_X(KM)_PHYS",
-                                "SC_GEO_Y(KM)_PHYS", "SC_GEO_Z(KM)_PHYS", "SC_GEO_VX(KM/S)_PHYS",
-                   "SC_GEO_VY(KM/S)_PHYS", "SC_GEO_VZ(KM/S)_PHYS", 'SIN_RA_PHYS', 'COS_RA_PHYS', 'SIN_DEC_PHYS']
-index_columns: ["run_number", "object_id", "spacecraft_number"]
-asteroid_mass: 1.0e+5
-spacecraft_mass: 1.0e+2
-run_number: 2  # only file names with this run number identified will be processed for (multi-job mpi on cluster, othewise need to use utilities.get_all_files instead in orbit_det_sim.py)
-
-
-#################################################
-# Getting number of spacecraft figure
-################################################
-spacecraft_folder: '/media/aeromec/Seagate Desktop Drive/results'
-# spacecraft_folder: 'results'
-base_filename: 'fig_num_spacecraft_data'
-
-
-
-##############################################
-# Physics-informed extreme learning machine parameters
-##############################################
+#################################################################
+# Physics-informed extreme learning machine parameters - pure IOD
+#################################################################
 seed: 42
 normalization_ratio: 1
 gaussian_std_scale: 1
-m2: 0.1
+M2: 0.1
 NUMBER_OF_OBSERVATIONS: 16
 TIME_DELTA: 0.6
 TOTAL_POINTS: 250
@@ -135,14 +116,22 @@ MAX_RHO_DOT: 0.05033557046
 DELTA_RHO: 6.68459e-8
 DELTA_RHO_DOT: 0.00167785234
 
-# Add/merge these fields into your existing config YAML.
-# The hyperparameter runner is MPI-compatible and will stop after tuning,
-# skipping normal run_IOD and run_OD when enabled.
 
-run_IOD_hyperparameter: true
-# Optional but recommended while tuning, so normal OD is not launched accidentally.
-run_OD: false
+###############################################
+# Running the PIELM IOD simulation - Testing ground
+##############################################
+dynamics: 'NBD'
+orbit: 'TBO'
+observer: 'SPACE'
+optimizer: 'CONSTRAINED_BASIN_HOPPING'
+SYSTEM_MASS_PARAMETER: 3.0404e-6
+error:
+  num_points: 1000
 
+
+###############################################
+# IOD hyperparameter tuning
+##############################################
 IOD_HYPERPARAMETER:
   enabled: true
 
@@ -193,10 +182,6 @@ IOD_HYPERPARAMETER:
     # final_pos[-2] is the final observation-arc state, matching the previous run_IOD behavior.
     final_state_index: -2
 
-    # Optional fallback only. Normally the code derives these from sigma_ra/sigma_dec/sigma_pointing/MAS_TO_DEGREE.
-    # sigma_ra_rad: 2.42406840554768e-6
-    # sigma_dec_rad: 2.42406840554768e-6
-
   # Every entry should be a list. Single-value lists are allowed.
   # M2 maps to the middle collocation layer width and is converted to LAYER_RATIOS internally.
   sweep:
@@ -218,25 +203,9 @@ IOD_HYPERPARAMETER:
 
 
 
-###############################################
-# Running the PIELM IOD simulation - Testing ground
-##############################################
-n_runs_test: 100
-dynamics: 'NBD'
-orbit: 'TBO'
-observer: 'SPACE'
-optimizer: 'CONSTRAINED_BASIN_HOPPING'
-SYSTEM_MASS_PARAMETER: 3.0404e-6
-ADD_NOISE: 1
-error_file_dir: 'Error_files_for_IOD'
-error:
-  num_points: 1000
-
-
 ###########################################
 # Attitude Coordination Parameters
 ##########################################
-
 # epoch grid to search over
 epochs:
   dt_min: 1.0   # in seconds, first time to check
@@ -269,11 +238,9 @@ ems:
   beta_zeta: 1500.0
 
 
-
 ###################################
 # Running the overall OD algorithm
 ##################################
-run_od: True
 od_diagnostics:
     log_inner_kf: True
     log_attcoord_candidates: True
@@ -283,12 +250,10 @@ od_diagnostics:
 
 base_seed: 1765220306
 num_od_runs: 1
-od_file_dir: 'OD_results'
 od_duration_days: 30
-od_max_steps: 1000
+od_max_steps: 1
 od_status_every: 1
 iod_cov_topo_std: [4.4, 2.31, 1.28e+6, 3.27e-5, 2.44e-5, 1.09]  # ra, dec, rho, ra dot, dec dot, rho dot (deg, km, deg/s, km/s)
-INCLUDE_EMS_EXCLUSION: 1
 radial_process_noise: 1.0e-15  # radial noise in RTN frame (km/s^2)^2 /s
 track_process_noise: 1.0e-15 # along track noise in RTN frame (km/s^2)^2 /s
 normal_process_noise: 1.0e-15 # normal to track noise in RTN frame (km/s^2)^2 / s
@@ -373,6 +338,69 @@ attcoord_tracking:
   # try the next-oldest detector. If all anchors fail, release and optimize freely.
   anchor_infeasible_fallback: "next_oldest"
 
+
+####################################################
+# constants
+####################################################
+AU_TO_M: 149597870691  # 1 AU in meters
+KM_TO_M: 1000
+SECONDS_PER_DAY: 86400
+MAS_TO_DEGREE: 3600000
+EARTH_RADIUS_KM: 6378.1366
+EARTH_MASS_PARAMETER: 398600.1  # km^3/s^2
+MOON_RADIUS_KM: 1738.1
+SUN_MASS: 1.989E+30
+MERCURY_MASS: 0.33e+24  # KG
+VENUS_MASS: 4.87e+24
+EARTH_MASS: 5.97e+24
+MOON_MASS: 0.073e+24
+MARS_MASS: 0.642e+24
+JUPITER_MASS: 1898.0e+24
+SATURN_MASS: 568.0e+24
+URANUS_MASS: 86.8e+24
+NEPTUNE_MASS: 102.0e+24
+GRAVITATIONAL_CONSTANT: 6.67430e-11  # m^3 kg^-1 s^-2
+EARTH_HILL_RADIUS_KM: 1.5e+6  # hill radius 0.01 au
+
+
+##############################################
+# column names
+##############################################
+#lpf halo related
+orbit_column_names: [
+  "Time", "GEO_EME_X_(km)", "GEO_EME_Y_(km)", "GEO_EME_Z_(km)",
+  "GEO_EME_Vx_(km/s)", "GEO_EME_Vy_(km/s)", "GEO_EME_Vz_(km/s)",
+  "GEO_ECLIP_X_(km)", "GEO_ECLIP_Y_(km)", "GEO_ECLIP_Z_(km)",
+  "SUN_EARTH_CO_X_(km)", "SUN_EARTH_CO_Y_(km)", "SUN_EARTH_CO_Z_(km)",
+  "MOON_SUN_EARTH_CO_X_(km)", "MOON_SUN_EARTH_CO_Y_(km)", "MOON_SUN_EARTH_CO_Z_(km)"
+]
+
+# minimoon related
+minimoon_column_names: [ "Object id", "Julian Date", "Distance", "Helio q", "Helio e", "Helio i", "Helio Omega",
+                         "Helio omega", "Helio M", "Helio x", "Helio y", "Helio z", "Helio vx", "Helio vy", "Helio vz",
+                         "Geo x", "Geo y", "Geo z", "Geo vx", "Geo vy", "Geo vz", "Geo q", "Geo e", "Geo i",
+                         "Geo Omega", "Geo omega", "Geo M", "Earth x (Helio)", "Earth y (Helio)", "Earth z (Helio)",
+                         "Earth vx (Helio)", "Earth vy (Helio)", "Earth vz (Helio)", "Moon x (Helio)",
+                         "Moon y (Helio)", "Moon z (Helio)", "Moon vx (Helio)", "Moon vy (Helio)", "Moon vz (Helio)",
+                         "Synodic x", "Synodic y", "Synodic z", "Eclip Long", "sun-ast-dist", "sunearthl1-ast-dist",
+                         "phase_angle", "apparent_magnitude", "Moon Synodic x", "Moon Synodic y", "Moon Synodic z" ]
+
+# Getting IOD data parameters related
+visible_file_columns: ['values', "total_length", 'spacecraft_1_ini_pos']
+IOD_data_columns: ["EPOCH(JDTDB)", "HELIO_X(AU)", "HELIO_Y(AU)", "HELIO_Z(AU)", "HELIO_VX(AU/D)", "HELIO_VY(AU/D)",
+                   "HELIO_VZ(AU/D)", "SC_HELIO_X(AU)", "SC_HELIO_Y(AU)", "SC_HELIO_Z(AU)", "SC_HELIO_VX(AU/D)",
+                   "SC_HELIO_VY(AU/D)", "SC_HELIO_VZ(AU/D)", 'SIN_RA', 'COS_RA', 'SIN_DEC']
+IOD_data_columns_geo: ["EPOCH(JDTDB)", "GEO_X(KM)", "GEO_Y(KM)", "GEO_Z(KM)", "GEO_VX(KM/S)", "GEO_VY(KM/S)",
+                   "GEO_VZ(KM/S)", "SC_GEO_X(KM)", "SC_GEO_Y(KM)", "SC_GEO_Z(KM)", "SC_GEO_VX(KM/S)",
+                   "SC_GEO_VY(KM/S)", "SC_GEO_VZ(KM/S)", 'SIN_RA', 'COS_RA', 'SIN_DEC']
+IOD_data_columns_geo_and_phys: ["EPOCH(JDTDB)", "GEO_X(KM)", "GEO_Y(KM)", "GEO_Z(KM)", "GEO_VX(KM/S)", "GEO_VY(KM/S)",
+                   "GEO_VZ(KM/S)", "SC_GEO_X(KM)", "SC_GEO_Y(KM)", "SC_GEO_Z(KM)", "SC_GEO_VX(KM/S)",
+                   "SC_GEO_VY(KM/S)", "SC_GEO_VZ(KM/S)", 'SIN_RA', 'COS_RA', 'SIN_DEC', "SC_GEO_X(KM)_PHYS",
+                                "SC_GEO_Y(KM)_PHYS", "SC_GEO_Z(KM)_PHYS", "SC_GEO_VX(KM/S)_PHYS",
+                   "SC_GEO_VY(KM/S)_PHYS", "SC_GEO_VZ(KM/S)_PHYS", 'SIN_RA_PHYS', 'COS_RA_PHYS', 'SIN_DEC_PHYS']
+index_columns: ["run_number", "object_id", "spacecraft_number"]
+
+
 #############################
 # Visualization relevant parameters
 ############################
@@ -402,28 +430,3 @@ opt_map:
   linewidth_2d: 1.5
   marker_size: 5
   levels: 35
-
-
-
-####################################################
-# constants
-####################################################
-AU_TO_M: 149597870691  # 1 AU in meters
-KM_TO_M: 1000
-SECONDS_PER_DAY: 86400
-MAS_TO_DEGREE: 3600000
-EARTH_RADIUS_KM: 6378.1366
-EARTH_MASS_PARAMETER: 398600.1  # km^3/s^2
-MOON_RADIUS_KM: 1738.1
-SUN_MASS: 1.989E+30
-MERCURY_MASS: 0.33e+24  # KG
-VENUS_MASS: 4.87e+24
-EARTH_MASS: 5.97e+24
-MOON_MASS: 0.073e+24
-MARS_MASS: 0.642e+24
-JUPITER_MASS: 1898.0e+24
-SATURN_MASS: 568.0e+24
-URANUS_MASS: 86.8e+24
-NEPTUNE_MASS: 102.0e+24
-GRAVITATIONAL_CONSTANT: 6.67430e-11  # m^3 kg^-1 s^-2
-EARTH_HILL_RADIUS_KM: 1.5e+6  # hill radius 0.01 au

@@ -63,9 +63,9 @@ def run_runs_x_minimoons_MPI(minimoon_master, config):
     num_sc = int(config['num_spacecraft'])
 
     # ------------- output directory -----------
-    base_dir = os.path.dirname(base_out) or "."
+    base_dir = config['top_dir']
     base_name = os.path.basename(base_out)
-    out_dir = os.path.join(base_dir, "visible_dir", f"spacecraft_{num_sc}")
+    out_dir = os.path.join(base_dir, config["visible_files_folder"])
 
     if rank == 0:
         os.makedirs(out_dir, exist_ok=True)
@@ -239,22 +239,23 @@ def run_sim_runnumbers_MPI_getIOD(config):
 
     # ---------- paths / config ----------
     num_sc = int(config["num_spacecraft"])
-    vis_root = os.path.abspath(config["visible_files_folder"])
-    vis_dir = os.path.join(vis_root, f"spacecraft_{num_sc}")  # INPUTS
-    iod_root = os.path.abspath(config["IOD_folder_path"])
-    iod_dir = os.path.join(iod_root, f"spacecraft_{num_sc}")  # OUTPUTS
+    top_dir = os.path.abspath(config['top_dir'])
+    vis_dir = os.path.abspath(os.path.join(top_dir, config["visible_files_folder"]))
+    iod_dir = os.path.abspath(os.path.join(top_dir, config["IOD_folder_path"]))
+    data_done_dir = os.path.join(iod_dir, "data_done")
     save_format = config.get("save_format", "csv")  # 'csv' | 'parquet' | 'both'
 
     include_ems_exclusion = bool(config.get("INCLUDE_EMS_EXCLUSION", False))
 
     # Master CSV + per-row done markers (for resumability)
     master_name = "MASTER_IOD.csv"
-    master_path = os.path.join(iod_dir, master_name)
-    master_done_dir = os.path.join(iod_dir, "master_rows")
+    master_path = os.path.join(top_dir, master_name)
+    master_done_dir = os.path.join(iod_dir, "master_rows_done")
 
     if rank == 0:
         os.makedirs(iod_dir, exist_ok=True)
         os.makedirs(master_done_dir, exist_ok=True)
+        os.makedirs(data_done_dir, exist_ok=True)
         if not os.path.isdir(vis_dir):
             raise FileNotFoundError(f"Visible files dir not found: {vis_dir}")
     comm.Barrier()
@@ -401,14 +402,14 @@ def run_sim_runnumbers_MPI_getIOD(config):
         return os.path.splitext(os.path.basename(path))[0]
 
     def done_marker_path(basename):
-        return os.path.join(iod_dir, f".done_{basename}.json")
+        return os.path.join(data_done_dir, f".done_{basename}.json")
 
     def outputs_for_source_exist(basename):
         counts = {}
         if save_format in ("csv", "both"):
-            counts["csv"] = len(glob.glob(os.path.join(iod_dir, f"*_{basename}.csv")))
+            counts["csv"] = len(glob.glob(os.path.join(data_done_dir, f"*_{basename}.csv")))
         if save_format in ("parquet", "both"):
-            counts["parquet"] = len(glob.glob(os.path.join(iod_dir, f"*_{basename}.parquet")))
+            counts["parquet"] = len(glob.glob(os.path.join(data_done_dir, f"*_{basename}.parquet")))
         return counts
 
     def row_outputs_exist(base_path):
@@ -560,7 +561,7 @@ def run_sim_runnumbers_MPI_getIOD(config):
                 idx0 = int(detected_minimoon["index_used"])
 
                 file_name = f"minimoon-{mm_id}_sc-{int(sc_id)}_index-{idx0}_{src_base}"
-                base_path = os.path.join(iod_dir, file_name)
+                base_path = os.path.join(data_done_dir, file_name)
                 row_uid = file_name
 
                 if master_row_already_done(row_uid) and row_outputs_exist(base_path):
@@ -845,7 +846,8 @@ def run_IOD(config):
 
     # Paths
     iod_dir = util._iod_dir(config)
-    master_fn = os.path.join(iod_dir, "MASTER_IOD.csv")
+    top_dir = os.path.abspath(config['top_dir'])
+    master_fn = os.path.join(top_dir, "MASTER_IOD.csv")
 
     if rank == 0 and not os.path.exists(master_fn):
         print(f"[Stage: IOD Solve] No MASTER_IOD.csv at {master_fn} → skip")
@@ -1023,7 +1025,7 @@ def run_IOD(config):
                 import astropy.units as u
 
                 # Fixed parameters you provided
-                m_2 = config['m2']
+                m_2 = config['M2']
                 m_12 = (1.0 - m_2) / 2.0
 
                 parameters = {
@@ -1076,7 +1078,7 @@ def run_IOD(config):
                 raise NotImplementedError("Add other solver branches as in your code.")
 
             # ------- Compute metrics & write unique per-row result file -------
-            out_dir = config["error_file_dir"]
+            out_dir = os.path.join(iod_dir, config["error_file_dir"])
             os.makedirs(out_dir, exist_ok=True)
 
             # Unique filename per MASTER row (avoid overwrite)
@@ -1906,7 +1908,9 @@ def run_OD(config_global):
 
     # Paths & MASTER
     iod_dir = util._iod_dir(config_global)
-    master_fn = os.path.join(iod_dir, "MASTER_IOD.csv")
+    top_dir = os.path.abspath(config_global['top_dir'])
+    od_dir = os.path.join(top_dir, config_global['od_file_dir'])
+    master_fn = os.path.join(top_dir, "MASTER_IOD.csv")
     if rank == 0 and not os.path.exists(master_fn):
         print(f"[Stage: OD] No MASTER_IOD.csv at {master_fn} -> skip")
     comm.Barrier()
@@ -1933,7 +1937,7 @@ def run_OD(config_global):
     my_indices = list(range(n_rows))[rank::size]
 
     # Resume markers (commit-after-write; separate dir from Stage 3)
-    od_done_dir = os.path.join(iod_dir, "iod_stage4_od_done")
+    od_done_dir = os.path.join(od_dir, "od_stage4_od_done")
     if rank == 0:
         os.makedirs(od_done_dir, exist_ok=True)
     comm.Barrier()
@@ -2755,8 +2759,8 @@ def run_OD(config_global):
             "safety_buffer_sec": checkpoint_cfg.get("safety_buffer_sec", 900.0),
         }
 
-    outer_dir = diag_cfg.get("outer_loop_dir", os.path.join(iod_dir, "od_outer_logs"))
-    detail_root = diag_cfg.get("detail_root_dir", os.path.join(iod_dir, "od_run_details"))
+    outer_dir = diag_cfg.get("outer_loop_dir", os.path.join(od_dir, "od_outer_logs"))
+    detail_root = diag_cfg.get("detail_root_dir", os.path.join(od_dir, "od_run_details"))
     os.makedirs(outer_dir, exist_ok=True)
     os.makedirs(detail_root, exist_ok=True)
 
@@ -2801,7 +2805,7 @@ def run_OD(config_global):
     # Per-rank OD master files: durable, low-memory OD summary output for MPI/HPC.
     od_master_cfg = config_global.get("od_master", {})
     od_master_enabled = bool(od_master_cfg.get("enabled", True))
-    od_master_dir = od_master_cfg.get("dir", os.path.join(iod_dir, "od_master_rows"))
+    od_master_dir = od_master_cfg.get("dir", os.path.join(od_dir, "od_master_rows"))
     od_master_filename_template = str(od_master_cfg.get("rank_filename_template", "od_master_rank_{rank}.csv"))
     od_master_rank_path = os.path.join(od_master_dir, od_master_filename_template.format(rank=rank))
     od_master_merge_at_end = bool(od_master_cfg.get("merge_into_master_at_end", True))
@@ -9013,6 +9017,7 @@ def run_overall_OD(master, config):
     # Stage 2: IOD Data Generation
     # -------------------------
     iod_dir = util._iod_dir(config)
+    top_dir = os.path.abspath(config['top_dir'])
     save_format = config.get('save_format', 'csv')
 
     if rank == 0:
@@ -9045,7 +9050,7 @@ def run_overall_OD(master, config):
     # -------------------------
     # Optional Stage 3H: IOD hyperparameter tuning only
     # -------------------------
-    if bool(config.get("run_IOD_hyperparameter", False)) or bool((config.get("IOD_HYPERPARAMETER", {}) or {}).get("enabled", False)):
+    if bool(config.get("run_IOD_hyperparameter", False)):
         if rank == 0:
             print("[Stage: IOD Hyperparameter] RUN — tuning mode enabled; normal IOD/OD stages will be skipped after tuning.", flush=True)
         run_IOD_hyperparameter(config)
@@ -9056,12 +9061,12 @@ def run_overall_OD(master, config):
     # Stage 3: Running IOD (skip if MASTER rows already committed)
     # -----------------------
     if rank == 0:
-        master_path = os.path.join(iod_dir, "MASTER_IOD.csv")
+        master_path = os.path.join(top_dir, "MASTER_IOD.csv")
         stage3_done_dir = os.path.join(iod_dir, "iod_stage3_done")
 
         if not os.path.exists(master_path):
             do_stage3 = False
-            msg3 = f"[Stage: IOD Solve] No MASTER_IOD.csv in {iod_dir} → skip"
+            msg3 = f"[Stage: IOD Solve] No MASTER_IOD.csv in {top_dir} → skip"
         else:
             # Derive per-row UIDs exactly like run_IOD and see how many are done
 
@@ -9113,7 +9118,8 @@ def run_overall_OD(master, config):
     # -----------------
     # Stage 4: Run the ATT.COOR. + OD Pipeline
     # ------------------
-    run_OD(config)
+    if config['run_OD']:
+        run_OD(config)
 
     return
 

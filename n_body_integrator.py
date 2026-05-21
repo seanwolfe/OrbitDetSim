@@ -267,7 +267,7 @@ def integrate_n_body(object_state, epoch, end_time, time_interval, type):
         10: config['SUN_MASS'], 1: config['MERCURY_MASS'], 2: config['VENUS_MASS'],
         399: config['EARTH_MASS'], 4: config['MARS_MASS'], 5: config['JUPITER_MASS'], 6: config['SATURN_MASS'],
         7: config['URANUS_MASS'], 8: config['NEPTUNE_MASS'], 301: config['MOON_MASS'],
-        "ASTEROID": config['asteroid_mass'], "SPACECRAFT": config['spacecraft_mass']  # Arbitrary mass
+        "ASTEROID": config['asteroid_mass'], "SPACECRAFT": config['mass']  # Arbitrary mass
     }
 
 
