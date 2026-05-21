@@ -135,6 +135,87 @@ MAX_RHO_DOT: 0.05033557046
 DELTA_RHO: 6.68459e-8
 DELTA_RHO_DOT: 0.00167785234
 
+# Add/merge these fields into your existing config YAML.
+# The hyperparameter runner is MPI-compatible and will stop after tuning,
+# skipping normal run_IOD and run_OD when enabled.
+
+run_IOD_hyperparameter: true
+# Optional but recommended while tuning, so normal OD is not launched accidentally.
+run_OD: false
+
+IOD_HYPERPARAMETER:
+  enabled: true
+
+  # Number of repeated stochastic trials per data file / hyperparameter combo.
+  # Keep at 1 initially; increase if you want ANOVA to separate random-seed effects.
+  trials_per_combo: 1
+
+  subset:
+    # Options:
+    #   sample          -> create MASTER_IOD_TUNING.csv and MASTER_IOD_TEST.csv from MASTER_IOD.csv
+    #   explicit_master -> use an already-created tuning master file
+    mode: sample
+
+    source_master_file: MASTER_IOD.csv
+    tuning_master_file: MASTER_IOD_TUNING.csv
+    test_master_file: MASTER_IOD_TEST.csv
+
+    # Set this for the tuning subset size.
+    n_tuning_cases: 2
+
+    # Options:
+    #   complement -> all rows not in tuning become test
+    #   sample     -> draw n_test_cases from rows not in tuning
+    test_mode: complement
+    # n_test_cases: 100   # Only used when test_mode: sample
+
+    random_seed: 12345
+
+    # If true, previously created MASTER_IOD_TUNING.csv / MASTER_IOD_TEST.csv are reused.
+    # This ensures all hyperparameter candidates use the same files across reruns.
+    reuse_existing_subset_files: true
+
+  output:
+    # Relative paths are placed under util._iod_dir(config), e.g. IOD_folder_path/spacecraft_N/...
+    output_dir: iod_hyperparameter_results
+    per_run_dir: per_run_iod_files
+    metadata_file: IOD_HYPERPARAMETER_RESULTS.csv
+    save_per_run_iod_files: true
+
+    # If false, failures are considered completed and are not retried on resume.
+    retry_failed: false
+
+  metrics:
+    # PIELM_basinhopping_w_range_nbody.py trains on the _PHYS columns, so metrics use those data.
+    measurement_variant: physical
+
+    # final_pos[-1] is the artificial collocation-extension endpoint when TIME_DELTA > 0.
+    # final_pos[-2] is the final observation-arc state, matching the previous run_IOD behavior.
+    final_state_index: -2
+
+    # Optional fallback only. Normally the code derives these from sigma_ra/sigma_dec/sigma_pointing/MAS_TO_DEGREE.
+    # sigma_ra_rad: 2.42406840554768e-6
+    # sigma_dec_rad: 2.42406840554768e-6
+
+  # Every entry should be a list. Single-value lists are allowed.
+  # M2 maps to the middle collocation layer width and is converted to LAYER_RATIOS internally.
+  sweep:
+    M2: [0.1]
+    TIME_DELTA: [0.6]
+    TOTAL_POINTS: [250]
+    HIDDEN_DIMENSION: [250]
+    PHYSICS_WEIGHT: [1.0e+3]
+    LAMBDA_DIST: [1.0e-2]
+    WEIGHT_SCALE_FACTOR: [1.0e-2]
+    NUMBER_OF_ITERATIONS: [2]
+    TEMPERATURE: [1.0e+8]
+    MIN_RHO: [0.0006684587122]
+    MAX_RHO: [0.06684587122]
+    MIN_RHO_DOT: [-0.05033557046]
+    MAX_RHO_DOT: [0.05033557046]
+    DELTA_RHO: [6.68459e-8]
+    DELTA_RHO_DOT: [0.00167785234]
+
 
 
 ###############################################
