@@ -1,18 +1,22 @@
 ##################################
 # Overall sim parameters
 #############################
-num_spacecraft: 3
+num_spacecraft: 4
 ADD_NOISE: 1
 INCLUDE_EMS_EXCLUSION: 1
-run_IOD_hyperparameter: False
-run_OD: True
+run_IOD_hyperparameter: True
+run_OD: False
+OD_LOAD_BALANCING:
+  redistribute_unfinished_on_start: true
+  repair_done_from_completed_progress: true
+  require_nonempty_outer_for_progress_repair: true
 
 
 ###################################
 # paths & file names
 ####################################
 # top-level dir for results
-top_dir: "results_3"
+top_dir: "results_4"
 
 # LPF halo related
 orbit_file_path: 'LPF_orbit_2.csv'
@@ -166,9 +170,9 @@ IOD_HYPERPARAMETER:
 
   output:
     # Relative paths are placed under util._iod_dir(config), e.g. IOD_folder_path/spacecraft_N/...
-    output_dir: iod_hyperparameter_results
-    per_run_dir: per_run_iod_files
-    metadata_file: IOD_HYPERPARAMETER_RESULTS.csv
+    output_dir: 'iod_hyperparameter_results'
+    per_run_dir: 'per_run_iod_files'
+    metadata_file: 'IOD_HYPERPARAMETER_RESULTS.csv'
     save_per_run_iod_files: true
 
     # If false, failures are considered completed and are not retried on resume.
@@ -184,8 +188,9 @@ IOD_HYPERPARAMETER:
 
   # Every entry should be a list. Single-value lists are allowed.
   # M2 maps to the middle collocation layer width and is converted to LAYER_RATIOS internally.
+  # all non-swept parameters are taken from the pielm iod part of the config
   sweep:
-    M2: [0.1]
+    M2: [0.1, 0.9]
     TIME_DELTA: [0.6]
     TOTAL_POINTS: [250]
     HIDDEN_DIMENSION: [250]
