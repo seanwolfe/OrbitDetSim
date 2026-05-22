@@ -245,13 +245,13 @@ od_diagnostics:
     log_inner_kf: True
     log_attcoord_candidates: True
     log_optimizer_history: True
-    outer_loop_dir: "results/od_res/outer_loop"
-    detail_root_dir: "results/od_res/detailed"
+    outer_loop_dir: "outer_loop"
+    detail_root_dir: "detailed"
 
 base_seed: 1765220306
 num_od_runs: 1
 od_duration_days: 30
-od_max_steps: 1
+od_max_steps: 2
 od_status_every: 1
 iod_cov_topo_std: [4.4, 2.31, 1.28e+6, 3.27e-5, 2.44e-5, 1.09]  # ra, dec, rho, ra dot, dec dot, rho dot (deg, km, deg/s, km/s)
 radial_process_noise: 1.0e-15  # radial noise in RTN frame (km/s^2)^2 /s

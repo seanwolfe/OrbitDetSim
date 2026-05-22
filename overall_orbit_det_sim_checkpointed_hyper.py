@@ -2759,8 +2759,8 @@ def run_OD(config_global):
             "safety_buffer_sec": checkpoint_cfg.get("safety_buffer_sec", 900.0),
         }
 
-    outer_dir = diag_cfg.get("outer_loop_dir", os.path.join(od_dir, "od_outer_logs"))
-    detail_root = diag_cfg.get("detail_root_dir", os.path.join(od_dir, "od_run_details"))
+    outer_dir = os.path.join(od_dir, config_global['od_diagnostics']['outer_loop_dir'])
+    detail_root = os.path.join(od_dir, config_global['od_diagnostics']['detail_root_dir'])
     os.makedirs(outer_dir, exist_ok=True)
     os.makedirs(detail_root, exist_ok=True)
 
