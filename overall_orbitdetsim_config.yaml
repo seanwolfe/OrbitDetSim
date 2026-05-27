@@ -289,7 +289,7 @@ od_stop:
   nis_mean_max: 10.0
   nis_min_count: 5
 
-  required_consecutive_steps: 25
+  required_consecutive_steps: 10
 
 od_checkpoint:
   enabled: true

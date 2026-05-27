@@ -11,12 +11,12 @@ class Asteroid:
         self.orbit = util.read_csv_comma_or_space(file_path)
         temp_x = self.orbit['Synodic x']
         temp_y = self.orbit['Synodic y']
-        moon_temp_x = self.orbit['Moon Synodic x']
-        moon_temp_y = self.orbit['Moon Synodic y']
+        # moon_temp_x = self.orbit['Moon Synodic x']
+        # moon_temp_y = self.orbit['Moon Synodic y']
         self.orbit['Synodic x'] = temp_x
         self.orbit['Synodic y'] = temp_y
-        self.orbit['Moon Synodic x'] = moon_temp_x
-        self.orbit['Moon Synodic y'] = moon_temp_y
+        # self.orbit['Moon Synodic x'] = moon_temp_x
+        # self.orbit['Moon Synodic y'] = moon_temp_y
         self.start_index = int(ini_index)  # point of min apparant magnitude in traj
         self.position = np.array([self.orbit['Synodic x'].iloc[self.start_index], self.orbit['Synodic y'].iloc[self.start_index],
                                   self.orbit['Synodic z'].iloc[self.start_index]])
