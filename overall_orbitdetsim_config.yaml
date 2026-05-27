@@ -343,6 +343,8 @@ attcoord_tracking:
   # try the next-oldest detector. If all anchors fail, release and optimize freely.
   anchor_infeasible_fallback: "next_oldest"
 
+min_attcoord_points: 2  # minimum lookahead to consider doing attcoord (for edge cases near time limit)
+
 
 ####################################################
 # constants
